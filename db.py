@@ -10,6 +10,62 @@ from pathlib import Path
 
 from config import load_seed
 
+# Bracketed prompt numbers and the STEP 10 keys that survived the owner's
+# prompt file. Stored as text. INSERT OR IGNORE, so a value the owner already
+# changed is left alone. fomo_handle stays in settings.seed.json only.
+AGENT_NAMES = ("scanner", "auditor", "analyst", "executor", "risk")
+
+SETTINGS_DEFAULTS = {
+    "analyst_mode": "jev",
+    "rpc_url": "https://api.mainnet-beta.solana.com",
+    "agents_enabled": "0",
+    "mode": "PAPER",
+    # scanner — STEP 10
+    "min_liquidity_usd": "40000",
+    "max_top10_pct": "25",
+    "max_h1_change_pct": "80",
+    "poll_s": "60",
+    "min_pool_age_min": "10",
+    "max_wait_min": "60",
+    "runner_h24_pct": "300",
+    # auditor — STEP 10, plus the retry brackets in the auditor edge cases.
+    # The prompt cuts off at "max_delegated_acc"; layer 8's bracket is [10].
+    "auditor_enabled": "true",
+    "max_dev_pct": "5",
+    "min_lp_locked_pct": "99",
+    "max_bundled": "5",
+    "max_delegated_accounts": "10",
+    "audit_retries": "3",
+    "audit_retry_s": "2",
+    # analyst brackets
+    "state_max_chars": "3000",
+    "alive_6h_min": "0.70",
+    "organic_min": "0.65",
+    "chase_max": "0.30",
+    "score_min": "70",
+    # executor — the agent section is missing from the prompt file.
+    # These match the surviving STEP 11 sizing paragraph:
+    # stack $200 -> 8% = $16 -> under $47.50 -> bump sends $47.50;
+    # pool liquidity $40,000 caps size at $800 (2% of the pool).
+    "stack_usd": "200",
+    "stack_pct": "8",
+    "min_ticket_usd": "47.50",
+    "undersize": "bump",
+    "max_pool_pct": "2",
+    # risk — STEP 4 poll, the exit paragraph, and the test cases that survived
+    # (+25% arms the trail, 13% off the top exits, -6.1% stops, 3h times out).
+    "stop_pct": "6",
+    "trail_arm_pct": "25",
+    "trail_pct": "13",
+    "timeout_h": "3",
+    "risk_poll_s": "15",
+    "no_price_polls": "4",
+    "rpc_backoff_s": "30",
+    "sold_remind_min": "2",
+    # STEP 4, api.py candle poll. The endpoint itself is not this step.
+    "api_poll_s": "60",
+}
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS coins (
     mint TEXT PRIMARY KEY,
@@ -191,6 +247,11 @@ def init_db() -> None:
     try:
         conn.executescript(_SCHEMA)
         now = time.time()
+        for key, value in SETTINGS_DEFAULTS.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, _setting_text(value), now),
+            )
         for key, value in load_seed().items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
@@ -244,6 +305,64 @@ def set_setting(key: str, value: str, who: str | None = None) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    rows = query("SELECT value FROM settings WHERE key = ?", (key,))
+    if rows and rows[0]["value"] is not None:
+        return rows[0]["value"]
+    if key in SETTINGS_DEFAULTS:
+        return SETTINGS_DEFAULTS[key]
+    return default
+
+
+def get_float(key: str) -> float:
+    return float(get_setting(key) or 0)
+
+
+def flag_on(key: str) -> bool:
+    return str(get_setting(key, "")).strip().lower() in {"1", "true", "on", "yes"}
+
+
+def agents_enabled() -> bool:
+    if os.environ.get("DESK_AGENTS") == "1":
+        return True
+    try:
+        return get_setting("agents_enabled", "0") == "1"
+    except sqlite3.Error:
+        return False
+
+
+def beat(agent: str, ts: float | None = None) -> None:
+    now = time.time() if ts is None else ts
+    execute(
+        """
+        INSERT INTO heartbeats (agent, ts) VALUES (?, ?)
+        ON CONFLICT(agent) DO UPDATE SET ts = excluded.ts
+        """,
+        (agent, now),
+    )
+
+
+def heartbeat_ages(now: float | None = None) -> dict:
+    """Seconds since each agent's last beat. None if that agent has never beaten."""
+    now = time.time() if now is None else now
+    ages: dict[str, float | None] = {name: None for name in AGENT_NAMES}
+    for row in query("SELECT agent, ts FROM heartbeats"):
+        if row["ts"] is None:
+            continue
+        ages[str(row["agent"])] = max(0.0, now - float(row["ts"]))
+    return ages
+
+
+def record_activity(ts, kind, mint, agent, title, subtitle, value) -> None:
+    execute(
+        """
+        INSERT INTO activity (ts, kind, mint, agent, title, subtitle, value)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (ts, kind, mint, agent, title, subtitle, None if value is None else str(value)),
+    )
 
 
 def db_status() -> dict:

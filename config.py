@@ -59,6 +59,46 @@ def _file_secrets() -> dict[str, str]:
     return found
 
 
+def install_secret_redaction() -> None:
+    """Drop a logging filter that redacts secret env values if they ever appear."""
+    import logging
+
+    class _Redact(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            secrets = []
+            for key in ("TYPESAFE_API_KEY", "APP_TOKEN", "VAPID_PRIVATE_KEY", "TG_TOKEN"):
+                value = os.environ.get(key)
+                if value:
+                    secrets.append(value)
+            if not secrets:
+                return True
+
+            def scrub(text: str) -> str:
+                for secret in secrets:
+                    if secret in text:
+                        text = text.replace(secret, "[REDACTED]")
+                return text
+
+            record.msg = scrub(record.getMessage())
+            record.args = ()
+            if record.exc_text:
+                record.exc_text = scrub(record.exc_text)
+            return True
+
+    # A filter on the root logger does not run for a child logger that has
+    # its own handler. Wrap Logger.handle so every record is scrubbed first.
+    if getattr(logging.Logger, "_desk_redact", False):
+        return
+    original = logging.Logger.handle
+
+    def handle(self, record):
+        _Redact().filter(record)
+        return original(self, record)
+
+    logging.Logger.handle = handle
+    logging.Logger._desk_redact = True
+
+
 def load_secrets() -> dict[str, str | None]:
     """Environment wins over the secrets file. Missing keys are None.
 

@@ -68,6 +68,8 @@ DEXSCREENER_SELECT = "pair.dexId == 'pumpswap'; if several, max pair.liquidity.u
 DEXSCREENER = {
     "pairAddress": "pairAddress",
     "dexId": "dexId",
+    "baseToken.name": "baseToken.name",
+    "baseToken.symbol": "baseToken.symbol",
     "priceUsd": "priceUsd",  # string in this sample, e.g. "0.00003086"
     "liquidity.usd": "liquidity.usd",
     "marketCap": "marketCap",
@@ -90,6 +92,10 @@ DEXSCREENER = {
 
 RUGCHECK_REPORT = {
     "creator": "creator",
+    "creatorBalance": "creatorBalance",
+    "topHolders": "topHolders",
+    "tokenMeta.name": "tokenMeta.name",
+    "tokenMeta.symbol": "tokenMeta.symbol",
     # There is no markets[].pool key. The market/pool id is `pubkey`.
     "markets[].pool": None,
     "markets[].pool_key": "markets[].pubkey",

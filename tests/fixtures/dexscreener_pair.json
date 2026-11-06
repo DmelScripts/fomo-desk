@@ -1,0 +1,58 @@
+[
+  {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/gwc8hl8vcgmnmg3n9pc4tmwafyiwpuoxvkrrhzdvzyjf",
+    "pairAddress": "GWc8HL8vCGMnmg3n9pC4tmWafYiWpuoxvKrrhzDVZyJf",
+    "baseToken": {
+      "address": "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn",
+      "name": "Labs",
+      "symbol": "LABS"
+    },
+    "quoteToken": {
+      "address": "So11111111111111111111111111111111111111112",
+      "name": "Wrapped SOL",
+      "symbol": "SOL"
+    },
+    "priceNative": "0.0000003420",
+    "priceUsd": "0.00003086",
+    "txns": {
+      "m5": {
+        "buys": 268,
+        "sells": 240
+      },
+      "h1": {
+        "buys": 268,
+        "sells": 240
+      },
+      "h6": {
+        "buys": 268,
+        "sells": 240
+      },
+      "h24": {
+        "buys": 268,
+        "sells": 240
+      }
+    },
+    "volume": {
+      "h24": 16786.6,
+      "h6": 16786.6,
+      "h1": 16786.6,
+      "m5": 16786.6
+    },
+    "priceChange": {
+      "m5": -18.51,
+      "h1": -18.51,
+      "h6": -18.51,
+      "h24": -18.51
+    },
+    "liquidity": {
+      "usd": 12489.45,
+      "base": 228058120,
+      "quote": 60.4171
+    },
+    "fdv": 30823,
+    "marketCap": 30823,
+    "pairCreatedAt": 1793971527000
+  }
+]

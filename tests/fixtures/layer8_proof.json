@@ -1,0 +1,22 @@
+{
+  "token": {
+    "program": "Token",
+    "http_ok": true,
+    "http_status": 200,
+    "ms": 1305,
+    "transport_error": null,
+    "rpc_error": null,
+    "account_count": 0,
+    "result_type": "list"
+  },
+  "token2022": {
+    "program": "Token-2022",
+    "http_ok": true,
+    "http_status": 200,
+    "ms": 2140,
+    "transport_error": null,
+    "rpc_error": null,
+    "account_count": 354,
+    "result_type": "list"
+  }
+}

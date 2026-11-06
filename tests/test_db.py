@@ -160,10 +160,12 @@ class TestDb(unittest.TestCase):
     def test_settings_seed_does_not_overwrite(self):
         db.init_db()
         before = db.query("SELECT key, value FROM settings ORDER BY key")
-        self.assertEqual(
-            [row["key"] for row in before],
-            ["analyst_mode", "fomo_handle", "rpc_url"],
-        )
+        keys = [row["key"] for row in before]
+        self.assertEqual(keys, sorted(set(keys)))
+        self.assertIn("fomo_handle", keys)
+        self.assertIn("analyst_mode", keys)
+        self.assertIn("rpc_url", keys)
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
         db.execute(
             "UPDATE settings SET value = ? WHERE key = ?",
             ("kept", "fomo_handle"),

@@ -1,1 +1,1 @@
-"""Trading-desk agents. Implementations come after STEP 3."""
+"""Five desk agents. Importing this package does not start them."""

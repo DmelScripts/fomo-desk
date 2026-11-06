@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,7 +11,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from db import db_status, init_db
+from config import install_secret_redaction
+from db import agents_enabled, db_status, heartbeat_ages, init_db
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 _INDEX_PATHS = {"/", "/index.html"}
@@ -69,7 +72,19 @@ class SecurityHeaders:
 async def lifespan(_app: FastAPI):
     ensure_data_dir()
     init_db()
-    yield
+    install_secret_redaction()
+    agent_task = None
+    # Default deploy keeps the five agents off so nothing calls Jev or RPC.
+    if agents_enabled():
+        from main import run_desk
+        agent_task = asyncio.create_task(run_desk())
+    try:
+        yield
+    finally:
+        if agent_task is not None:
+            agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await agent_task
 
 
 app = FastAPI(title="desk", lifespan=lifespan)
@@ -78,7 +93,13 @@ app.add_middleware(SecurityHeaders)
 
 @app.get("/health")
 def health():
-    return {"ok": True, "step": 4, "db": db_status()}
+    return {
+        "ok": True,
+        "step": 5,
+        "db": db_status(),
+        "agents_enabled": agents_enabled(),
+        "heartbeats": heartbeat_ages(),
+    }
 
 
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
