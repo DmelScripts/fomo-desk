@@ -213,28 +213,67 @@ class Analyst:
             },
         }
         timeout = db.get_float("timeout_s") or 10
-        last = None
-        for attempt in (1, 2):
-            try:
-                last = await self.desk.http.post_json(
-                    JEV_URL, body,
-                    headers={"Authorization": f"Bearer {secret}"},
-                    timeout=timeout,
-                )
-            except Exception as exc:
-                if "429" in str(exc):
-                    log.warning("jev 429")
-                    return None
+
+        async def post():
+            return await self.desk.http.post_json(
+                JEV_URL, body,
+                headers={"Authorization": f"Bearer {secret}"},
+                timeout=timeout,
+            )
+
+        try:
+            last = await post()
+        except Exception as exc:
+            if _is_429(None, exc):
+                last = await self._hold_429(post)
+            else:
                 last = None
-            if isinstance(last, dict) and last.get("error", {}).get("code") == 429:
-                log.warning("jev 429")
-                return None
-            if isinstance(last, dict) and last.get("answers"):
-                return last
-            if attempt == 1:
-                await _pause(JEV_RETRY_S)
+        else:
+            if _is_429(last, None):
+                last = await self._hold_429(post)
+        if isinstance(last, dict) and last.get("answers"):
+            return last
+        # One retry after 2s for a non-429 HTTP error or a body with no answers.
+        # A 429 that already used its 60s hold is not retried again here.
+        if last is not None and _is_429(last, None):
+            return None
+        await self._pause(JEV_RETRY_S)
+        try:
+            last = await post()
+        except Exception as exc:
+            if _is_429(None, exc):
+                last = await self._hold_429(post)
+            else:
+                last = None
+        else:
+            if _is_429(last, None):
+                last = await self._hold_429(post)
+        if isinstance(last, dict) and last.get("answers"):
+            return last
         log.warning("jev request failed")
         return None
+
+    async def _hold_429(self, post) -> dict | None:
+        """Keep the coin queued until it gets through, or 60s passes."""
+        started = self.desk.now()
+        while True:
+            if self.desk.now() - started >= JEV_QUEUE_S:
+                log.warning("jev 429 held %ss", JEV_QUEUE_S)
+                return {"error": {"code": 429}}
+            remaining = JEV_QUEUE_S - (self.desk.now() - started)
+            await self._pause(min(JEV_RETRY_S, remaining))
+            try:
+                result = await post()
+            except Exception as exc:
+                if _is_429(None, exc):
+                    continue
+                return None
+            if _is_429(result, None):
+                continue
+            return result if isinstance(result, dict) else None
+
+    async def _pause(self, seconds: float) -> None:
+        await self.desk.sleep(seconds)
 
     def _store(self, decision: dict) -> None:
         answers = decision["answers"]
@@ -259,9 +298,15 @@ class Analyst:
         )
 
 
-async def _pause(seconds: float) -> None:
-    import asyncio
-    await asyncio.sleep(seconds)
+def _is_429(result, exc: BaseException | None) -> bool:
+    if exc is not None and "429" in str(exc):
+        return True
+    if not isinstance(result, dict):
+        return False
+    error = result.get("error")
+    if isinstance(error, dict) and error.get("code") == 429:
+        return True
+    return result.get("status") == 429
 
 
 def _settings() -> dict[str, float]:

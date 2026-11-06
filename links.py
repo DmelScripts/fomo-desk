@@ -1,4 +1,10 @@
-"""THE ONLY place FOMO URLs are built (STEP 6, non-negotiable)."""
+"""THE ONLY place FOMO URLs are built (STEP 6, non-negotiable).
+
+The spec writes these as raw f-strings, so the query is not percent-encoded
+and the parameter order is fixed. r=savipww is on every coin and profile
+URL. An unknown chain is logged and replaced with SIGNUP_URL, which carries
+the referral as /r/savipww. Nothing here shortens or wraps the URL.
+"""
 import logging
 
 log = logging.getLogger("links")

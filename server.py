@@ -95,7 +95,7 @@ app.add_middleware(SecurityHeaders)
 def health():
     return {
         "ok": True,
-        "step": 5,
+        "step": 6,
         "db": db_status(),
         "agents_enabled": agents_enabled(),
         "heartbeats": heartbeat_ages(),

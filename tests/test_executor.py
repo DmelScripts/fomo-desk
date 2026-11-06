@@ -68,8 +68,10 @@ class TestExecutor(unittest.TestCase):
         db.execute(
             "UPDATE positions SET closed_at = 1, exit_reason = 'stop' WHERE mode = 'PAPER'"
         )
-        self.assertTrue(set_mode("LIVE", typed="LIVE"))
+        # One closed PAPER position is not a full PAPER night. LIVE stays shut.
+        self.assertFalse(set_mode("LIVE", typed="LIVE"))
         self.assertFalse(set_mode("LIVE", typed="live"))
+        self.assertEqual(db.get_setting("mode"), "PAPER")
         db.set_setting("mode", "LIVE", "test")
         live_notifier = Notifier(mode="LIVE")
         live = Executor(Desk(http=None, notifier=live_notifier))
@@ -77,9 +79,10 @@ class TestExecutor(unittest.TestCase):
         live_result = asyncio.run(live.handle({
             "mint": "OtherMint111", "symbol": "NEW", "price": 1, "liquidity_usd": 50000,
         }))
-        self.assertEqual(live_result["status"], "sent")
-        self.assertEqual(live_result["mode"], "LIVE")
+        self.assertEqual(live_result["status"], "skipped")
+        self.assertEqual(live_result["reason"], "LIVE locked")
+        self.assertEqual(live_result["mode"], "PAPER")
         after = db.query("SELECT COUNT(*) AS n FROM positions")[0]["n"]
         self.assertEqual(after, before)
-        self.assertEqual(live_notifier.pushes[0]["url"], links.coin_url("OtherMint111", "solana"))
-        self.assertFalse(live_notifier.pushes[0]["title"].startswith("PAPER"))
+        self.assertEqual(live_notifier.pushes, [])
+        self.assertEqual(live_result["link"], links.coin_url("OtherMint111", "solana"))

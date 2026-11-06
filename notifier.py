@@ -27,11 +27,18 @@ class Notifier:
         shown = str(title)
         if str(mode).upper() == "PAPER" and not shown.startswith("PAPER · "):
             shown = "PAPER · " + shown
+        stored_buttons = [dict(button) for button in (buttons or [])]
+        # A channel with no button keeps the exact links.py URL as its own line.
+        # Buttons keep the same string; this does not rebuild or wrap it.
+        body_out = body
+        has_button_url = any(button.get("url") for button in stored_buttons)
+        if url and not has_button_url:
+            body_out = f"{body}\n{url}" if body else str(url)
         record = {
             "title": shown,
-            "body": body,
+            "body": body_out,
             "url": url,
-            "buttons": list(buttons or []),
+            "buttons": stored_buttons,
             "ts": time.time(),
         }
         self.pushes.append(record)

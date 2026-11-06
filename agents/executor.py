@@ -71,11 +71,14 @@ def open_notional(mode: str) -> float:
 
 
 def paper_night_done() -> bool:
-    """STEP 11: at least one finished PAPER position is the night the db can show."""
-    rows = db.query(
-        "SELECT COUNT(*) AS n FROM positions WHERE mode = 'PAPER' AND closed_at IS NOT NULL"
-    )
-    return bool(rows and rows[0]["n"])
+    """Fail closed. STEP 11 requires one full PAPER night before LIVE.
+
+    A closed PAPER position is not that night. The prompt never says how
+    long a night is, and inventing a duration would let LIVE turn on too
+    early. This stays False until a night is defined. Typing LIVE is still
+    required, and it is not enough on its own.
+    """
+    return False
 
 
 def allow_live(typed: str | None) -> bool:
@@ -128,8 +131,15 @@ class Executor:
             return {"mint": mint, "status": "skipped", "reason": "already sent"}
         mode = (db.get_setting("mode", "PAPER") or "PAPER").upper()
         if mode == "LIVE" and not paper_night_done():
-            mode = "PAPER"
-            log.warning("LIVE refused; no full PAPER night in the db")
+            log.warning("LIVE refused; a full PAPER night is not proven")
+            return {
+                "agent": "executor",
+                "mint": mint,
+                "status": "skipped",
+                "reason": "LIVE locked",
+                "link": links.coin_url(mint, "solana"),
+                "mode": "PAPER",
+            }
         stack = paper_balance() if mode == "PAPER" else db.get_float("paper_start_stack")
         if mode == "LIVE" and db.get_setting("stack"):
             stack = db.get_float("stack")

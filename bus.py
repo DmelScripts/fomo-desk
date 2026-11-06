@@ -28,11 +28,13 @@ class Desk:
         notifier: Any,
         bus: Bus | None = None,
         now: Callable[[], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self.http = http
         self.notifier = notifier
         self.bus = bus or Bus()
         self.now = now or time.time
+        self.sleep = sleep or asyncio.sleep
 
 
 def is_rpc_error(payload: Any) -> bool:
