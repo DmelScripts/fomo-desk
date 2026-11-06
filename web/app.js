@@ -781,11 +781,22 @@
       node.appendChild(el("p", title));
       node.appendChild(el("p", item.detail || "Not available.", "muted"));
     });
+    var push = integrations.web_push || {};
     var test = el("button", "Send test push", "text-btn");
     test.type = "button";
-    test.disabled = true;
+    test.disabled = !push.ready;
+    if (push.ready) test.addEventListener("click", sendTestPush);
     node.appendChild(test);
-    node.appendChild(el("p", "Telegram delivery is not running, so a test push cannot be sent.", "muted"));
+  }
+
+  function sendTestPush() {
+    call("/api/push/test", { method: "POST", body: {} }).then(function (body) {
+      var sent = body && body.sent ? body.sent : 0;
+      var note = sent ? "Test push sent to " + sent + (sent === 1 ? " phone." : " phones.") : "No phone is subscribed, so nothing was sent.";
+      if (body && body.removed) note += " " + body.removed + " expired subscription" + (body.removed === 1 ? " was" : "s were") + " removed.";
+      if (body && body.failed) note += " " + body.failed + " did not accept it.";
+      $("account-note").textContent = note;
+    }).catch(noteError);
   }
 
   function renderKey() {
@@ -873,7 +884,10 @@
         },
       });
     }).then(function (body) {
-      if (body && body.ok) $("account-note").textContent = "Subscription saved. Sending is not running yet.";
+      if (body && body.ok) {
+        var ready = state.account && state.account.integrations && state.account.integrations.web_push && state.account.integrations.web_push.ready;
+        $("account-note").textContent = ready ? "Subscription saved." : "Subscription saved. Sending stays off until web push is configured.";
+      }
     }).catch(function (error) {
       if (error && error.auth) return;
       $("account-note").textContent = "The subscription was not saved.";

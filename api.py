@@ -637,6 +637,11 @@ def _names(mints: list) -> dict:
     return {row["mint"]: row for row in rows}
 
 
+def _web_push_status() -> dict:
+    import webpush
+    return webpush.status()
+
+
 def _secret_flags(name: str) -> dict:
     """Presence only. The secret value is not copied into the result."""
     from config import load_secrets
@@ -668,10 +673,7 @@ def _account() -> dict:
         "integrations": {
             "email": {"ready": False, "detail": "Email delivery is not configured."},
             "telegram": {"ready": False, "configured": telegram["configured"], "detail": telegram_detail},
-            "web_push": {
-                "ready": False,
-                "detail": "A subscription can be saved on this phone. Sending notifications is not running yet.",
-            },
+            "web_push": _web_push_status(),
         },
         "jev": {
             "configured": jev["configured"],
@@ -937,6 +939,23 @@ def push(request: Request, body: dict) -> dict:
         (endpoint, str(p256dh), str(auth), time.time()),
     )
     return {"ok": True}
+
+
+@router.post("/api/push/test")
+def push_test(request: Request) -> dict:
+    """Owner action. Sends only when web push is configured. The key is not returned."""
+    require_app_token(request)
+    import webpush
+    state = webpush.status()
+    if not state["ready"]:
+        raise HTTPException(status_code=409, detail="web push is not configured")
+    result = webpush.deliver("Test push", links.SIGNUP_URL)
+    return {
+        "ok": True,
+        "sent": result["sent"],
+        "removed": result["removed"],
+        "failed": result["failed"],
+    }
 
 
 @router.get("/api/stream")

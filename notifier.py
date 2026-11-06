@@ -1,7 +1,7 @@
-"""Push sink. Telegram was skipped. Real web push is STEP 9.
+"""Push sink. Callers pass the links.py URL. This module does not build one.
 
-notifier.push(title, body, url, buttons) records the push. It does not build
-FOMO URLs; callers pass the string links.py already returned.
+When web push is the channel, the same URL is handed to webpush.deliver.
+Telegram delivery is not built.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ class Notifier:
         }
         self.pushes.append(record)
         self._write_log(record)
+        _fanout(shown, record["url"])
         kind = _kind_for(shown, body, record["buttons"])
         if kind is None:
             # activity.kind only allows bought|sold|stopped|rejected.
@@ -67,6 +68,15 @@ class Notifier:
                 handle.write(json.dumps(record, default=str) + "\n")
         except OSError:
             log.warning("push log was not writable")
+
+
+def _fanout(line: str, url) -> None:
+    """Hand the already-built URL to web push. Failures stay out of the activity row."""
+    try:
+        import webpush
+        webpush.deliver(line, None if url is None else str(url))
+    except Exception:
+        log.warning("web push was not sent")
 
 
 def _mint_from_url(url) -> str | None:

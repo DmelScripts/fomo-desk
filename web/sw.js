@@ -55,6 +55,13 @@ self.addEventListener("fetch", function (event) {
   );
 });
 
+function deskNotificationUrl(data) {
+  if (data && typeof data.url === "string" && data.url) return data.url;
+  return "/";
+}
+
+self.deskNotificationUrl = deskNotificationUrl;
+
 self.addEventListener("push", function (event) {
   var payload = {};
   try {
@@ -64,7 +71,7 @@ self.addEventListener("push", function (event) {
   }
   var title = payload.title || "Grok Bot";
   var body = payload.body || "";
-  var url = typeof payload.url === "string" ? payload.url : "/";
+  var url = deskNotificationUrl(payload);
   event.waitUntil(self.registration.showNotification(title, {
     body: body,
     data: { url: url },
@@ -73,6 +80,6 @@ self.addEventListener("push", function (event) {
 
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
-  var url = (event.notification.data && event.notification.data.url) || "/";
+  var url = deskNotificationUrl(event.notification && event.notification.data);
   event.waitUntil(self.clients.openWindow(url));
 });
