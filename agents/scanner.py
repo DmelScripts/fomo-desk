@@ -16,7 +16,7 @@ from typing import Any
 import db
 import fields
 import links
-from bus import Desk, call_with_retries
+from bus import Desk, call_with_retries, set_scanner_price_mints
 
 log = logging.getLogger("scanner")
 
@@ -184,6 +184,7 @@ class Scanner:
 
     async def _poll_room(self) -> None:
         mints = list(self.waiting)
+        set_scanner_price_mints(set(mints))
         if not mints:
             return
         pairs = await self._dex_batch(mints)

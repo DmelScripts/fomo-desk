@@ -76,6 +76,86 @@ SETTINGS_DEFAULTS = {
     "risk.confirm_window_min": "2",
 }
 
+# Local bounds. STEP 10 says out-of-range values are refused and the range is
+# named, but it does not list the numeric limits. These are the bounds the
+# API enforces. Secret keys are not settings.
+SETTING_RULES = {
+    "min_liquidity_usd": ("number", 0, 1_000_000_000),
+    "max_top10_pct": ("number", 0, 100),
+    "max_h1_change_pct": ("number", 0, 100_000),
+    "poll_s": ("number", 5, 3600),
+    "min_pool_age_min": ("number", 0, 24 * 60),
+    "max_wait_min": ("number", 1, 24 * 60),
+    "runner_h24_pct": ("number", 0, 100_000),
+    "enabled": ("bool",),
+    "max_dev_pct": ("number", 0, 100),
+    "min_lp_locked_pct": ("number", 0, 100),
+    "max_bundled": ("number", 1, 10_000),
+    "max_delegated_accounts": ("number", 1, 10_000),
+    "retries": ("number", 1, 10),
+    "analyst_mode": ("enum", ("jev", "rules")),
+    "min_alive_6h": ("number", 0, 1),
+    "min_organic": ("number", 0, 1),
+    "max_chase": ("number", 0, 1),
+    "min_score": ("number", 0, 100),
+    "timeout_s": ("number", 1, 120),
+    "alive_volume_h1": ("number", 1, 1_000_000_000),
+    "organic_buys_h1": ("number", 1, 1_000_000),
+    "bundled_penalty": ("number", 0, 1),
+    "flush_drop_m5_pct": ("number", 0, 100),
+    "chase_h1_pct": ("number", 1, 100_000),
+    "stack_pct": ("number", 0.1, 100),
+    "max_pool_pct": ("number", 0.1, 100),
+    "min_ticket_usd": ("number", 5, 100_000),
+    "below_min": ("enum", ("bump", "skip")),
+    "recheck_liq_drop_pct": ("number", 0, 100),
+    "recheck_price_up_pct": ("number", 0, 100_000),
+    "confirm_window_min": ("number", 1, 120),
+    "stop_pct": ("number", 0.1, 100),
+    "trail_start_pct": ("number", 0.1, 100_000),
+    "trail_pct": ("number", 0.1, 100),
+    "timeout_h": ("number", 0.1, 168),
+    "timeout_min_gain_pct": ("number", 0, 100_000),
+    "mode": ("enum", ("PAPER", "LIVE")),
+    "paper_start_stack": ("number", 0, 1_000_000_000),
+    "report_time": ("time",),
+    "notifier": ("enum", ("telegram", "webpush")),
+    "rpc_url": ("url",),
+    "push_rejects": ("bool",),
+    "fees_ref_discount": ("number", 0, 1),
+    "risk.poll_s": ("number", 5, 3600),
+    "risk.confirm_window_min": ("number", 1, 120),
+    "fomo_handle": ("text", 1, 64),
+}
+
+SETTING_GROUPS = {
+    "scanner": [
+        "min_liquidity_usd", "max_top10_pct", "max_h1_change_pct", "poll_s",
+        "min_pool_age_min", "max_wait_min", "runner_h24_pct",
+    ],
+    "auditor": [
+        "enabled", "max_dev_pct", "max_top10_pct", "min_lp_locked_pct",
+        "min_pool_age_min", "max_bundled", "max_delegated_accounts", "retries",
+    ],
+    "analyst": [
+        "analyst_mode", "min_alive_6h", "min_organic", "max_chase", "min_score",
+        "timeout_s", "alive_volume_h1", "organic_buys_h1", "bundled_penalty",
+        "flush_drop_m5_pct", "chase_h1_pct",
+    ],
+    "executor": [
+        "stack_pct", "max_pool_pct", "min_ticket_usd", "below_min",
+        "recheck_liq_drop_pct", "recheck_price_up_pct", "confirm_window_min",
+    ],
+    "risk": [
+        "risk.poll_s", "stop_pct", "trail_start_pct", "trail_pct", "timeout_h",
+        "timeout_min_gain_pct", "risk.confirm_window_min",
+    ],
+    "desk": [
+        "mode", "paper_start_stack", "report_time", "notifier", "rpc_url",
+        "push_rejects", "fees_ref_discount", "fomo_handle",
+    ],
+}
+
 
 def load_seed() -> dict:
     if SETTINGS_SEED_PATH.exists():

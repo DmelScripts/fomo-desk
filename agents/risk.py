@@ -12,7 +12,7 @@ import logging
 import db
 import fees
 import links
-from bus import Desk
+from bus import Desk, set_risk_price_mints
 
 log = logging.getLogger("risk")
 
@@ -42,6 +42,7 @@ class Risk:
     async def poll_open(self) -> list[dict]:
         db.beat("risk", self.desk.now())
         rows = db.query("SELECT * FROM positions WHERE closed_at IS NULL")
+        set_risk_price_mints({row["mint"] for row in rows if row["mint"]})
         return [self.poll_position(dict(row), self.desk.now()) for row in rows]
 
     def poll_position(self, row: dict, now: float, price: float | None = None, liquidity: float | None = None) -> dict:

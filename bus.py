@@ -7,6 +7,52 @@ import time
 from typing import Any, Awaitable, Callable
 
 
+class EventHub:
+    """Process-wide SSE fanout. Payloads must not contain secrets."""
+
+    def __init__(self) -> None:
+        self.subscribers: set[asyncio.Queue] = set()
+
+    def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        self.subscribers.discard(queue)
+
+    def publish(self, event: str, payload: Any) -> None:
+        stale = []
+        for queue in self.subscribers:
+            try:
+                queue.put_nowait((event, payload))
+            except asyncio.QueueFull:
+                stale.append(queue)
+        for queue in stale:
+            self.subscribers.discard(queue)
+
+
+hub = EventHub()
+
+# Mints whose prices are owned by Scanner or Risk. The API writer must skip them.
+_scanner_price_mints: set[str] = set()
+_risk_price_mints: set[str] = set()
+
+
+def set_scanner_price_mints(mints: set[str]) -> None:
+    global _scanner_price_mints
+    _scanner_price_mints = set(mints)
+
+
+def set_risk_price_mints(mints: set[str]) -> None:
+    global _risk_price_mints
+    _risk_price_mints = set(mints)
+
+
+def covered_price_mints() -> set[str]:
+    return set(_scanner_price_mints) | set(_risk_price_mints)
+
+
 class Bus:
     def __init__(self) -> None:
         self.auditor: asyncio.Queue = asyncio.Queue()
@@ -17,6 +63,7 @@ class Bus:
 
     def publish(self, topic: str, payload: Any) -> None:
         self.events.append({"topic": topic, "payload": payload})
+        hub.publish(topic, payload)
 
 
 class Desk:

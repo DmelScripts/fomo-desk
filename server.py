@@ -8,9 +8,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from api import price_loop, router
 from config import install_secret_redaction
 from db import agents_enabled, db_status, heartbeat_ages, init_db
 
@@ -51,6 +53,15 @@ class SecurityHeaders:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        try:
+            await self._http(scope, receive, send)
+        except HTTPException:
+            raise
+        except Exception:
+            response = JSONResponse(status_code=500, content={"detail": "error"})
+            await response(scope, receive, send)
+
+    async def _http(self, scope, receive, send):
         path = scope.get("path") or ""
 
         async def send_with_headers(message):
@@ -74,13 +85,19 @@ async def lifespan(_app: FastAPI):
     init_db()
     install_secret_redaction()
     agent_task = None
-    # Default deploy keeps the five agents off so nothing calls Jev or RPC.
+    price_stop = asyncio.Event()
+    # Empty mint lists do not call DexScreener. Agents stay off unless enabled.
+    price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
     if agents_enabled():
         from main import run_desk
         agent_task = asyncio.create_task(run_desk())
     try:
         yield
     finally:
+        price_stop.set()
+        price_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await price_task
         if agent_task is not None:
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -89,13 +106,35 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="desk", lifespan=lifespan)
 app.add_middleware(SecurityHeaders)
+app.include_router(router)
+
+
+@app.exception_handler(HTTPException)
+async def http_error(_request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else "error"
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail})
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(_request, _exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": "error"})
+
+
+async def _fetch_prices(url: str):
+    import httpx
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, timeout=20)
+        if response.status_code == 429:
+            return []
+        response.raise_for_status()
+        return response.json()
 
 
 @app.get("/health")
 def health():
     return {
         "ok": True,
-        "step": 6,
+        "step": 7,
         "db": db_status(),
         "agents_enabled": agents_enabled(),
         "heartbeats": heartbeat_ages(),
