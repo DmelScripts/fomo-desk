@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import db
-from agents.auditor import Auditor, judge, largest_bundle
+from agents.auditor import Auditor, judge, largest_holder_group as largest_bundle
 from bus import Desk
 from notifier import Notifier
 from tests.support import load, temp_desk_env
@@ -18,19 +18,31 @@ MINT = "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn"
 
 
 def _bundle():
-    created = load("dexscreener_pair.json")[0]["pairCreatedAt"]
+    supply = load("rpc_getTokenSupply.json")["result"]["value"]["uiAmount"]
     program = load("rpc_getProgramAccounts_token.json")["result"]
     program = program + load("rpc_getProgramAccounts_token2022.json")["result"]
+    # The captured getTokenLargestAccounts body is a 429. These amounts are the
+    # RugCheck top-holder shape with the pool excluded, so the sum stays under 25%.
+    largest = [{"address": POOL, "owner": POOL, "uiAmount": supply * 0.21}]
+    largest += [{"address": f"h{i}", "owner": f"o{i}", "uiAmount": supply * 0.02} for i in range(10)]
+    migrated = 1_000_000.0
     return {
         "mint": MINT,
         "pool": POOL,
         "account": load("rpc_getAccountInfo.json"),
         "supply": load("rpc_getTokenSupply.json"),
+        "supply_ui": supply,
         "report": load("rugcheck_report.json"),
         "graph": load("rugcheck_insiders_graph.json"),
         "program_accounts": program,
-        "pair": load("dexscreener_pair.json")[0],
-        "now": created / 1000 + 15 * 60,
+        "largest": {"result": {"value": largest}},
+        "creator": load("rugcheck_report.json")["creator"],
+        "creator_balance_at_migration": 0,
+        "dev_balance_ui": 0.0,
+        "migrated_at": migrated,
+        "scanner_liquidity": 50000,
+        "liquidity_now": 50000,
+        "now": migrated + 15 * 60,
     }
 
 
@@ -43,6 +55,11 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual([layer["n"] for layer in result["layers"]], list(range(1, 9)))
         self.assertTrue(all(layer["pass"] for layer in result["layers"]))
         self.assertEqual(result["holders"], 224)
+        self.assertEqual(result["layers"][0]["value"], "Revoked")
+        self.assertEqual(result["layers"][1]["value"], "Revoked")
+        self.assertEqual(result["layers"][2]["value"], "0.0% · sold 0")
+        self.assertEqual(result["layers"][4]["value"], "100% locked")
+        self.assertEqual(result["layers"][5]["value"], "15m")
         self.assertEqual(result["layers"][6]["value"], "None")
         self.assertEqual(result["layers"][7]["value"], "None")
 
@@ -53,38 +70,35 @@ class TestAuditor(unittest.TestCase):
         mint = _bundle()
         mint["account"] = copy.deepcopy(mint["account"])
         mint["account"]["result"]["value"]["data"]["parsed"]["info"]["mintAuthority"] = "SetMintAuth"
-        self.assertEqual(judge(mint, now=now)["layers"][0]["value"], "set")
+        self.assertEqual(judge(mint, now=now)["layers"][0]["value"], "mint not revoked")
 
         frozen = _bundle()
         frozen["account"] = copy.deepcopy(frozen["account"])
         frozen["account"]["result"]["value"]["data"]["parsed"]["info"]["freezeAuthority"] = "SetFreeze"
         frozen_result = judge(frozen, now=now)
-        self.assertEqual(frozen_result["layers"][1]["value"], "set")
+        self.assertEqual(frozen_result["layers"][1]["value"], "freeze not revoked")
         self.assertTrue(all(layer["value"] == "not checked" for layer in frozen_result["layers"][2:]))
         self.assertFalse(frozen_result["passed"])
 
         dev = _bundle()
-        dev["report"] = copy.deepcopy(dev["report"])
-        dev["report"]["creatorBalance"] = 996452587.338732 * 0.2
-        self.assertIn("dev holds", judge(dev, now=now)["layers"][2]["value"])
-        self.assertFalse(judge(dev, now=now)["layers"][2]["pass"])
+        dev["dev_balance_ui"] = dev["supply_ui"] * 0.31
+        self.assertEqual(judge(dev, now=now)["layers"][2]["value"], "dev holds 31%")
 
         missing_creator = _bundle()
+        missing_creator["creator"] = None
         missing_creator["report"] = copy.deepcopy(missing_creator["report"])
         missing_creator["report"]["creator"] = None
-        self.assertEqual(judge(missing_creator, now=now)["layers"][2]["value"], "no creator")
+        self.assertEqual(judge(missing_creator, now=now)["layers"][2]["value"], "no data: dev")
 
         no_supply = _bundle()
-        no_supply["supply"] = copy.deepcopy(no_supply["supply"])
-        no_supply["supply"]["result"]["value"]["uiAmount"] = 0
+        no_supply["supply_ui"] = 0
         self.assertEqual(judge(no_supply, now=now)["layers"][2]["value"], "no supply")
 
         top = _bundle()
-        top["report"] = copy.deepcopy(top["report"])
-        top["report"]["topHolders"].append({
-            "address": "not-the-pool", "owner": "someone", "pct": 80,
-        })
-        self.assertFalse(judge(top, now=now)["layers"][3]["pass"])
+        top["largest"] = {"result": {"value": [
+            {"address": "whale", "owner": "whale", "uiAmount": top["supply_ui"] * 0.58},
+        ]}}
+        self.assertEqual(judge(top, now=now)["layers"][3]["value"], "top 10 hold 58%")
 
         lp = _bundle()
         lp["report"] = copy.deepcopy(lp["report"])
@@ -92,13 +106,18 @@ class TestAuditor(unittest.TestCase):
         self.assertFalse(judge(lp, now=now)["layers"][4]["pass"])
 
         young = _bundle()
-        self.assertEqual(judge(young, now=created / 1000)["layers"][5]["value"], "pool too young")
+        self.assertEqual(judge(young, now=young["migrated_at"])["layers"][5]["value"], "pool too young")
 
         bundled = _bundle()
-        bundled["graph"] = load("rugcheck_insiders_graph.schema_sample.json")["payload"]
+        bundled["graph"] = [{
+            "nodes": [{"id": f"w{i}", "holdings": 1} for i in range(6)],
+            "links": [{"source": f"w{i}", "target": f"w{i+1}"} for i in range(5)],
+        }]
         self.assertGreaterEqual(largest_bundle(bundled["graph"]), 5)
-        self.assertFalse(judge(bundled, now=now)["layers"][6]["pass"])
-        self.assertIn("bundled wallets", judge(bundled, now=now)["layers"][6]["value"])
+        self.assertEqual(judge(bundled, now=now)["layers"][6]["value"], "6 bundled wallets")
+        missing_edges = _bundle()
+        missing_edges["graph"] = [{"nodes": [{"id": "a", "holdings": 1}]}]
+        self.assertEqual(judge(missing_edges, now=now)["layers"][6]["value"], "no data: bundles")
 
         delegated = _bundle()
         accounts = []
@@ -146,13 +165,15 @@ class TestAuditor(unittest.TestCase):
                     return []
                 raise AssertionError(url)
 
-            async def post_json(self, url, body, headers=None):
+            async def post_json(self, url, body, headers=None, timeout=None):
                 method = body.get("method")
                 if method == "getAccountInfo":
                     self.account_calls += 1
                     return {"error": {"code": 429, "message": "Too many requests for a specific RPC call"}}
                 if method == "getTokenSupply":
                     return load("rpc_getTokenSupply.json")
+                if method in ("getTokenLargestAccounts", "getTokenAccountsByOwner"):
+                    return {"result": {"value": []}}
                 if method == "getProgramAccounts":
                     program = body["params"][0]
                     if program.endswith("uEb"):
@@ -164,7 +185,9 @@ class TestAuditor(unittest.TestCase):
         auditor = Auditor(Desk(http, Notifier(mode="PAPER")))
         created = load("dexscreener_pair.json")[0]["pairCreatedAt"]
         result = asyncio.run(auditor.audit(
-            MINT, pool=POOL, now=created / 1000 + 15 * 60, pair=load("dexscreener_pair.json")[0],
+            MINT,
+            payload={"pool": POOL, "migrated_at": created / 1000, "pair": load("dexscreener_pair.json")[0]},
+            now=created / 1000 + 15 * 60,
         ))
         self.assertEqual(http.account_calls, 3)
         self.assertEqual(sleeps, [2, 2])

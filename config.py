@@ -22,6 +22,60 @@ SECRET_KEYS = (
     "TG_TOKEN",
 )
 
+# STEP 10 names and defaults, plus agents_enabled (kept at '0' so a deploy
+# does not start the agents). fomo_handle is filled from settings.seed.json.
+# poll_s and confirm_window_min are listed twice with different defaults
+# (scanner 60 vs risk 15, executor 5 vs risk 2). The flat settings table
+# cannot hold both under one name, so the risk copies use the risk. prefix.
+SETTINGS_DEFAULTS = {
+    "agents_enabled": "0",
+    "analyst_mode": "jev",
+    "min_liquidity_usd": "40000",
+    "max_top10_pct": "25",
+    "max_h1_change_pct": "80",
+    "poll_s": "60",
+    "min_pool_age_min": "10",
+    "max_wait_min": "60",
+    "runner_h24_pct": "300",
+    "enabled": "true",
+    "max_dev_pct": "5",
+    "min_lp_locked_pct": "99",
+    "max_bundled": "5",
+    "max_delegated_accounts": "10",
+    "retries": "3",
+    "min_alive_6h": "0.70",
+    "min_organic": "0.65",
+    "max_chase": "0.30",
+    "min_score": "70",
+    "timeout_s": "10",
+    "alive_volume_h1": "25000",
+    "organic_buys_h1": "150",
+    "bundled_penalty": "0.5",
+    "flush_drop_m5_pct": "5",
+    "chase_h1_pct": "80",
+    "stack_pct": "8",
+    "max_pool_pct": "2",
+    "min_ticket_usd": "47.50",
+    "below_min": "bump",
+    "recheck_liq_drop_pct": "20",
+    "recheck_price_up_pct": "15",
+    "confirm_window_min": "5",
+    "stop_pct": "6",
+    "trail_start_pct": "20",
+    "trail_pct": "12",
+    "timeout_h": "3",
+    "timeout_min_gain_pct": "5",
+    "mode": "PAPER",
+    "paper_start_stack": "200",
+    "report_time": "08:00",
+    "notifier": "telegram",
+    "rpc_url": "https://api.mainnet-beta.solana.com",
+    "push_rejects": "false",
+    "fees_ref_discount": "0.10",
+    "risk.poll_s": "15",
+    "risk.confirm_window_min": "2",
+}
+
 
 def load_seed() -> dict:
     if SETTINGS_SEED_PATH.exists():

@@ -1,26 +1,38 @@
-"""PAPER round-trip fees.
+"""FOMO-on-Solana fee schedule (STEP 11).
 
-The owner's prompt says the referral link takes 10% off trading fees for the
-life of the account. The tier table itself was cut out of the prompt file
-after that sentence, so the base rate below is an explicit stand-in: 1% of
-notional, then the 10% referral discount. It is not a fee schedule copied
-from FOMO.
+$5 to $47.50 -> 2% of the ticket
+$47.50 to $190 -> flat 0.95
+above $190 -> 0.50%
+each side, then minus fees_ref_discount (10% off). Gas = 0, FOMO pays it.
+
+The two boundaries are continuous: 2% of $47.50 is $0.95, and 0.50% of $190
+is $0.95. Below $5 the prompt does not name a tier; the 2% rate is used so a
+smaller ticket is not free.
 """
 
 from __future__ import annotations
 
-BASE_FEE_RATE = 0.01
+import db
 
 
-def fee_usd(ticket_usd: float, discount: float = 0.10) -> float:
-    if ticket_usd <= 0:
+def gross_fee_usd(ticket_usd: float) -> float:
+    ticket = float(ticket_usd)
+    if ticket <= 0:
         return 0.0
-    rate = BASE_FEE_RATE * (1.0 - discount)
-    return float(ticket_usd) * rate
+    if ticket <= 47.50:
+        return ticket * 0.02
+    if ticket <= 190:
+        return 0.95
+    return ticket * 0.005
 
 
-def round_trip_fees(size_usd: float, entry: float, exit_price: float, discount: float = 0.10) -> float:
-    """Fee on the way in and the way out. Exit notional scales with price."""
+def fee_usd(ticket_usd: float, discount: float | None = None) -> float:
+    if discount is None:
+        discount = _discount()
+    return gross_fee_usd(ticket_usd) * (1.0 - float(discount))
+
+
+def round_trip_fees(size_usd: float, entry: float, exit_price: float, discount: float | None = None) -> float:
     if entry <= 0:
         exit_notional = size_usd
     else:
@@ -28,9 +40,16 @@ def round_trip_fees(size_usd: float, entry: float, exit_price: float, discount: 
     return fee_usd(size_usd, discount) + fee_usd(exit_notional, discount)
 
 
-def pnl_usd(size_usd: float, entry: float, exit_price: float, discount: float = 0.10) -> tuple[float, float]:
+def pnl_usd(size_usd: float, entry: float, exit_price: float, discount: float | None = None) -> tuple[float, float]:
     if entry <= 0:
         return 0.0, 0.0
     gross = size_usd * (exit_price - entry) / entry
     fees = round_trip_fees(size_usd, entry, exit_price, discount)
     return gross - fees, fees
+
+
+def _discount() -> float:
+    try:
+        return db.get_float("fees_ref_discount")
+    except Exception:
+        return 0.10

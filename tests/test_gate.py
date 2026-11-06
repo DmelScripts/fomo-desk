@@ -8,6 +8,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import db
 from agents.analyst import Analyst, gate, rules_scores
+
+GATE = {"min_alive_6h": 0.70, "min_organic": 0.65, "max_chase": 0.30, "min_score": 70}
+RULES = {
+    "alive_volume_h1": 25000,
+    "organic_buys_h1": 150,
+    "bundled_penalty": 0.5,
+    "flush_drop_m5_pct": 5,
+    "chase_h1_pct": 80,
+}
 from bus import Desk
 from notifier import Notifier
 from tests.support import temp_desk_env
@@ -15,40 +24,53 @@ from tests.support import temp_desk_env
 PASSING = {"alive_6h": 0.70, "organic": 0.65, "flush": 0.75, "chase": 0.30}
 
 
-def _pair(h1_volume=7000, buys=65, sells=35, m5=-15, h1=30):
+def _pair(h1_volume=17500, buys=98, sells=35, m5=-5, h1=24, sells_m5=1, buys_m5=2):
     return {
         "volume": {"h1": h1_volume, "m5": 1},
-        "txns": {"h1": {"buys": buys, "sells": sells}, "m5": {"buys": 1, "sells": 1}},
+        "txns": {
+            "h1": {"buys": buys, "sells": sells},
+            "m5": {"buys": buys_m5, "sells": sells_m5},
+        },
         "priceChange": {"m5": m5, "h1": h1},
     }
 
 
 class TestGate(unittest.TestCase):
     def test_each_threshold_rejects_and_the_line_passes(self):
-        self.assertFalse(gate({**PASSING, "alive_6h": 0.69})["passed"])
-        self.assertFalse(gate({**PASSING, "organic": 0.64})["passed"])
-        self.assertFalse(gate({**PASSING, "chase": 0.31})["passed"])
-        score_69 = gate({**PASSING, "flush": 0.71})
+        self.assertFalse(gate({**PASSING, "alive_6h": 0.69}, GATE)["passed"])
+        self.assertFalse(gate({**PASSING, "organic": 0.64}, GATE)["passed"])
+        self.assertFalse(gate({**PASSING, "chase": 0.31}, GATE)["passed"])
+        score_69 = gate({**PASSING, "flush": 0.71}, GATE)
         self.assertEqual(score_69["score"], 69)
         self.assertFalse(score_69["passed"])
         self.assertEqual(score_69["failed"], ["score 69"])
 
-        passed = gate(PASSING)
+        passed = gate(PASSING, GATE)
         self.assertTrue(passed["passed"])
         self.assertEqual(passed["score"], 70)
         self.assertEqual(passed["failed"], [])
-        self.assertIn("alive_6h 0.69", gate({**PASSING, "alive_6h": 0.69})["failed"])
-        self.assertIn("organic 0.64", gate({**PASSING, "organic": 0.64})["failed"])
-        self.assertIn("chase 0.31", gate({**PASSING, "chase": 0.31})["failed"])
+        self.assertIn("alive_6h 0.69", gate({**PASSING, "alive_6h": 0.69}, GATE)["failed"])
+        self.assertIn("organic 0.64", gate({**PASSING, "organic": 0.64}, GATE)["failed"])
+        self.assertIn("chase 0.31", gate({**PASSING, "chase": 0.31}, GATE)["failed"])
 
     def test_rules_mode_uses_the_same_gate(self):
-        self.assertTrue(gate(rules_scores(_pair()))["passed"])
-        self.assertFalse(gate(rules_scores(_pair(h1_volume=6900)))["passed"])
-        self.assertFalse(gate(rules_scores(_pair(buys=64, sells=36)))["passed"])
-        self.assertFalse(gate(rules_scores(_pair(h1=31)))["passed"])
-        scored = gate(rules_scores(_pair(m5=-14.2)))
-        self.assertEqual(scored["score"], 69)
-        self.assertFalse(scored["passed"])
+        # volume.h1 / 25000, buys.h1 / 150, h1 change / 80, flush from m5.
+        alive = rules_scores(_pair(h1_volume=17250, buys=98, h1=24, m5=-5, sells_m5=1), settings=RULES)
+        self.assertAlmostEqual(alive["alive_6h"], 0.69)
+        self.assertFalse(gate(alive, GATE)["passed"])
+        organic = rules_scores(_pair(h1_volume=17500, buys=96, h1=24, m5=-5), settings=RULES)
+        self.assertAlmostEqual(organic["organic"], 0.64)
+        self.assertFalse(gate(organic, GATE)["passed"])
+        chase = rules_scores(_pair(h1_volume=17500, buys=98, h1=24.8, m5=-5), settings=RULES)
+        self.assertAlmostEqual(chase["chase"], 0.31)
+        self.assertFalse(gate(chase, GATE)["passed"])
+        # Flush is only 0, 0.5 or 1, so rules mode cannot land on score 69.
+        # A negative m5 that is not a full flush scores under 70.
+        soft = rules_scores(_pair(h1_volume=17500, buys=98, h1=24, m5=-1), settings=RULES)
+        self.assertEqual(soft["flush"], 0.5)
+        self.assertLess(gate(soft, GATE)["score"], 70)
+        penalized = rules_scores(_pair(h1_volume=25000, buys=150, h1=0, m5=-5), bundled=3, settings=RULES)
+        self.assertAlmostEqual(penalized["organic"], 0.5)
 
         tmp, restore = temp_desk_env()
         self.addCleanup(restore)
@@ -81,7 +103,7 @@ class TestGate(unittest.TestCase):
         seen = {}
 
         class Http:
-            async def post_json(self, url, body, headers=None):
+            async def post_json(self, url, body, headers=None, timeout=None):
                 seen["url"] = url
                 seen["body"] = body
                 seen["headers"] = headers

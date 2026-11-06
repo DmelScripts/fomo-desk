@@ -1,22 +1,12 @@
-"""Analyst, agent 3 of 5. Jev answers. Code applies the gate.
+"""Analyst, agent 3 of 5. Jev answers four noul questions. Code applies the gate.
 
-Rules mode is a stand-in. The prompt's rules-mode formula was truncated;
-only "rows read Analyst (rules)" survived. The four nouls are derived from
-separate DexScreener numbers so the same gate runs as in Jev mode:
-
-  alive_6h = min(1, volume.h1 / 10000)
-  organic  = h1 buys / (h1 buys + h1 sells)   (0 if there are no trades)
-  flush     = min(1, max(-priceChange.m5, 0) / 20)
-  chase     = min(1, max(priceChange.h1, 0) / 100)
-
-verdicts.alive_6h / organic / flush / chase are INTEGER 0/1 in STEP 4, so the
-database stores whether that gate passed. Flush has no threshold in the
-prompt; its bit is 1 when a numeric answer was used in the score. The raw
-0-1 nouls stay on the in-memory verdict and in the activity subtitle.
+RULES MODE uses the DexScreener formulas in the prompt. A Jev failure never
+falls back to rules; it rejects "no answer".
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -30,73 +20,83 @@ log = logging.getLogger("analyst")
 
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 QUESTIONS = ("alive_6h", "organic", "flush", "chase")
+# Bracket in the agent text. STEP 10 does not give it a key.
+STATE_MAX = 3000
+JEV_RETRY_S = 2
+JEV_QUEUE_S = 60
 
 
 def gate(answers: dict, settings: dict | None = None) -> dict:
     cfg = settings or _settings()
     failed: list[str] = []
-    values = {}
+    values: dict[str, float | None] = {}
     for name in QUESTIONS:
         raw = answers.get(name)
-        if raw is None:
-            failed.append(f"no data: {name}")
+        if raw is None or not _in_unit(raw):
+            failed.append("bad answer" if raw is not None else "no answer")
             values[name] = None
             continue
         values[name] = float(raw)
-    if values.get("alive_6h") is not None and values["alive_6h"] < cfg["alive_6h_min"]:
+    if values.get("alive_6h") is not None and values["alive_6h"] < cfg["min_alive_6h"]:
         failed.append(f"alive_6h {values['alive_6h']:.2f}")
-    if values.get("organic") is not None and values["organic"] < cfg["organic_min"]:
+    if values.get("organic") is not None and values["organic"] < cfg["min_organic"]:
         failed.append(f"organic {values['organic']:.2f}")
-    if values.get("chase") is not None and values["chase"] > cfg["chase_max"]:
+    if values.get("chase") is not None and values["chase"] > cfg["max_chase"]:
         failed.append(f"chase {values['chase']:.2f}")
     score = None
     if all(values.get(name) is not None for name in QUESTIONS):
         score = round(100 * (
             values["alive_6h"] + values["organic"] + values["flush"] + (1 - values["chase"])
         ) / 4)
-        if score < cfg["score_min"]:
+        if score < cfg["min_score"]:
             failed.append(f"score {score}")
-    elif not any(item.startswith("no data") for item in failed):
-        failed.append("no data: score")
+    passed = not failed and score is not None
+    # A bad/missing answer is the reason; don't also list the threshold.
+    if any(item in ("bad answer", "no answer") for item in failed):
+        failed = [item for item in failed if item in ("bad answer", "no answer")]
     return {
         "answers": {name: values.get(name) for name in QUESTIONS},
-        "score": score if score is not None else 0,
-        "passed": not failed and score is not None,
+        "score": 0 if score is None else score,
+        "passed": passed,
         "failed": failed,
     }
 
 
-def rules_scores(pair: dict) -> dict:
-    """Stand-in rules mode. See the module docstring for the formula."""
-    h1_volume = _num(fields.get(pair, fields.DEXSCREENER["volume.h1"])) or 0.0
+def rules_scores(pair: dict, bundled: int = 0, settings: dict | None = None) -> dict:
+    """STEP 10 rules formulas. bundled_penalty applies from 3 wallets."""
+    cfg = settings or _rule_settings()
+    volume = _num(fields.get(pair, fields.DEXSCREENER["volume.h1"])) or 0.0
     buys = _num(fields.get(pair, fields.DEXSCREENER["txns.h1.buys"])) or 0.0
-    sells = _num(fields.get(pair, fields.DEXSCREENER["txns.h1.sells"])) or 0.0
+    buys_m5 = _num(fields.get(pair, fields.DEXSCREENER["txns.m5.buys"])) or 0.0
+    sells_m5 = _num(fields.get(pair, fields.DEXSCREENER["txns.m5.sells"])) or 0.0
     change_m5 = _num(fields.get(pair, fields.DEXSCREENER["priceChange.m5"])) or 0.0
     change_h1 = _num(fields.get(pair, fields.DEXSCREENER["priceChange.h1"])) or 0.0
-    trades = buys + sells
-    organic = (buys / trades) if trades else 0.0
+    organic = _clamp(buys / cfg["organic_buys_h1"] if cfg["organic_buys_h1"] else 0.0)
+    if bundled >= 3:
+        organic *= cfg["bundled_penalty"]
+    if change_m5 <= -cfg["flush_drop_m5_pct"] and buys_m5 >= sells_m5:
+        flush = 1.0
+    elif change_m5 < 0:
+        flush = 0.5
+    else:
+        flush = 0.0
     return {
-        "alive_6h": _clamp(h1_volume / 10000.0),
+        "alive_6h": _clamp(volume / cfg["alive_volume_h1"] if cfg["alive_volume_h1"] else 0.0),
         "organic": _clamp(organic),
-        "flush": _clamp(max(-change_m5, 0.0) / 20.0),
-        "chase": _clamp(max(change_h1, 0.0) / 100.0),
+        "flush": flush,
+        "chase": _clamp(change_h1 / cfg["chase_h1_pct"] if cfg["chase_h1_pct"] else 0.0),
     }
 
 
-def build_state(payload: dict, limit: int = 3000) -> str:
+def build_state(payload: dict, limit: int = STATE_MAX) -> str:
     pair = payload.get("pair") or {}
-    layers = {layer["n"]: layer for layer in payload.get("layers") or []}
-    def layer_value(number: int) -> str:
-        layer = layers.get(number)
-        return layer["value"] if layer else "n/a"
-
+    layers = {layer["n"]: layer.get("value") for layer in payload.get("layers") or []}
     age = payload.get("age_min")
     age_txt = f"{age:.0f}" if isinstance(age, (int, float)) else "?"
-    liq = _num(fields.get(pair, fields.DEXSCREENER["liquidity.usd"]))
-    mcap = _num(fields.get(pair, fields.DEXSCREENER["marketCap"]))
     text = (
         f"Coin {payload.get('name') or '?'} on Solana, graduated {age_txt} min ago. "
-        f"Liquidity ${_money(liq)}. Market cap ${_money(mcap)}. "
+        f"Liquidity ${_money(_num(fields.get(pair, fields.DEXSCREENER['liquidity.usd'])))}. "
+        f"Market cap ${_money(_num(fields.get(pair, fields.DEXSCREENER['marketCap'])))}. "
         f"Last 5 min: {_int(fields.get(pair, fields.DEXSCREENER['txns.m5.buys']))} buys, "
         f"{_int(fields.get(pair, fields.DEXSCREENER['txns.m5.sells']))} sells, "
         f"volume ${_money(_num(fields.get(pair, fields.DEXSCREENER['volume.m5'])))}, "
@@ -105,17 +105,17 @@ def build_state(payload: dict, limit: int = 3000) -> str:
         f"{_int(fields.get(pair, fields.DEXSCREENER['txns.h1.sells']))} sells, "
         f"volume ${_money(_num(fields.get(pair, fields.DEXSCREENER['volume.h1'])))}, "
         f"price {_num(fields.get(pair, fields.DEXSCREENER['priceChange.h1'])) or 0}%. "
-        f"Top 10 hold {layer_value(4)}. Dev {layer_value(3)}. LP {layer_value(5)}. "
-        f"Bundled {layer_value(7)}. Delegations {layer_value(8)}."
+        f"Top 10 hold {layers.get(4, 'n/a')}. Dev holds {layers.get(3, 'n/a')}. "
+        f"LP {layers.get(5, 'n/a')}. Bundled {layers.get(7, 'n/a')}. "
+        f"Delegations {layers.get(8, 'n/a')}."
     )
-    if len(text) > limit:
-        return text[:limit]
-    return text
+    return text[:limit]
 
 
 class Analyst:
     def __init__(self, desk: Desk) -> None:
         self.desk = desk
+        self.asked: set[str] = set()
 
     async def run(self) -> None:
         import asyncio
@@ -129,54 +129,79 @@ class Analyst:
 
     async def judge(self, payload: dict) -> dict:
         db.beat("analyst", self.desk.now())
+        mint = payload.get("mint")
+        if mint in self.asked:
+            return {"mint": mint, "passed": False, "failed": ["already asked"], "skipped": True}
         mode = (db.get_setting("analyst_mode", "jev") or "jev").lower()
-        state = build_state(payload, int(db.get_float("state_max_chars") or 3000))
+        pair = payload.get("pair") or {}
+        state = build_state(payload)
         model = None
-        input_tokens = None
+        input_tokens = 0
         if mode == "rules":
-            scores = rules_scores(payload.get("pair") or {})
+            scores = rules_scores(pair, int(payload.get("bundled") or 0))
             label = "Analyst (rules)"
+            model = "rules"
         else:
             response = await self._ask_jev(state)
-            scores = _noul_map(response)
-            model = response.get("model") if isinstance(response, dict) else None
-            input_tokens = _input_tokens(response)
-            label = "Analyst"
-        decision = gate(scores)
+            if response is None:
+                scores = {}
+                label = "Analyst"
+            else:
+                scores = _noul_map(response)
+                model = response.get("model")
+                input_tokens = _input_tokens(response) or 0
+                label = "Analyst"
+        if mint:
+            self.asked.add(mint)
+        decision = gate(scores) if scores or mode == "rules" else {
+            "answers": {name: None for name in QUESTIONS},
+            "score": 0,
+            "passed": False,
+            "failed": ["no answer"],
+        }
+        if mode != "rules" and not scores:
+            decision = {
+                "answers": {name: None for name in QUESTIONS},
+                "score": 0,
+                "passed": False,
+                "failed": ["no answer"],
+            }
         decision.update({
             "agent": "analyst",
-            "mint": payload.get("mint"),
+            "mint": mint,
             "model": model,
             "inputTokens": input_tokens,
-            "mode": mode,
             "label": label,
         })
-        self._store(decision, label)
+        self._store(decision)
+        log.info(
+            "mint=%s state=%s answers=%s score=%s verdict=%s tokens=%s",
+            mint, hashlib.sha256(state.encode()).hexdigest()[:12],
+            decision["answers"], decision["score"], decision["passed"], input_tokens,
+        )
         if decision["passed"]:
             onward = dict(payload)
             onward.update(decision)
+            onward["analyst_price"] = _num(fields.get(pair, fields.DEXSCREENER["priceUsd"]))
             await self.desk.bus.executor.put(onward)
         else:
-            reason = decision["failed"][0] if decision["failed"] else "rejected"
-            name = payload.get("symbol") or payload.get("name") or payload.get("mint")
-            url = links.coin_url(payload.get("mint"), "solana")
+            reason = decision["failed"][0] if decision["failed"] else "no answer"
+            name = payload.get("symbol") or payload.get("name") or mint
+            subtitle = f"{label} · {reason}"
             db.record_activity(
-                self.desk.now(), "rejected", payload.get("mint"), "analyst",
-                f"Rejected {name}", f"{label} · {reason}", "Skipped",
+                self.desk.now(), "rejected", mint, "analyst",
+                f"Rejected {name}", subtitle, "Skipped",
             )
-            self.desk.notifier.push(
-                f"Rejected {name}",
-                f"{label} · {reason}",
-                url,
-                [{"label": "Open on FOMO", "url": url}],
-            )
+            if db.flag_on("push_rejects"):
+                url = links.coin_url(mint, "solana")
+                self.desk.notifier.push(f"Rejected {name}", subtitle, url, [{"label": "Open on FOMO", "url": url}])
         return decision
 
-    async def _ask_jev(self, state: str) -> dict:
+    async def _ask_jev(self, state: str) -> dict | None:
         secret = load_secrets().get("TYPESAFE_API_KEY")
         if not secret:
             log.warning("jev key is not set")
-            return {}
+            return None
         body = {
             "model": "jev-latest",
             "state": state,
@@ -187,25 +212,32 @@ class Analyst:
                 "chase": {"type": "noul", "instructions": "This entry is chasing a green candle that already ran"},
             },
         }
-        try:
-            payload = await self.desk.http.post_json(
-                JEV_URL,
-                body,
-                headers={"Authorization": f"Bearer {secret}"},
-            )
-        except Exception:
-            log.warning("jev request failed")
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        timeout = db.get_float("timeout_s") or 10
+        last = None
+        for attempt in (1, 2):
+            try:
+                last = await self.desk.http.post_json(
+                    JEV_URL, body,
+                    headers={"Authorization": f"Bearer {secret}"},
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                if "429" in str(exc):
+                    log.warning("jev 429")
+                    return None
+                last = None
+            if isinstance(last, dict) and last.get("error", {}).get("code") == 429:
+                log.warning("jev 429")
+                return None
+            if isinstance(last, dict) and last.get("answers"):
+                return last
+            if attempt == 1:
+                await _pause(JEV_RETRY_S)
+        log.warning("jev request failed")
+        return None
 
-    def _store(self, decision: dict, label: str) -> None:
+    def _store(self, decision: dict) -> None:
         answers = decision["answers"]
-        bits = {
-            "alive_6h": _bit(answers.get("alive_6h"), db.get_float("alive_6h_min"), minimum=True),
-            "organic": _bit(answers.get("organic"), db.get_float("organic_min"), minimum=True),
-            "chase": _bit(answers.get("chase"), db.get_float("chase_max"), minimum=False),
-            "flush": 1 if answers.get("flush") is not None else 0,
-        }
         db.execute(
             """
             INSERT INTO verdicts (
@@ -215,10 +247,10 @@ class Analyst:
             (
                 decision.get("mint"),
                 self.desk.now(),
-                bits["alive_6h"],
-                bits["organic"],
-                bits["flush"],
-                bits["chase"],
+                _bit(answers.get("alive_6h"), db.get_float("min_alive_6h"), True),
+                _bit(answers.get("organic"), db.get_float("min_organic"), True),
+                1 if answers.get("flush") is not None else 0,
+                _bit(answers.get("chase"), db.get_float("max_chase"), False),
                 decision.get("score"),
                 1 if decision["passed"] else 0,
                 decision["failed"][0] if decision["failed"] else None,
@@ -227,12 +259,27 @@ class Analyst:
         )
 
 
+async def _pause(seconds: float) -> None:
+    import asyncio
+    await asyncio.sleep(seconds)
+
+
 def _settings() -> dict[str, float]:
     return {
-        "alive_6h_min": db.get_float("alive_6h_min"),
-        "organic_min": db.get_float("organic_min"),
-        "chase_max": db.get_float("chase_max"),
-        "score_min": db.get_float("score_min"),
+        "min_alive_6h": db.get_float("min_alive_6h"),
+        "min_organic": db.get_float("min_organic"),
+        "max_chase": db.get_float("max_chase"),
+        "min_score": db.get_float("min_score"),
+    }
+
+
+def _rule_settings() -> dict[str, float]:
+    return {
+        "alive_volume_h1": db.get_float("alive_volume_h1"),
+        "organic_buys_h1": db.get_float("organic_buys_h1"),
+        "bundled_penalty": db.get_float("bundled_penalty"),
+        "flush_drop_m5_pct": db.get_float("flush_drop_m5_pct"),
+        "chase_h1_pct": db.get_float("chase_h1_pct"),
     }
 
 
@@ -244,17 +291,30 @@ def _bit(value: float | None, threshold: float, minimum: bool) -> int:
     return 1 if value <= threshold else 0
 
 
+def _in_unit(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= number <= 1.0
+
+
 def _noul_map(response: Any) -> dict:
     if not isinstance(response, dict):
         return {}
     answers = response.get("answers") or {}
     out = {}
     for name in QUESTIONS:
-        node = answers.get(name) or {}
-        if isinstance(node, dict) and node.get("noul") is not None:
-            out[name] = float(node["noul"])
-        elif isinstance(node, (int, float)):
-            out[name] = float(node)
+        node = answers.get(name)
+        if isinstance(node, dict):
+            raw = node.get("noul")
+        else:
+            raw = node
+        if raw is None:
+            continue
+        if not _in_unit(raw):
+            return {}
+        out[name] = float(raw)
     return out
 
 
@@ -263,7 +323,7 @@ def _input_tokens(response: Any) -> int | None:
         return None
     usage = response.get("usage") or {}
     for key in ("input_tokens", "inputTokens", "prompt_tokens"):
-        if key in usage and usage[key] is not None:
+        if usage.get(key) is not None:
             return int(usage[key])
     return None
 
@@ -283,9 +343,7 @@ def _int(value: Any) -> int:
 
 
 def _money(value: float | None) -> str:
-    if value is None:
-        return "?"
-    return f"{value:.0f}"
+    return "?" if value is None else f"{value:.0f}"
 
 
 def _clamp(value: float) -> float:

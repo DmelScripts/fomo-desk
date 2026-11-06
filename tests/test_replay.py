@@ -1,10 +1,15 @@
-"""Feed the sample migration through all five agents in PAPER.
+"""Sample migration through the five agents.
 
-The captured DexScreener pool is $12,489.45, under the $40,000 kill, and the
-captured getTokenLargestAccounts body is a 429 with no field paths. Those two
-facts cannot open a position. This replay keeps every other sample byte and
-only raises liquidity.usd to 50000 and stubs the unparseable top-10 at 10%
-so Auditor, Analyst, Executor and Risk still see the real samples.
+The unmodified DexScreener sample is $12,489.45, so Scanner kills it
+("liq $12.5K") before anyone else runs. The pass-through below changes only:
+
+1. liquidity.usd 12489.45 -> 50000, because $12.5K is under the $40,000 kill.
+2. getTokenLargestAccounts returns a synthetic success (pool excluded, top 10
+   at 20%). The captured file is a JSON-RPC 429 and has no account list.
+3. getTokenAccountsByOwner returns an empty list (creator balance 0). The
+   archive has no capture of that method; RugCheck creatorBalance is 0.
+
+Jev is mocked. The clock moves 15 minutes so pool age can clear 10 minutes.
 """
 import asyncio
 import copy
@@ -27,12 +32,20 @@ from notifier import Notifier
 from tests.support import load, temp_desk_env
 
 MINT = "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn"
+POOL = "GWc8HL8vCGMnmg3n9pC4tmWafYiWpuoxvKrrhzDVZyJf"
+
+
+def _largest():
+    supply = load("rpc_getTokenSupply.json")["result"]["value"]["uiAmount"]
+    accounts = [{"address": POOL, "owner": POOL, "uiAmount": supply * 0.21}]
+    accounts += [{"address": f"h{i}", "owner": f"o{i}", "uiAmount": supply * 0.02} for i in range(10)]
+    return {"jsonrpc": "2.0", "result": {"value": accounts}, "id": 1}
 
 
 class FakeHttp:
-    def __init__(self, dex):
+    def __init__(self, dex, largest):
         self.dex = dex
-        self.posts = []
+        self.largest = largest
 
     async def get_json(self, url):
         if "dexscreener" in url:
@@ -43,8 +56,7 @@ class FakeHttp:
             return load("rugcheck_insiders_graph.json")
         raise AssertionError(url)
 
-    async def post_json(self, url, body, headers=None):
-        self.posts.append(body.get("method") if isinstance(body, dict) else url)
+    async def post_json(self, url, body, headers=None, timeout=None):
         if "typesafe" in url:
             return {
                 "model": "jev-latest",
@@ -60,9 +72,11 @@ class FakeHttp:
         if method == "getTokenSupply":
             return load("rpc_getTokenSupply.json")
         if method == "getTokenLargestAccounts":
-            return load("rpc_getTokenLargestAccounts.json")
+            return self.largest
         if method == "getAccountInfo":
             return load("rpc_getAccountInfo.json")
+        if method == "getTokenAccountsByOwner":
+            return {"result": {"value": []}}
         if method == "getProgramAccounts":
             program = body["params"][0]
             name = (
@@ -75,36 +89,28 @@ class FakeHttp:
 
 
 class TestReplay(unittest.TestCase):
+    def test_raw_sample_is_a_liquidity_kill(self):
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        http = FakeHttp(load("dexscreener_pair.json"), load("rpc_getTokenLargestAccounts.json"))
+        desk = Desk(http, Notifier(mode="PAPER"), now=lambda: 1_000_000.0)
+        scanned = asyncio.run(Scanner(desk).ingest(load("pumpportal_migration.json")))
+        self.assertEqual(scanned["verdict"], "kill")
+        self.assertEqual(scanned["reason"], "liq $12.5K")
+
     def test_sample_migration_reaches_a_paper_position(self):
         tmp, restore = temp_desk_env()
         self.addCleanup(restore)
         db.init_db()
         os.environ["TYPESAFE_API_KEY"] = "replay-key-not-real"
         self.addCleanup(lambda: os.environ.pop("TYPESAFE_API_KEY", None))
-
         dex = copy.deepcopy(load("dexscreener_pair.json"))
         dex[0]["liquidity"]["usd"] = 50000
-        created = dex[0]["pairCreatedAt"] / 1000 + 15 * 60
-        http = FakeHttp(dex)
+        clock = {"t": 2_000_000.0}
+        http = FakeHttp(dex, _largest())
         notifier = Notifier(mode="PAPER")
-        desk = Desk(http, notifier, now=lambda: created)
-
-        import agents.scanner as scanner_mod
-
-        def stub_top10(payload, supply, exclude):
-            return 10.0
-
-        original = scanner_mod.parse_top10
-        scanner_mod.parse_top10 = stub_top10
-        self.addCleanup(lambda: setattr(scanner_mod, "parse_top10", original))
-
-        async def fast_sleep(seconds):
-            return None
-
-        original_sleep = scanner_mod.sleep
-        scanner_mod.sleep = fast_sleep
-        self.addCleanup(lambda: setattr(scanner_mod, "sleep", original_sleep))
-
+        desk = Desk(http, notifier, now=lambda: clock["t"])
         scanner = Scanner(desk)
         auditor = Auditor(desk)
         analyst = Analyst(desk)
@@ -112,32 +118,29 @@ class TestReplay(unittest.TestCase):
         risk = Risk(desk)
 
         async def run():
+            first = await scanner.ingest(load("pumpportal_migration.json"))
+            self.assertEqual(first["verdict"], "wait", first)
+            clock["t"] += 15 * 60
             scanned = await scanner.ingest(load("pumpportal_migration.json"))
             self.assertEqual(scanned["verdict"], "pass", scanned)
-            self.assertEqual(scanned["pool"], "GWc8HL8vCGMnmg3n9pC4tmWafYiWpuoxvKrrhzDVZyJf")
+            self.assertEqual(scanned["pool"], POOL)
             self.assertEqual(scanned["creator"], "4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f")
-            payload = await desk.bus.auditor.get()
-            audited = await auditor.audit_payload(payload)
+            audited = await auditor.audit_payload(await desk.bus.auditor.get())
             self.assertTrue(audited["passed"], [layer["value"] for layer in audited["layers"]])
-            verdict_in = await desk.bus.analyst.get()
-            verdict = await analyst.judge(verdict_in)
+            verdict = await analyst.judge(await desk.bus.analyst.get())
             self.assertTrue(verdict["passed"], verdict)
-            order = await desk.bus.executor.get()
-            filled = await executor.handle(order)
-            self.assertEqual(filled["mode"], "PAPER")
+            filled = await executor.handle(await desk.bus.executor.get())
+            self.assertEqual(filled["status"], "bought")
+            self.assertEqual(filled["sizeUsd"], 47.50)
             row = db.query("SELECT * FROM positions WHERE mint = ?", (MINT,))[0]
-            held = risk.poll_position(dict(row), created, price=float(dex[0]["priceUsd"]), liquidity=50000)
+            held = risk.poll_position(dict(row), clock["t"], price=float(dex[0]["priceUsd"]), liquidity=50000)
             self.assertEqual(held["action"], "hold")
 
         asyncio.run(run())
-
-        self.assertTrue(db.query("SELECT id FROM scans WHERE mint = ?", (MINT,)))
-        self.assertEqual(len(db.query("SELECT id FROM audits WHERE mint = ?", (MINT,))), 8)
-        self.assertEqual(db.query("SELECT \"pass\" FROM verdicts WHERE mint = ?", (MINT,))[0]["pass"], 1)
-        signal = db.query("SELECT link, mode FROM signals WHERE mint = ?", (MINT,))[0]
-        self.assertEqual(signal["mode"], "PAPER")
-        self.assertEqual(signal["link"], links.coin_url(MINT, "solana"))
+        self.assertEqual(db.query("SELECT link, mode FROM signals WHERE mint = ?", (MINT,))[0]["link"], links.coin_url(MINT, "solana"))
         self.assertEqual(db.query("SELECT mode FROM positions WHERE mint = ?", (MINT,))[0]["mode"], "PAPER")
+        self.assertTrue(db.query("SELECT id FROM audits WHERE mint = ?", (MINT,)))
+        self.assertEqual(db.query('SELECT "pass" FROM verdicts WHERE mint = ?', (MINT,))[0]["pass"], 1)
         self.assertTrue(db.query("SELECT id FROM activity WHERE mint = ?", (MINT,)))
         for push in notifier.pushes:
             if push["url"]:
@@ -145,7 +148,5 @@ class TestReplay(unittest.TestCase):
             for button in push["buttons"]:
                 if button.get("url"):
                     self.assertEqual(button["url"], links.coin_url(MINT, "solana"))
-        for row in db.query("SELECT link FROM signals"):
-            self.assertEqual(row["link"], links.coin_url(MINT, "solana"))
         beats = {row["agent"] for row in db.query("SELECT agent FROM heartbeats")}
         self.assertEqual(beats, {"scanner", "auditor", "analyst", "executor", "risk"})

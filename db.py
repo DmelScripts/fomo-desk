@@ -8,63 +8,9 @@ import sqlite3
 import time
 from pathlib import Path
 
-from config import load_seed
+from config import SETTINGS_DEFAULTS, load_seed
 
-# Bracketed prompt numbers and the STEP 10 keys that survived the owner's
-# prompt file. Stored as text. INSERT OR IGNORE, so a value the owner already
-# changed is left alone. fomo_handle stays in settings.seed.json only.
 AGENT_NAMES = ("scanner", "auditor", "analyst", "executor", "risk")
-
-SETTINGS_DEFAULTS = {
-    "analyst_mode": "jev",
-    "rpc_url": "https://api.mainnet-beta.solana.com",
-    "agents_enabled": "0",
-    "mode": "PAPER",
-    # scanner — STEP 10
-    "min_liquidity_usd": "40000",
-    "max_top10_pct": "25",
-    "max_h1_change_pct": "80",
-    "poll_s": "60",
-    "min_pool_age_min": "10",
-    "max_wait_min": "60",
-    "runner_h24_pct": "300",
-    # auditor — STEP 10, plus the retry brackets in the auditor edge cases.
-    # The prompt cuts off at "max_delegated_acc"; layer 8's bracket is [10].
-    "auditor_enabled": "true",
-    "max_dev_pct": "5",
-    "min_lp_locked_pct": "99",
-    "max_bundled": "5",
-    "max_delegated_accounts": "10",
-    "audit_retries": "3",
-    "audit_retry_s": "2",
-    # analyst brackets
-    "state_max_chars": "3000",
-    "alive_6h_min": "0.70",
-    "organic_min": "0.65",
-    "chase_max": "0.30",
-    "score_min": "70",
-    # executor — the agent section is missing from the prompt file.
-    # These match the surviving STEP 11 sizing paragraph:
-    # stack $200 -> 8% = $16 -> under $47.50 -> bump sends $47.50;
-    # pool liquidity $40,000 caps size at $800 (2% of the pool).
-    "stack_usd": "200",
-    "stack_pct": "8",
-    "min_ticket_usd": "47.50",
-    "undersize": "bump",
-    "max_pool_pct": "2",
-    # risk — STEP 4 poll, the exit paragraph, and the test cases that survived
-    # (+25% arms the trail, 13% off the top exits, -6.1% stops, 3h times out).
-    "stop_pct": "6",
-    "trail_arm_pct": "25",
-    "trail_pct": "13",
-    "timeout_h": "3",
-    "risk_poll_s": "15",
-    "no_price_polls": "4",
-    "rpc_backoff_s": "30",
-    "sold_remind_min": "2",
-    # STEP 4, api.py candle poll. The endpoint itself is not this step.
-    "api_poll_s": "60",
-}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS coins (
@@ -257,7 +203,15 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (key, _setting_text(value), now),
             )
-        conn.execute("PRAGMA user_version=1")
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < 2:
+            # Stand-in from 6de36bd. Columns are unchanged; this only corrects
+            # that default when the owner has not already replaced it.
+            conn.execute(
+                "UPDATE settings SET value = '12', updated_at = ? WHERE key = 'trail_pct' AND value = '13'",
+                (now,),
+            )
+            conn.execute("PRAGMA user_version=2")
         conn.commit()
     finally:
         conn.close()

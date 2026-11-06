@@ -1,13 +1,8 @@
 """Scanner, agent 1 of 5. Counts and cuts.
 
-Known deviation (owner): PumpPortal migration messages carry no creator and
-`pool` is the label "pump-amm". Pool is the DexScreener pumpswap pairAddress.
-Creator is RugCheck report `creator`.
-
-getTokenLargestAccounts is often a JSON-RPC 429 on the public RPC. fields.py
-has no success-body paths for that call (the captured sample is the error).
-After the auditor retry rule (3 times, 2s apart), no parsed top-10 is a kill.
-No data is never a pass.
+Pool comes from the DexScreener pumpswap pairAddress. The migration message's
+pool is the label "pump-amm" and it carries no creator (fields.py). Creator
+and the balance stored at migration come from the RugCheck report.
 """
 
 from __future__ import annotations
@@ -15,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import unicodedata
 from typing import Any
 
 import db
@@ -27,6 +23,10 @@ log = logging.getLogger("scanner")
 PUMPPORTAL_URL = "wss://pumpportal.fun/api/data"
 DEX_URL = "https://api.dexscreener.com/tokens/v1/solana/"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
+# Bracketed in the agent text, not given their own STEP 10 names.
+WS_SILENT_S = 120
+DEX_BACKOFF_S = 30
+RETRY_GAP_S = 2
 
 
 async def sleep(seconds: float) -> None:
@@ -45,32 +45,64 @@ def format_h1(pct: float) -> str:
     return f"{pct:+.0f}% in 1h"
 
 
-def kill_reason(snapshot: dict, settings: dict | None = None) -> dict:
-    """First matching kill, in the prompt's order. verdict is pass, kill, or wait.
+def normalize_name(value: str | None) -> str:
+    """Lowercase, strip spaces, digits and emoji."""
+    if not value:
+        return ""
+    out = []
+    for char in value.casefold():
+        if char.isspace() or char.isdigit():
+            continue
+        if unicodedata.category(char).startswith("So"):
+            continue
+        out.append(char)
+    return "".join(out)
 
-    max_wait applies only while there is still no PumpSwap pair. The prompt's
-    reason string for that wait was truncated; this uses "waited {n}m".
-    A coin that already clears the kill list is passed even if it is older
-    than max_wait (it should have left the room at min_pool_age).
+
+def copycat_of(name: str | None, symbol: str | None, runners: list[dict]) -> str | None:
+    """Exact match, or one normalized name inside the other, vs today's runners."""
+    keys = [item for item in (normalize_name(name), normalize_name(symbol)) if item]
+    if not keys:
+        return None
+    for runner in runners:
+        others = [item for item in (normalize_name(runner.get("name")), normalize_name(runner.get("symbol"))) if item]
+        label = runner.get("symbol") or runner.get("name") or "X"
+        for key in keys:
+            for other in others:
+                if key == other or key in other or other in key:
+                    return label
+    return None
+
+
+def kill_reason(snapshot: dict, settings: dict | None = None) -> dict:
+    """First kill in the prompt's order. Wait is internal; pass and kill are decisions.
+
+    A missing PumpSwap pair or a missing top-10 is not a listed kill. The coin
+    stays in the room. After max_wait_min without a pass the reason is
+    "never qualified".
     """
     cfg = settings or _settings()
     age = snapshot.get("age_min")
-    has_pair = bool(snapshot.get("has_pair"))
-    if not has_pair:
-        if age is not None and age > cfg["max_wait_min"]:
-            return {"verdict": "kill", "reason": f"waited {int(age)}m"}
+    room = snapshot.get("room_min", age)
+    expired = room is not None and room > cfg["max_wait_min"]
+
+    def give_up() -> dict:
+        if expired:
+            return {"verdict": "kill", "reason": "never qualified"}
         return {"verdict": "wait", "reason": None}
+
+    if not snapshot.get("has_pair"):
+        return give_up()
 
     liquidity = snapshot.get("liquidity_usd")
     if liquidity is None:
-        return {"verdict": "wait", "reason": None}
+        return give_up()
     if liquidity < cfg["min_liquidity_usd"]:
         return {"verdict": "kill", "reason": format_liq(liquidity)}
 
     top10 = snapshot.get("top10_pct")
     if top10 is None:
-        # Captured getTokenLargestAccounts body is an RPC 429. Do not pass.
-        return {"verdict": "kill", "reason": "no data: top 10"}
+        return give_up()
     if top10 > cfg["max_top10_pct"]:
         return {"verdict": "kill", "reason": format_top10(top10)}
 
@@ -78,26 +110,51 @@ def kill_reason(snapshot: dict, settings: dict | None = None) -> dict:
     if h1 is not None and h1 > cfg["max_h1_change_pct"]:
         return {"verdict": "kill", "reason": format_h1(h1)}
 
-    copied = _copycat(snapshot.get("name"), snapshot.get("symbol"), snapshot.get("runners") or [])
+    copied = copycat_of(snapshot.get("name"), snapshot.get("symbol"), snapshot.get("runners") or [])
     if copied:
         return {"verdict": "kill", "reason": f"copycat of {copied}"}
 
-    if age is not None and age < cfg["min_pool_age_min"]:
-        return {"verdict": "wait", "reason": None}
+    if age is None or age < cfg["min_pool_age_min"]:
+        return give_up()
     return {"verdict": "pass", "reason": None}
 
 
-def _copycat(name: str | None, symbol: str | None, runners: list[dict]) -> str | None:
-    name_key = (name or "").casefold()
-    symbol_key = (symbol or "").casefold()
-    for runner in runners:
-        other_name = (runner.get("name") or "").casefold()
-        other_symbol = (runner.get("symbol") or "").casefold()
-        same_name = bool(name_key) and name_key == other_name
-        same_symbol = bool(symbol_key) and symbol_key == other_symbol
-        if same_name or same_symbol:
-            return runner.get("symbol") or runner.get("name") or "X"
-    return None
+def parse_largest_accounts(payload: Any, supply_ui: float | None, exclude: set[str]) -> float | None:
+    """Top-10 percent from getTokenLargestAccounts.
+
+    fields.py records no success paths: the captured body is a JSON-RPC 429.
+    A body with result.value (the Solana RPC shape) is readable. An error, or
+    a body with no accounts, is no data and must not become a pass.
+    Pool and bonding-curve accounts are dropped before the sum. The RPC
+    sample has no owner field, so an account is dropped when its address or
+    owner equals an excluded pubkey.
+    """
+    if not isinstance(payload, dict) or payload.get("error") or not supply_ui:
+        return None
+    accounts = fields.get(payload, fields.RPC_GET_TOKEN_LARGEST_ACCOUNTS.get("accounts"))
+    if accounts is None:
+        value = payload.get("result")
+        if isinstance(value, dict):
+            accounts = value.get("value")
+    if not isinstance(accounts, list) or not accounts:
+        return None
+    amounts = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        address = account.get("address")
+        owner = account.get("owner")
+        if address in exclude or owner in exclude:
+            continue
+        amount = account.get("uiAmount")
+        if amount is None and account.get("amount") is not None and account.get("decimals") is not None:
+            amount = float(account["amount"]) / (10 ** int(account["decimals"]))
+        if amount is None:
+            continue
+        amounts.append(float(amount))
+    if not amounts:
+        return None
+    return 100.0 * sum(sorted(amounts, reverse=True)[:10]) / float(supply_ui)
 
 
 def _settings() -> dict[str, float]:
@@ -111,70 +168,50 @@ def _settings() -> dict[str, float]:
     }
 
 
-def parse_top10(payload: Any, supply_ui: float | None, exclude: set[str]) -> float | None:
-    """Read largest accounts only through fields.py.
-
-    The map's paths are None because the captured call was a 429, so a body
-    cannot be turned into a percentage. Error bodies are no data. Returning
-    None is a kill, never a pass.
-    """
-    if not isinstance(payload, dict) or payload.get("error"):
-        return None
-    accounts_path = fields.RPC_GET_TOKEN_LARGEST_ACCOUNTS.get("accounts")
-    if not accounts_path or not supply_ui:
-        return None
-    accounts = fields.get(payload, accounts_path)
-    if not isinstance(accounts, list) or not accounts:
-        return None
-    amount_path = fields.RPC_GET_TOKEN_LARGEST_ACCOUNTS.get("uiAmount")
-    address_path = fields.RPC_GET_TOKEN_LARGEST_ACCOUNTS.get("address")
-    if not amount_path or not address_path:
-        return None
-    ranked = []
-    for account in accounts:
-        address = fields.get(account, address_path)
-        amount = fields.get(account, amount_path)
-        if address in exclude or amount is None:
-            continue
-        ranked.append(float(amount))
-    if not ranked:
-        return None
-    top = sorted(ranked, reverse=True)[:10]
-    return 100.0 * sum(top) / float(supply_ui)
-
-
 class Scanner:
     def __init__(self, desk: Desk) -> None:
         self.desk = desk
         self.runners: list[dict] = []
         self.waiting: dict[str, dict] = {}
+        self.passed: set[str] = set()
+        self.room_started: dict[str, float] = {}
 
     async def run(self) -> None:
-        """Re-read the waiting room every poll_s. The socket delivers new migrations."""
         while True:
             db.beat("scanner", self.desk.now())
-            for message in list(self.waiting.values()):
-                await self.ingest(message)
+            await self._poll_room()
             await asyncio.sleep(db.get_float("poll_s"))
 
-    async def ingest(self, message: dict, runners: list[dict] | None = None) -> dict:
-        """Handle one migration message. Returns the evaluation."""
+    async def _poll_room(self) -> None:
+        mints = list(self.waiting)
+        if not mints:
+            return
+        pairs = await self._dex_batch(mints)
+        for mint in mints:
+            message = self.waiting.get(mint)
+            if message is not None:
+                await self.ingest(message, pair=pairs.get(mint))
+
+    async def ingest(self, message: dict, runners: list[dict] | None = None, pair: dict | None = None) -> dict:
         db.beat("scanner", self.desk.now())
         mint = fields.get(message, fields.MIGRATION["mint"])
+        if mint in self.passed:
+            return {"mint": mint, "verdict": "pass", "reason": None, "duplicate": True}
+        now = self.desk.now()
+        self.room_started.setdefault(mint, now)
         signature = fields.get(message, fields.MIGRATION["signature"])
         creator = fields.get(message, fields.MIGRATION["creator"]) if fields.MIGRATION["creator"] else None
-        now = self.desk.now()
-        pair = await self._dex_pair(mint)
+        if pair is None:
+            pair = await self._dex_pair(mint)
         report = await self._report(mint)
         if not creator and isinstance(report, dict):
             creator = fields.get(report, fields.RUGCHECK_REPORT["creator"])
         creator_balance = None
         if isinstance(report, dict):
             creator_balance = fields.get(report, fields.RUGCHECK_REPORT.get("creatorBalance"))
-        name = symbol = None
-        pool = None
-        liquidity = h1 = h24 = price = volume_m5 = age_min = None
-        created_ms = None
+        name = symbol = pool = None
+        liquidity = h1 = h24 = price = volume_m5 = None
+        curve = None
         if pair:
             pool = fields.get(pair, fields.DEXSCREENER["pairAddress"])
             name = fields.get(pair, fields.DEXSCREENER["baseToken.name"])
@@ -184,9 +221,6 @@ class Scanner:
             h24 = _num(fields.get(pair, fields.DEXSCREENER["priceChange.h24"]))
             price = _num(fields.get(pair, fields.DEXSCREENER["priceUsd"]))
             volume_m5 = _num(fields.get(pair, fields.DEXSCREENER["volume.m5"]))
-            created_ms = fields.get(pair, fields.DEXSCREENER["pairCreatedAt"])
-            if created_ms:
-                age_min = (now - float(created_ms) / 1000.0) / 60.0
         if not name and isinstance(report, dict):
             name = fields.get(report, fields.RUGCHECK_REPORT.get("tokenMeta.name"))
             symbol = fields.get(report, fields.RUGCHECK_REPORT.get("tokenMeta.symbol"))
@@ -204,29 +238,35 @@ class Scanner:
                     excluded.creator_balance_at_migration, coins.creator_balance_at_migration
                 )
             """,
-            (mint, name, symbol, pool, now, creator, creator_balance),
+            (mint, name, symbol, pool, self.room_started[mint], creator, creator_balance),
         )
         if price is not None:
             db.execute(
                 "INSERT INTO prices (mint, ts, price, volume_m5) VALUES (?, ?, ?, ?)",
                 (mint, now, price, volume_m5),
             )
+        age_min = (now - self.room_started[mint]) / 60.0
         top10 = None
         if pair and liquidity is not None and liquidity >= db.get_float("min_liquidity_usd"):
-            top10 = await self._top10(mint, pool)
-        snapshot = {
+            top10 = await self._top10(mint, {item for item in (pool, curve) if item})
+        if h24 is not None and h24 >= db.get_float("runner_h24_pct"):
+            self.runners.append({"mint": mint, "name": name, "symbol": symbol})
+        result = kill_reason({
             "liquidity_usd": liquidity,
             "top10_pct": top10,
             "h1_change_pct": h1,
             "name": name,
             "symbol": symbol,
             "age_min": age_min,
+            "room_min": age_min,
             "has_pair": pair is not None,
             "runners": runners if runners is not None else self._runners_for(mint),
-        }
-        if h24 is not None and h24 >= db.get_float("runner_h24_pct"):
-            self.runners.append({"mint": mint, "name": name, "symbol": symbol})
-        result = kill_reason(snapshot)
+        })
+        if result["verdict"] == "wait":
+            if mint:
+                self.waiting[mint] = message
+            return {"mint": mint, "pool": pool, "creator": creator, **result}
+        self.waiting.pop(mint, None)
         db.execute(
             """
             INSERT INTO scans (
@@ -235,63 +275,82 @@ class Scanner:
             """,
             (mint, now, liquidity, top10, h1, age_min, result["verdict"], result["reason"]),
         )
-        if mint:
-            if result["verdict"] == "wait":
-                self.waiting[mint] = message
-            else:
-                self.waiting.pop(mint, None)
+        log.info(
+            "ts=%s mint=%s verdict=%s reason=%s liq=%s top10=%s h1=%s age=%s sig=%s",
+            now, mint, result["verdict"], result["reason"], liquidity, top10, h1, age_min, signature,
+        )
+        label = symbol or name or mint
         if result["verdict"] == "kill":
-            url = links.coin_url(mint, "solana")
-            label = symbol or name or mint
             db.record_activity(
                 now, "rejected", mint, "scanner",
                 f"Rejected {label}", f"Scanner · {result['reason']}", "Skipped",
             )
-            self.desk.notifier.push(
-                f"Rejected {label}",
-                f"Scanner · {result['reason']}",
-                url,
-                [{"label": "Open on FOMO", "url": url}],
-            )
-            log.info("kill %s %s sig=%s", mint, result["reason"], signature)
-        elif result["verdict"] == "pass":
-            payload = {
+            if db.flag_on("push_rejects"):
+                url = links.coin_url(mint, "solana")
+                self.desk.notifier.push(
+                    f"Rejected {label}", f"Scanner · {result['reason']}", url,
+                    [{"label": "Open on FOMO", "url": url}],
+                )
+        else:
+            self.passed.add(mint)
+            await self.desk.bus.auditor.put({
                 "agent": "scanner",
                 "mint": mint,
                 "name": name,
                 "symbol": symbol,
                 "pool": pool,
                 "creator": creator,
+                "creator_balance_at_migration": creator_balance,
+                "migrated_at": self.room_started[mint],
                 "price": price,
+                "liquidityUsd": liquidity,
                 "liquidity_usd": liquidity,
+                "top10Pct": top10,
                 "top10_pct": top10,
+                "h1ChangePct": h1,
                 "h1_change_pct": h1,
+                "ageMin": age_min,
                 "age_min": age_min,
+                "verdict": "pass",
+                "reason": None,
                 "pair": pair,
                 "report": report,
-            }
-            await self.desk.bus.auditor.put(payload)
-            log.info("pass %s", mint)
-        return {"mint": mint, "pool": pool, "creator": creator, **result, "snapshot": snapshot}
+            })
+        return {"mint": mint, "pool": pool, "creator": creator, **result}
 
     def _runners_for(self, mint: str) -> list[dict]:
-        out = []
-        for runner in self.runners:
-            if runner.get("mint") != mint:
-                copied = dict(runner)
-                copied["self_mint"] = mint
-                out.append(copied)
-        return out
+        return [runner for runner in self.runners if runner.get("mint") != mint]
 
     async def _dex_pair(self, mint: str) -> dict | None:
-        if not mint:
-            return None
+        pairs = await self._dex_batch([mint])
+        return pairs.get(mint)
+
+    async def _dex_batch(self, mints: list[str]) -> dict[str, dict]:
+        if not mints:
+            return {}
         try:
-            payload = await self.desk.http.get_json(DEX_URL + mint)
-        except Exception:
-            log.warning("dexscreener failed for %s", mint)
-            return None
-        return fields.dexscreener_select_pair(payload)
+            payload = await self.desk.http.get_json(DEX_URL + ",".join(mints))
+        except Exception as exc:
+            if getattr(exc, "status", None) == 429 or "429" in str(exc):
+                log.warning("dexscreener 429; keeping the waiting room")
+                await sleep(DEX_BACKOFF_S)
+            else:
+                log.warning("dexscreener failed")
+            return {}
+        found: dict[str, dict] = {}
+        if isinstance(payload, dict):
+            payload = payload.get("pairs") or []
+        if not isinstance(payload, list):
+            return {}
+        for mint in mints:
+            own = [item for item in payload if isinstance(item, dict) and fields.get(item, "baseToken.address") == mint]
+            pair = fields.dexscreener_select_pair(own or payload)
+            if pair and (not own or fields.get(pair, "baseToken.address") in (None, mint)):
+                if own:
+                    found[mint] = fields.dexscreener_select_pair(own) or pair
+                elif len(mints) == 1:
+                    found[mint] = pair
+        return found
 
     async def _report(self, mint: str) -> dict | None:
         try:
@@ -300,20 +359,15 @@ class Scanner:
             return None
         return payload if isinstance(payload, dict) else None
 
-    async def _top10(self, mint: str, pool: str | None) -> float | None:
-        tries = int(db.get_float("audit_retries") or 3)
-        delay = db.get_float("audit_retry_s") or 2
+    async def _top10(self, mint: str, exclude: set[str]) -> float | None:
+        tries = int(db.get_float("retries") or 3)
 
         async def once():
-            return await self._rpc(
-                "getTokenLargestAccounts",
-                [mint],
-            )
+            return await self._rpc("getTokenLargestAccounts", [mint])
 
-        payload = await call_with_retries(once, tries, delay, sleep)
+        payload = await call_with_retries(once, tries, RETRY_GAP_S, sleep)
         supply = await self._supply(mint)
-        exclude = {pool} if pool else set()
-        return parse_top10(payload, supply, exclude)
+        return parse_largest_accounts(payload, supply, exclude)
 
     async def _supply(self, mint: str) -> float | None:
         payload = await self._rpc("getTokenSupply", [mint])
@@ -327,14 +381,21 @@ class Scanner:
 
 
 async def pumpportal_loop(scanner: Scanner) -> None:
-    """The desk's single PumpPortal socket. Trade streams are not subscribed."""
+    """One PumpPortal socket for the desk. Trade streams are not subscribed."""
     import websockets
 
+    backoff = 1
     while True:
         try:
             async with websockets.connect(PUMPPORTAL_URL) as ws:
+                backoff = 1
                 await ws.send(json.dumps({"method": "subscribeMigration"}))
-                async for raw in ws:
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=WS_SILENT_S)
+                    except asyncio.TimeoutError:
+                        log.warning("pumpportal silent for %ss; reconnecting", WS_SILENT_S)
+                        break
                     try:
                         message = json.loads(raw)
                     except json.JSONDecodeError:
@@ -342,8 +403,9 @@ async def pumpportal_loop(scanner: Scanner) -> None:
                     if isinstance(message, dict) and message.get("mint"):
                         await scanner.ingest(message)
         except Exception:
-            log.warning("pumpportal socket closed; backing off")
-            await asyncio.sleep(db.get_float("rpc_backoff_s") or 30)
+            log.warning("pumpportal closed; backoff %ss", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 def _num(value: Any) -> float | None:

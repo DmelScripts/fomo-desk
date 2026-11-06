@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agents.scanner import format_h1, format_liq, format_top10, kill_reason, parse_top10
+from agents.scanner import format_h1, format_liq, format_top10, kill_reason, parse_largest_accounts
 from tests.support import load
 
 SETTINGS = {
@@ -60,9 +60,12 @@ class TestScanner(unittest.TestCase):
 
     def test_no_largest_accounts_is_never_a_pass(self):
         sample = load("rpc_getTokenLargestAccounts.json")
-        self.assertIsNone(parse_top10(sample, 1000, set()))
-        result = kill_reason(_snap(top10_pct=None), SETTINGS)
-        self.assertEqual(result, {"verdict": "kill", "reason": "no data: top 10"})
+        self.assertIsNone(parse_largest_accounts(sample, 1000, set()))
+        # Missing top 10 is not a listed kill. The coin waits, then drops.
+        waiting = kill_reason(_snap(top10_pct=None, age_min=15), SETTINGS)
+        self.assertEqual(waiting["verdict"], "wait")
+        dropped = kill_reason(_snap(top10_pct=None, age_min=61), SETTINGS)
+        self.assertEqual(dropped, {"verdict": "kill", "reason": "never qualified"})
 
     def test_largest_accounts_retries_then_still_red(self):
         import db
