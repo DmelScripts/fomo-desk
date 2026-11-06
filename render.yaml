@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: fomo-desk
+    runtime: python
+    region: singapore
+    plan: starter
+    branch: main
+    autoDeploy: true
+    autoDeployTrigger: commit
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: desk-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: DESK_DATA_DIR
+        value: /var/data
+      - key: TYPESAFE_API_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: APP_TOKEN
+        sync: false
