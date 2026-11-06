@@ -18,6 +18,11 @@ from config import load_secrets
 
 log = logging.getLogger("analyst")
 
+
+def _paused(name: str) -> bool:
+    from api import is_paused
+    return is_paused(name)
+
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 QUESTIONS = ("alive_6h", "organic", "flush", "chase")
 # Bracket in the agent text. STEP 10 does not give it a key.
@@ -124,6 +129,10 @@ class Analyst:
             try:
                 payload = await asyncio.wait_for(self.desk.bus.analyst.get(), timeout=1)
             except asyncio.TimeoutError:
+                continue
+            if _paused("analyst"):
+                await self.desk.bus.analyst.put(payload)
+                await self.desk.sleep(0.05)
                 continue
             await self.judge(payload)
 

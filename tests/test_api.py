@@ -8,7 +8,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import db
-from api import api_price_mints, write_price_batch
+from api import _night_start, _state, api_price_mints, is_paused, write_price_batch
+from config import DESK_TZ, report_boundary
 from bus import hub, set_risk_price_mints, set_scanner_price_mints
 from tests.support import temp_desk_env
 
@@ -192,3 +193,117 @@ class TestApi(unittest.TestCase):
         self.assertNotIn("dummy-typesafe", response.text)
         self.assertNotIn("dummy-tg", response.text)
         self.assertNotIn("dummy-vapid", response.text)
+
+    def test_vietnam_day_boundary(self):
+        from datetime import datetime, timezone
+        at = datetime(2026, 11, 6, 1, 0, tzinfo=timezone.utc)
+        self.assertEqual(at.astimezone(DESK_TZ).strftime("%Y-%m-%d %H:%M"), "2026-11-06 08:00")
+        exactly = at.timestamp()
+        just_before = exactly - 1
+        just_after = exactly + 1
+        self.assertEqual(_night_start(exactly), exactly)
+        self.assertEqual(_night_start(just_after), exactly)
+        self.assertEqual(_night_start(just_before), exactly - 86400)
+        self.assertEqual(report_boundary(exactly, "08:00", upcoming=True), exactly + 86400)
+        self.assertEqual(report_boundary(just_before, "08:00", upcoming=True), exactly)
+        db.execute(
+            "INSERT INTO signals (mint, ts, price, mode, status) VALUES (?, ?, 1, 'PAPER', 'sent')",
+            ("BeforeMint", just_before),
+        )
+        db.execute(
+            "INSERT INTO signals (mint, ts, price, mode, status) VALUES (?, ?, 1, 'PAPER', 'sent')",
+            ("AfterMint", exactly),
+        )
+        owned = api_price_mints(just_after)
+        self.assertIn("AfterMint", owned)
+        self.assertNotIn("BeforeMint", owned)
+        db.execute(
+            "INSERT INTO balance (ts, value) VALUES (?, ?)",
+            (just_before, 150.0),
+        )
+        db.execute(
+            "INSERT INTO balance (ts, value) VALUES (?, ?)",
+            (exactly, 180.0),
+        )
+        from api import _chart
+        live = _chart("LIVE", just_after)
+        self.assertEqual([point["ts"] for point in live["points"]], [exactly])
+        db.execute(
+            """
+            INSERT INTO positions (
+                mint, opened_at, entry_price, size_usd, closed_at, pnl_usd, mode
+            ) VALUES (?, ?, 1, 10, ?, 50, 'PAPER')
+            """,
+            ("AfterMint", exactly, exactly),
+        )
+        state = _state()
+        self.assertEqual(state["balance"], 250.0)
+        self.assertEqual(state["today_pct"], 25.0)
+        self.assertEqual(state["multiplier"], 1.25)
+
+    def test_pause_reaches_the_loops(self):
+        import asyncio
+        from agents.auditor import Auditor
+        from agents.executor import Executor
+        from agents.scanner import Scanner
+        from bus import Desk
+        from notifier import Notifier
+        import api
+
+        class Boom:
+            async def get_json(self, url):
+                raise AssertionError(url)
+            async def post_json(self, *args, **kwargs):
+                raise AssertionError("paused work called the network")
+
+        desk = Desk(Boom(), Notifier(mode="PAPER"), now=lambda: 1_000.0)
+        api._paused.add("scanner")
+        self.addCleanup(api._paused.clear)
+        scanner = Scanner(desk)
+        held = asyncio.run(scanner.ingest({
+            "mint": "PausedMint", "signature": "sig", "txType": "migrate", "pool": "pump-amm",
+        }))
+        self.assertEqual(held["reason"], "paused")
+        self.assertIn("PausedMint", scanner.waiting)
+
+        api._paused.add("auditor")
+        auditor = Auditor(desk)
+        asyncio.run(desk.bus.auditor.put({"mint": "PausedMint"}))
+        payload = asyncio.run(desk.bus.auditor.get())
+
+        async def hold():
+            return await auditor._hold_if_paused(payload, desk.bus.auditor)
+
+        self.assertTrue(asyncio.run(hold()))
+        self.assertEqual(desk.bus.auditor.qsize(), 1)
+        self.assertFalse(db.query("SELECT id FROM audits"))
+
+        async def cancel_sleep(_seconds):
+            raise asyncio.CancelledError()
+
+        held_desk = Desk(Boom(), Notifier(mode="PAPER"), now=lambda: 1_000.0, sleep=cancel_sleep)
+        executor = Executor(held_desk)
+        asyncio.run(held_desk.bus.executor.put({"mint": "PausedMint", "price": 1, "liquidity_usd": 50000}))
+        api._paused.add("executor")
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(executor.run())
+        self.assertEqual(held_desk.bus.executor.qsize(), 1)
+        self.assertFalse(db.query("SELECT id FROM signals WHERE mint = ?", ("PausedMint",)))
+
+        from agents.analyst import Analyst
+        analyst = Analyst(held_desk)
+        asyncio.run(held_desk.bus.analyst.put({"mint": "PausedMint"}))
+        api._paused.add("analyst")
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(analyst.run())
+        self.assertEqual(held_desk.bus.analyst.qsize(), 1)
+
+        api._paused.add("risk")
+        self.assertTrue(is_paused("risk"))
+        db.execute(
+            "INSERT INTO positions (mint, opened_at, entry_price, size_usd, mode) VALUES (?, 1, 1, 10, 'PAPER')",
+            ("OpenMint",),
+        )
+        self.assertFalse(is_paused("risk"))
+        refused = self.client.post("/api/agents/risk/pause", headers=AUTH)
+        self.assertEqual(refused.status_code, 409)

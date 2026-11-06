@@ -16,6 +16,11 @@ from bus import Desk
 log = logging.getLogger("executor")
 
 
+def _paused(name: str) -> bool:
+    from api import is_paused
+    return is_paused(name)
+
+
 def size_ticket(
     stack_usd: float,
     stack_pct: float,
@@ -106,6 +111,9 @@ class Executor:
         self._warn()
         while True:
             db.beat("executor", self.desk.now())
+            if _paused("executor"):
+                await self.desk.sleep(0.05)
+                continue
             self._expire_live()
             try:
                 payload = await asyncio.wait_for(self.desk.bus.executor.get(), timeout=1)
@@ -311,12 +319,7 @@ def _fmt(value: float) -> str:
 
 
 def _next_report(now: float) -> float:
-    """Skips last until the next report_time. The morning page itself is STEP 12."""
-    import datetime as dt
+    """Skips last until the next Vietnam report_time. The page itself is STEP 12."""
+    from config import report_boundary
     clock = db.get_setting("report_time", "08:00") or "08:00"
-    hour, minute = (int(part) for part in clock.split(":"))
-    moment = dt.datetime.fromtimestamp(now, dt.timezone.utc)
-    target = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= moment:
-        target = target + dt.timedelta(days=1)
-    return target.timestamp()
+    return report_boundary(now, clock, upcoming=True)

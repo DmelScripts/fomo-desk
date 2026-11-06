@@ -19,6 +19,11 @@ from bus import Desk, call_with_retries
 
 log = logging.getLogger("auditor")
 
+
+def _paused(name: str) -> bool:
+    from api import is_paused
+    return is_paused(name)
+
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 RUGCHECK_GRAPH = "https://api.rugcheck.xyz/v1/tokens/{mint}/insiders/graph"
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -86,7 +91,17 @@ class Auditor:
                 payload = await asyncio.wait_for(self.desk.bus.auditor.get(), timeout=1)
             except asyncio.TimeoutError:
                 continue
+            if await self._hold_if_paused(payload, self.desk.bus.auditor):
+                continue
             await self.audit_payload(payload)
+
+    async def _hold_if_paused(self, payload: dict, queue) -> bool:
+        import asyncio
+        if not _paused("auditor"):
+            return False
+        await queue.put(payload)
+        await self.desk.sleep(0.05)
+        return True
 
     async def audit_payload(self, payload: dict) -> dict:
         db.beat("auditor", self.desk.now())

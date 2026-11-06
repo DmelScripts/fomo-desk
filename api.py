@@ -11,7 +11,6 @@ import asyncio
 import hmac
 import json
 import time
-from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,7 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import links
 from agents.executor import paper_balance, set_mode
 from bus import covered_price_mints, hub
-from config import SECRET_KEYS, SETTING_GROUPS, SETTING_RULES, load_secrets
+from config import SECRET_KEYS, SETTING_GROUPS, SETTING_RULES, load_secrets, report_boundary
 from db import AGENT_NAMES, agents_enabled, get_float, get_setting, query, set_setting
 
 router = APIRouter()
@@ -35,6 +34,17 @@ _paused: set[str] = set()
 
 def paused_agents() -> set[str]:
     return set(_paused)
+
+
+def is_paused(name: str) -> bool:
+    """Whether a loop should skip new work.
+
+    Risk keeps guarding while any position is open, even if a pause was
+    stored earlier. The API also refuses that pause.
+    """
+    if name == "risk" and query("SELECT id FROM positions WHERE closed_at IS NULL"):
+        return False
+    return name in _paused
 
 
 def _unauthorized() -> None:
@@ -70,17 +80,23 @@ def require_app_token(request: Request) -> None:
 
 
 def _night_start(now: float | None = None) -> float:
-    """Start of the current reporting night. report_time is HH:MM UTC."""
-    from datetime import timedelta
-
+    """Start of the current night. report_time is Asia/Ho_Chi_Minh, not UTC."""
     now = time.time() if now is None else now
     clock = get_setting("report_time", "08:00") or "08:00"
-    hour, minute = (int(part) for part in clock.split(":"))
-    moment = datetime.fromtimestamp(now, timezone.utc)
-    start = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if start > moment:
-        start = start - timedelta(days=1)
-    return start.timestamp()
+    return report_boundary(now, clock, upcoming=False)
+
+
+def _balance_before(ts: float) -> float:
+    """PAPER stack plus closes strictly before ts. No invented fills."""
+    start = get_float("paper_start_stack")
+    rows = query(
+        """
+        SELECT COALESCE(SUM(pnl_usd), 0) AS n FROM positions
+        WHERE mode = 'PAPER' AND closed_at IS NOT NULL AND closed_at < ?
+        """,
+        (ts,),
+    )
+    return start + float(rows[0]["n"] or 0)
 
 
 def api_price_mints(now: float | None = None) -> list[str]:
@@ -230,9 +246,9 @@ def _cards() -> list[dict]:
 
 def _state() -> dict:
     balance = paper_balance()
-    start = get_float("paper_start_stack")
-    today = 0.0 if start == 0 else (balance - start) / start * 100.0
-    multiplier = 1.0 if start == 0 else balance / start
+    baseline = _balance_before(_night_start())
+    today = 0.0 if baseline == 0 else (balance - baseline) / baseline * 100.0
+    multiplier = 1.0 if baseline == 0 else balance / baseline
     return {
         "balance": balance,
         "today_pct": today,
@@ -251,11 +267,11 @@ def _window(range_name: str, now: float) -> float | None:
     return now - spans[range_name]
 
 
-def _chart(range_name: str) -> dict:
+def _chart(range_name: str, now: float | None = None) -> dict:
     allowed = {"LIVE", "1H", "4H", "1D", "1W", "ALL"}
     if range_name not in allowed:
         raise HTTPException(status_code=400, detail="range must be LIVE, 1H, 4H, 1D, 1W, or ALL")
-    now = time.time()
+    now = time.time() if now is None else now
     start = _window(range_name, now)
     if start is None:
         points = query("SELECT ts, value FROM balance ORDER BY ts")
@@ -566,7 +582,7 @@ def state(request: Request) -> dict:
 @router.get("/api/chart")
 def chart(request: Request, range: str = "LIVE") -> dict:
     require_app_token(request)
-    return _chart(range)
+    return _chart(range, time.time())
 
 
 @router.get("/api/activity")

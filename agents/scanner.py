@@ -20,6 +20,11 @@ from bus import Desk, call_with_retries, set_scanner_price_mints
 
 log = logging.getLogger("scanner")
 
+
+def _paused(name: str) -> bool:
+    from api import is_paused
+    return is_paused(name)
+
 PUMPPORTAL_URL = "wss://pumpportal.fun/api/data"
 DEX_URL = "https://api.dexscreener.com/tokens/v1/solana/"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
@@ -179,7 +184,8 @@ class Scanner:
     async def run(self) -> None:
         while True:
             db.beat("scanner", self.desk.now())
-            await self._poll_room()
+            if not _paused("scanner"):
+                await self._poll_room()
             await asyncio.sleep(db.get_float("poll_s"))
 
     async def _poll_room(self) -> None:
@@ -196,6 +202,11 @@ class Scanner:
     async def ingest(self, message: dict, runners: list[dict] | None = None, pair: dict | None = None) -> dict:
         db.beat("scanner", self.desk.now())
         mint = fields.get(message, fields.MIGRATION["mint"])
+        if _paused("scanner"):
+            if mint:
+                self.waiting[mint] = message
+                self.room_started.setdefault(mint, self.desk.now())
+            return {"mint": mint, "verdict": "wait", "reason": "paused"}
         if mint in self.passed:
             return {"mint": mint, "verdict": "pass", "reason": None, "duplicate": True}
         now = self.desk.now()

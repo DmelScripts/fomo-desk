@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# report_time is a clock on this zone. Stored rows stay unix UTC instants.
+DESK_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 DESK_ROOT = Path(__file__).resolve().parent
 SETTINGS_SEED_PATH = DESK_ROOT / "settings.seed.json"
@@ -155,6 +160,22 @@ SETTING_GROUPS = {
         "push_rejects", "fees_ref_discount", "fomo_handle",
     ],
 }
+
+
+def report_boundary(now: float, report_time: str = "08:00", *, upcoming: bool = False) -> float:
+    """Last or next report_time in Asia/Ho_Chi_Minh, as a unix instant.
+
+    08:00 in Vietnam is 01:00 UTC. Exactly 08:00 starts the new night.
+    """
+    hour, minute = (int(part) for part in report_time.split(":"))
+    moment = datetime.fromtimestamp(now, DESK_TZ)
+    mark = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if upcoming:
+        if mark <= moment:
+            mark = mark + timedelta(days=1)
+    elif mark > moment:
+        mark = mark - timedelta(days=1)
+    return mark.timestamp()
 
 
 def load_seed() -> dict:

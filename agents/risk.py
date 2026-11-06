@@ -16,6 +16,11 @@ from bus import Desk, set_risk_price_mints
 
 log = logging.getLogger("risk")
 
+
+def _paused(name: str) -> bool:
+    from api import is_paused
+    return is_paused(name)
+
 # "No price for [4] polls" is a bracket in the agent text, not a STEP 10 key.
 NO_PRICE_POLLS = 4
 # "429: back off [30]s" is the same.
@@ -31,6 +36,11 @@ class Risk:
         import asyncio
         while True:
             db.beat("risk", self.desk.now())
+            # An open position cannot be left unguarded. Pause applies only
+            # when nothing is open; the API also rejects that pause.
+            if _paused("risk") and not db.query("SELECT id FROM positions WHERE closed_at IS NULL"):
+                await asyncio.sleep(db.get_float("risk.poll_s"))
+                continue
             try:
                 await self.poll_open()
             except Exception as exc:
