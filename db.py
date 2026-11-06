@@ -1,11 +1,269 @@
-"""SQLite persistence for coins, scans, prices, positions, activity, skips.
-
-Skeleton: not implemented yet.
-"""
+"""SQLite persistence for the desk. One connection per call."""
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
 
-class DB:
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("db.py is a STEP 3 skeleton")
+from config import load_seed
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS coins (
+    mint TEXT PRIMARY KEY,
+    name TEXT,
+    symbol TEXT,
+    pool TEXT,
+    migrated_at REAL,
+    creator TEXT,
+    creator_balance_at_migration REAL,
+    holders INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT,
+    ts REAL,
+    liquidity_usd REAL,
+    top10_pct REAL,
+    h1_change_pct REAL,
+    age_min REAL,
+    verdict TEXT,
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT,
+    ts REAL,
+    layer TEXT,
+    name TEXT,
+    value_text TEXT,
+    "pass" INTEGER CHECK ("pass" IN (0, 1)),
+    source TEXT
+);
+
+CREATE TABLE IF NOT EXISTS verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT,
+    ts REAL,
+    alive_6h INTEGER CHECK (alive_6h IN (0, 1)),
+    organic INTEGER CHECK (organic IN (0, 1)),
+    flush INTEGER CHECK (flush IN (0, 1)),
+    chase INTEGER CHECK (chase IN (0, 1)),
+    score REAL,
+    "pass" INTEGER CHECK ("pass" IN (0, 1)),
+    reason TEXT,
+    input_tokens INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT,
+    ts REAL,
+    price REAL,
+    size_usd REAL,
+    stack_pct REAL,
+    link TEXT,
+    mode TEXT CHECK (mode IN ('PAPER', 'LIVE')),
+    status TEXT
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT,
+    opened_at REAL,
+    entry_price REAL,
+    size_usd REAL,
+    peak_price REAL,
+    stop_price REAL,
+    trail_active INTEGER CHECK (trail_active IN (0, 1)),
+    closed_at REAL,
+    exit_price REAL,
+    exit_reason TEXT,
+    pnl_usd REAL,
+    fees_usd REAL,
+    mode TEXT CHECK (mode IN ('PAPER', 'LIVE'))
+);
+
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL,
+    kind TEXT CHECK (kind IN ('bought', 'sold', 'stopped', 'rejected')),
+    mint TEXT,
+    agent TEXT,
+    title TEXT,
+    subtitle TEXT,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS prices (
+    mint TEXT,
+    ts REAL,
+    price REAL,
+    volume_m5 REAL
+);
+
+CREATE TABLE IF NOT EXISTS balance (
+    ts REAL,
+    value REAL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS change_log (
+    ts REAL,
+    key TEXT,
+    "old" TEXT,
+    "new" TEXT,
+    who TEXT
+);
+
+CREATE TABLE IF NOT EXISTS skips (
+    mint TEXT,
+    "until" REAL
+);
+
+CREATE TABLE IF NOT EXISTS heartbeats (
+    agent TEXT PRIMARY KEY,
+    ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS push_subs (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT,
+    auth TEXT,
+    created_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
+CREATE INDEX IF NOT EXISTS idx_scans_mint_ts ON scans (mint, ts);
+CREATE INDEX IF NOT EXISTS idx_audits_mint_ts ON audits (mint, ts);
+CREATE INDEX IF NOT EXISTS idx_verdicts_mint_ts ON verdicts (mint, ts);
+CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity (ts);
+CREATE INDEX IF NOT EXISTS idx_positions_closed_at ON positions (closed_at);
+CREATE INDEX IF NOT EXISTS idx_balance_ts ON balance (ts);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_agent ON heartbeats (agent);
+"""
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("DESK_DATA_DIR") or "./data")
+
+
+def _db_file() -> Path:
+    return _data_dir() / "desk.db"
+
+
+def _setting_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"))
+
+
+def connect() -> sqlite3.Connection:
+    """Open ${DESK_DATA_DIR}/desk.db. Caller closes it. Do not log the path."""
+    directory = _data_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(directory / "desk.db")
+    except OSError:
+        raise RuntimeError("DESK_DATA_DIR is not usable") from None
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def init_db() -> None:
+    """Create the schema if missing and seed settings without overwriting."""
+    conn = connect()
+    try:
+        conn.executescript(_SCHEMA)
+        now = time.time()
+        for key, value in load_seed().items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, _setting_text(value), now),
+            )
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def execute(sql: str, params: tuple = ()) -> None:
+    conn = connect()
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def query(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+    conn = connect()
+    try:
+        return list(conn.execute(sql, params))
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: str, who: str | None = None) -> None:
+    """Update one setting and append change_log when the value changes."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        old = None if row is None else row["value"]
+        if row is not None and old == value:
+            return
+        now = time.time()
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+        conn.execute(
+            'INSERT INTO change_log (ts, key, "old", "new", who) VALUES (?, ?, ?, ?, ?)',
+            (now, key, old, value, who),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def db_status() -> dict:
+    """Health fields only. No path, no rows, no secrets."""
+    conn = connect()
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = conn.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchone()[0]
+        path_ok = _db_file().is_file()
+    finally:
+        conn.close()
+    return {
+        "path_ok": bool(path_ok),
+        "journal_mode": str(journal_mode).lower(),
+        "tables": int(tables),
+        "user_version": int(user_version),
+    }

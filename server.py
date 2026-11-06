@@ -9,6 +9,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from db import db_status, init_db
+
 WEB_DIR = Path(__file__).resolve().parent / "web"
 _INDEX_PATHS = {"/", "/index.html"}
 
@@ -66,6 +68,7 @@ class SecurityHeaders:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_data_dir()
+    init_db()
     yield
 
 
@@ -75,7 +78,7 @@ app.add_middleware(SecurityHeaders)
 
 @app.get("/health")
 def health():
-    return {"ok": True, "step": 3}
+    return {"ok": True, "step": 4, "db": db_status()}
 
 
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
