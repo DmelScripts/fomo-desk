@@ -174,7 +174,7 @@ class Risk:
             status = "exiting"
         db.record_activity(now, kind, row["mint"], "risk", title, subtitle, value)
         self.desk.notifier.push(title, subtitle, url, _sell_buttons(url, row["mint"]))
-        return {
+        outcome = {
             "agent": "risk",
             "mint": row["mint"],
             "name": name,
@@ -195,6 +195,13 @@ class Risk:
             "status": status,
             "link": url,
         }
+        self.desk.bus.publish("exit", {
+            "agent": "risk", "mint": row["mint"], "name": name, "reason": reason,
+            "entryPrice": entry, "exitPrice": price, "peakPrice": peak,
+            "pnlUsd": pnl, "pct": pct, "feesUsd": fee, "stopPct": state["stop_pct"],
+            "mode": mode, "status": status, "link": url,
+        })
+        return outcome
 
     def _remind(self, row, state, now, url, name) -> None:
         wait = db.get_float("risk.confirm_window_min") * 60.0

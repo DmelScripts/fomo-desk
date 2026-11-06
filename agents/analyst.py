@@ -174,6 +174,16 @@ class Analyst:
             "label": label,
         })
         self._store(decision)
+        self.desk.bus.publish("verdict", {
+            "agent": "analyst",
+            "mint": mint,
+            "answers": decision["answers"],
+            "score": decision["score"],
+            "passed": decision["passed"],
+            "failed": decision["failed"],
+            "model": model,
+            "inputTokens": input_tokens,
+        })
         log.info(
             "mint=%s state=%s answers=%s score=%s verdict=%s tokens=%s",
             mint, hashlib.sha256(state.encode()).hexdigest()[:12],

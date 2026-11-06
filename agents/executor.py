@@ -169,6 +169,11 @@ class Executor:
         if reason or size is None:
             self._signal(mint, now, fresh_price, None, url, mode, "skipped", reason)
             self.sent.add(mint)
+            self.desk.bus.publish("signal", {
+                "agent": "executor", "mint": mint, "signalPrice": fresh_price, "sizeUsd": None,
+                "link": url, "mode": mode if mode in ("PAPER", "LIVE") else "PAPER",
+                "status": "skipped", "reason": reason,
+            })
             log.info("mint=%s stack=%s size=%s cap=%s status=skipped reason=%s", mint, stack, size, None, reason)
             return {"agent": "executor", "mint": mint, "status": "skipped", "reason": reason, "link": url, "mode": mode}
         pct = size / stack * 100.0 if stack else 0
@@ -191,11 +196,12 @@ class Executor:
         if mode == "PAPER":
             self._fill(mint, name, now, float(fresh_price), size, pct, stop, mode)
             status = "bought"
+            self.desk.bus.publish("fill", {"agent": "executor", "mint": mint, "price": float(fresh_price), "sizeUsd": size, "mode": mode})
         else:
             self.pending[mint] = {"at": now, "price": float(fresh_price), "size": size, "name": name, "pct": pct}
             status = "sent"
         log.info("mint=%s stack=%s raw=%s final=%s mode=%s status=%s link=%s", mint, stack, stack * db.get_float("stack_pct") / 100, size, mode, status, url)
-        return {
+        result = {
             "agent": "executor",
             "mint": mint,
             "signalPrice": float(fresh_price),
@@ -207,6 +213,8 @@ class Executor:
             "reason": None,
             "stop_price": float(fresh_price) * (1 - stop / 100.0),
         }
+        self.desk.bus.publish("signal", {key: result[key] for key in ("agent", "mint", "signalPrice", "sizeUsd", "stackPct", "link", "mode", "status", "reason")})
+        return result
 
     def mark_bought(self, mint: str, now: float | None = None) -> dict:
         now = self.desk.now() if now is None else now

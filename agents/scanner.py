@@ -280,6 +280,11 @@ class Scanner:
             "ts=%s mint=%s verdict=%s reason=%s liq=%s top10=%s h1=%s age=%s sig=%s",
             now, mint, result["verdict"], result["reason"], liquidity, top10, h1, age_min, signature,
         )
+        self.desk.bus.publish("scan", {
+            "agent": "scanner", "mint": mint, "name": name, "symbol": symbol, "pool": pool,
+            "liquidityUsd": liquidity, "top10Pct": top10, "h1ChangePct": h1, "ageMin": age_min,
+            "verdict": result["verdict"], "reason": result["reason"], "ts": now,
+        })
         label = symbol or name or mint
         if result["verdict"] == "kill":
             db.record_activity(
