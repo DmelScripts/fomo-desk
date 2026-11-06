@@ -5,7 +5,6 @@ services:
     region: singapore
     plan: starter
     branch: main
-    autoDeploy: true
     autoDeployTrigger: commit
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
