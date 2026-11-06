@@ -86,8 +86,11 @@ async def lifespan(_app: FastAPI):
     install_secret_redaction()
     agent_task = None
     price_stop = asyncio.Event()
+    price_task = None
     # Empty mint lists do not call DexScreener. Agents stay off unless enabled.
-    price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
+    # DESK_PRICE_LOOP=0 is for a local screenshot process only. Render does not set it.
+    if os.environ.get("DESK_PRICE_LOOP") != "0":
+        price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
     if agents_enabled():
         from main import run_desk
         agent_task = asyncio.create_task(run_desk())
@@ -95,9 +98,10 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         price_stop.set()
-        price_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await price_task
+        if price_task is not None:
+            price_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await price_task
         if agent_task is not None:
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -134,7 +138,7 @@ async def _fetch_prices(url: str):
 def health():
     return {
         "ok": True,
-        "step": 7,
+        "step": 8,
         "db": db_status(),
         "agents_enabled": agents_enabled(),
         "heartbeats": heartbeat_ages(),

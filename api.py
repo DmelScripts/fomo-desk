@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import os
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -200,31 +201,46 @@ def _coin_url(mint: str | None) -> str | None:
     return links.coin_url(mint, "solana")
 
 
-def _agent_count(name: str) -> int:
+def _agent_count(name: str, since: float) -> int:
+    """Tonight's count. report_time is the Vietnam night boundary."""
     if name == "scanner":
-        return query("SELECT COUNT(*) AS n FROM scans")[0]["n"]
+        return query("SELECT COUNT(*) AS n FROM scans WHERE ts >= ?", (since,))[0]["n"]
     if name == "auditor":
-        return query("SELECT COUNT(DISTINCT mint) AS n FROM audits")[0]["n"]
+        return query("SELECT COUNT(DISTINCT mint) AS n FROM audits WHERE ts >= ?", (since,))[0]["n"]
     if name == "analyst":
-        return query("SELECT COUNT(*) AS n FROM verdicts")[0]["n"]
+        return query("SELECT COUNT(*) AS n FROM verdicts WHERE ts >= ?", (since,))[0]["n"]
     if name == "executor":
-        return query("SELECT COUNT(*) AS n FROM signals")[0]["n"]
+        return query("SELECT COUNT(*) AS n FROM signals WHERE ts >= ?", (since,))[0]["n"]
     return query(
-        "SELECT COUNT(*) AS n FROM positions WHERE exit_reason IS NOT NULL"
+        """
+        SELECT COUNT(*) AS n FROM positions
+        WHERE exit_reason IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= ?
+        """,
+        (since,),
     )[0]["n"]
+
+
+def _coin_label(name: str | None, symbol: str | None, mint: str | None) -> str | None:
+    if symbol:
+        return symbol
+    if name:
+        return name
+    return mint
 
 
 def _cards() -> list[dict]:
     enabled = agents_enabled()
+    since = _night_start()
+    open_positions = query("SELECT id FROM positions WHERE closed_at IS NULL")
     cards = []
     for name in AGENT_NAMES:
-        count = int(_agent_count(name))
-        paused = name in _paused
+        count = int(_agent_count(name, since))
+        paused = is_paused(name)
         if name == "scanner" and count == 0:
             line = "Listening for graduations"
         elif name == "auditor" and count == 0:
             line = "No coin taken apart yet"
-        elif name == "risk" and query("SELECT id FROM positions WHERE closed_at IS NULL"):
+        elif name == "risk" and open_positions:
             line = "Guarding"
         else:
             line = None
@@ -235,11 +251,94 @@ def _cards() -> list[dict]:
             "count": count,
             "line": line,
         }
-        if name == "risk":
+        if name == "scanner":
+            rows = query(
+                """
+                SELECT s.ts, s.mint, s.verdict, s.reason, s.liquidity_usd, c.name, c.symbol
+                FROM scans s LEFT JOIN coins c ON c.mint = s.mint
+                WHERE s.ts >= ?
+                ORDER BY s.ts DESC LIMIT 5
+                """,
+                (since,),
+            )
+            card["feed"] = [
+                {
+                    "ts": row["ts"],
+                    "mint": row["mint"],
+                    "name": _coin_label(row["name"], row["symbol"], row["mint"]),
+                    "verdict": row["verdict"],
+                    "reason": row["reason"],
+                    "liquidity_usd": row["liquidity_usd"],
+                    "coin_url": _coin_url(row["mint"]),
+                }
+                for row in rows
+            ]
+        elif name == "auditor":
+            rejected = query(
+                """
+                SELECT COUNT(DISTINCT mint) AS n FROM audits
+                WHERE ts >= ? AND "pass" = 0 AND value_text != 'not checked'
+                """,
+                (since,),
+            )[0]["n"]
+            card["rejected"] = int(rejected or 0)
+            latest = query("SELECT mint, ts FROM audits WHERE ts >= ? ORDER BY ts DESC LIMIT 1", (since,))
+            layers = []
+            if latest:
+                layer_rows = query(
+                    """
+                    SELECT layer, name, value_text, "pass" AS ok FROM audits
+                    WHERE mint = ? AND ts = ? ORDER BY layer
+                    """,
+                    (latest[0]["mint"], latest[0]["ts"]),
+                )
+                for row in layer_rows:
+                    layers.append({
+                        "n": int(row["layer"]) if str(row["layer"]).isdigit() else row["layer"],
+                        "name": row["name"],
+                        "pass": None if row["ok"] is None else bool(row["ok"]),
+                        "value": row["value_text"],
+                    })
+                reds = [layer for layer in layers if layer["pass"] is False and layer["value"] != "not checked"]
+                if layers and not reds and len(layers) == 8:
+                    card["line"] = "8/8 → Executor"
+                elif reds:
+                    card["line"] = reds[0]["value"]
+            card["layers"] = layers
+        elif name == "analyst":
+            rows = query(
+                'SELECT score, "pass" AS ok FROM verdicts WHERE ts >= ? ORDER BY ts DESC LIMIT 1',
+                (since,),
+            )
+            card["score"] = rows[0]["score"] if rows else None
+            card["min_score"] = get_float("min_score")
+        elif name == "executor":
+            card["stack_pct"] = get_float("stack_pct")
+            rows = query(
+                "SELECT size_usd, stack_pct, status FROM signals WHERE ts >= ? ORDER BY ts DESC LIMIT 1",
+                (since,),
+            )
+            card["last_size_usd"] = rows[0]["size_usd"] if rows else None
+            card["last_stack_pct"] = rows[0]["stack_pct"] if rows else None
+            card["last_status"] = rows[0]["status"] if rows else None
+        elif name == "risk":
             card["stop_pct"] = get_float("stop_pct")
             card["trail_pct"] = get_float("trail_pct")
-        if name == "executor":
-            card["stack_pct"] = get_float("stack_pct")
+            card["pause_locked"] = bool(open_positions)
+            if not open_positions:
+                last = query(
+                    """
+                    SELECT kind, subtitle FROM activity
+                    WHERE agent = 'risk' AND ts >= ? ORDER BY ts DESC LIMIT 1
+                    """,
+                    (since,),
+                )
+                if last:
+                    subtitle = last[0]["subtitle"] or ""
+                    if "trail" in subtitle.lower():
+                        card["line"] = "Trailed out"
+                    elif last[0]["kind"] == "stopped":
+                        card["line"] = "Stopped"
         cards.append(card)
     return cards
 
@@ -255,6 +354,8 @@ def _state() -> dict:
         "multiplier": multiplier,
         "mode": get_setting("mode", "PAPER"),
         "agents": _cards(),
+        "open_positions": int(query("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL")[0]["n"] or 0),
+        "fixture": os.environ.get("DESK_FIXTURE") == "1",
     }
 
 
@@ -275,10 +376,13 @@ def _chart(range_name: str, now: float | None = None) -> dict:
     start = _window(range_name, now)
     if start is None:
         points = query("SELECT ts, value FROM balance ORDER BY ts")
-        marks = query("SELECT ts, kind, title, mint FROM activity ORDER BY ts")
+        marks = query("SELECT ts, kind, title, subtitle, value, mint FROM activity ORDER BY ts")
     else:
         points = query("SELECT ts, value FROM balance WHERE ts >= ? ORDER BY ts", (start,))
-        marks = query("SELECT ts, kind, title, mint FROM activity WHERE ts >= ? ORDER BY ts", (start,))
+        marks = query(
+            "SELECT ts, kind, title, subtitle, value, mint FROM activity WHERE ts >= ? ORDER BY ts",
+            (start,),
+        )
     return {
         "range": range_name,
         "start": points[0]["value"] if points else None,
@@ -288,6 +392,8 @@ def _chart(range_name: str, now: float | None = None) -> dict:
                 "ts": row["ts"],
                 "kind": row["kind"],
                 "title": row["title"],
+                "subtitle": row["subtitle"],
+                "value": row["value"],
                 "mint": row["mint"],
                 "coin_url": _coin_url(row["mint"]),
             }
@@ -387,16 +493,42 @@ def _coin(mint: str) -> dict:
         trail = None
         if pos["trail_active"] and pos["peak_price"] is not None:
             trail = float(pos["peak_price"]) * (1 - get_float("trail_pct") / 100.0)
-        exit_lines = {"stop": pos["stop_price"], "trail": trail}
+        current = trail if trail is not None else pos["stop_price"]
+        carried = None
+        if pos["entry_price"] and pos["stop_price"] is not None and float(pos["entry_price"]) != 0:
+            carried = (1 - float(pos["stop_price"]) / float(pos["entry_price"])) * 100.0
+        position["stop_pct"] = carried
+        timeout_left = None
+        if position["open"] and pos["opened_at"] is not None:
+            timeout_left = float(pos["opened_at"]) + get_float("timeout_h") * 3600.0 - time.time()
+        position["timeout_left_s"] = timeout_left
+        if position["open"]:
+            exit_lines = {
+                "stop": pos["stop_price"],
+                "trail": trail,
+                "current": current,
+                "label": "Risk trailing stop" if trail is not None else "Stop",
+            }
     price = last[0]["price"] if last else None
     change = None
-    if price is not None and position and position["entry_price"]:
+    if price is not None and position and position["open"] and position["entry_price"]:
         change = (float(price) - float(position["entry_price"])) / float(position["entry_price"]) * 100.0
     holders = coin["holders"]
+    age_min = None
+    if coin["migrated_at"] is not None:
+        age_min = max(0.0, (time.time() - float(coin["migrated_at"])) / 60.0)
+    audit_body = _audit(mint)
+    shield = None
+    if audit_body["layers"]:
+        passed_n = sum(1 for layer in audit_body["layers"] if layer["pass"] is True)
+        shield = f"{passed_n}/{len(audit_body['layers'])}"
     return {
         "mint": mint,
         "name": coin["name"],
         "symbol": coin["symbol"],
+        "chain": "solana",
+        "age_min": age_min,
+        "shield": shield,
         "price": price,
         "change_since_entry_pct": change,
         "candles": _candles(mint),
@@ -433,11 +565,17 @@ def _audit(mint: str) -> dict:
         })
     layers.sort(key=lambda item: item["n"])
     reds = [layer for layer in layers if layer["pass"] is False and layer["value"] != "not checked"]
+    passed = bool(layers) and not reds and len(layers) == 8
+    named = query("SELECT name, symbol FROM coins WHERE mint = ?", (mint,))
+    label = _coin_label(named[0]["name"] if named else None, named[0]["symbol"] if named else None, mint)
+    sized = query("SELECT size_usd FROM signals WHERE mint = ? ORDER BY ts DESC LIMIT 1", (mint,))
     return {
         "mint": mint,
+        "name": label,
         "layers": layers,
-        "passed": bool(layers) and not reds and len(layers) == 8,
+        "passed": passed,
         "reason": reds[0]["value"] if reds else None,
+        "size_usd": sized[0]["size_usd"] if sized else None,
         "coin_url": _coin_url(mint),
     }
 
@@ -483,17 +621,63 @@ def _decisions(name: str) -> dict:
             {"ts": row["ts"], "mint": row["mint"], "verdict": "pass" if row["ok"] else "reject", "reason": row["value_text"], "coin_url": _coin_url(row["mint"])}
             for row in rows
         ]
+    found = _names([item.get("mint") for item in items])
+    for item in items:
+        row = found.get(item.get("mint"))
+        item["name"] = _coin_label(row["name"] if row else None, row["symbol"] if row else None, item.get("mint"))
     return {"agent": name, "decisions": items}
+
+
+def _names(mints: list) -> dict:
+    unique = [mint for mint in dict.fromkeys(mints) if mint]
+    if not unique:
+        return {}
+    marks = ",".join("?" for _ in unique)
+    rows = query(f"SELECT mint, name, symbol FROM coins WHERE mint IN ({marks})", tuple(unique))
+    return {row["mint"]: row for row in rows}
+
+
+def _secret_flags(name: str) -> dict:
+    """Presence only. The secret value is not copied into the result."""
+    from config import load_secrets
+    loaded = load_secrets().get(name)
+    return {"configured": bool(loaded), "host_locked": bool(os.environ.get(name))}
 
 
 def _account() -> dict:
     handle = get_setting("fomo_handle")
     profile = links.profile_url(handle) if handle else None
+    jev = _secret_flags("TYPESAFE_API_KEY")
+    telegram = _secret_flags("TG_TOKEN")
+    if jev["host_locked"]:
+        jev_detail = "A Jev key is set on the host. This screen cannot show it or replace it."
+    elif jev["configured"]:
+        jev_detail = "A Jev key is saved on the server. It is not shown here."
+    else:
+        jev_detail = "No Jev key is saved. Jev calls cannot run until a key is added."
+    if telegram["configured"]:
+        telegram_detail = "A Telegram token is stored on the server and is not shown. Delivery and commands are not running."
+    else:
+        telegram_detail = "Telegram was skipped. Delivery and commands are not built."
     return {
         "mode": get_setting("mode", "PAPER"),
         "stack": get_float("paper_start_stack"),
         "profile_url": profile,
         "signup_url": links.SIGNUP_URL,
+        "analyst_mode": get_setting("analyst_mode", "jev"),
+        "integrations": {
+            "email": {"ready": False, "detail": "Email delivery is not configured."},
+            "telegram": {"ready": False, "configured": telegram["configured"], "detail": telegram_detail},
+            "web_push": {
+                "ready": False,
+                "detail": "A subscription can be saved on this phone. Sending notifications is not running yet.",
+            },
+        },
+        "jev": {
+            "configured": jev["configured"],
+            "host_locked": jev["host_locked"],
+            "detail": jev_detail,
+        },
     }
 
 
@@ -613,6 +797,66 @@ def decisions(name: str, request: Request) -> dict:
 def account(request: Request) -> dict:
     require_app_token(request)
     return _account()
+
+
+@router.post("/api/account/key")
+def account_key(request: Request, body: dict) -> dict:
+    """Save or clear the Jev key. The value is never written back to the client."""
+    require_app_token(request)
+    name = body.get("name")
+    if name != "TYPESAFE_API_KEY":
+        raise HTTPException(status_code=400, detail="only the Jev key can be changed here")
+    from config import set_file_secret
+    if body.get("clear") is True:
+        try:
+            set_file_secret(name, None)
+        except PermissionError:
+            raise HTTPException(status_code=409, detail="host secret is set")
+        return {"ok": True, "configured": False}
+    value = body.get("value")
+    if not isinstance(value, str) or not value.strip() or len(value) > 500:
+        raise HTTPException(status_code=400, detail="value is required")
+    try:
+        set_file_secret(name, value.strip())
+    except PermissionError:
+        raise HTTPException(status_code=409, detail="host secret is set")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="value is required")
+    return {"ok": True, "configured": True}
+
+
+def _like(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+@router.get("/api/search")
+def search(request: Request, q: str = "") -> dict:
+    require_app_token(request)
+    needle = q.strip()
+    if not needle:
+        return {"rows": []}
+    like = _like(needle)
+    rows = query(
+        """
+        SELECT mint, name, symbol FROM coins
+        WHERE mint LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR symbol LIKE ? ESCAPE '\\'
+        ORDER BY name
+        LIMIT 20
+        """,
+        (like, like, like),
+    )
+    return {
+        "rows": [
+            {
+                "mint": row["mint"],
+                "name": row["name"],
+                "symbol": row["symbol"],
+                "coin_url": _coin_url(row["mint"]),
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/api/settings")

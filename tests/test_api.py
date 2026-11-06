@@ -42,7 +42,7 @@ class TestApi(unittest.TestCase):
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
         body = health.json()
-        self.assertEqual(body["step"], 7)
+        self.assertEqual(body["step"], 8)
         self.assertFalse(body["agents_enabled"])
         self.assertNotIn("dummy-app-token", health.text)
         self.assertEqual(self.client.get("/api/state").status_code, 401)
@@ -307,3 +307,68 @@ class TestApi(unittest.TestCase):
         self.assertFalse(is_paused("risk"))
         refused = self.client.post("/api/agents/risk/pause", headers=AUTH)
         self.assertEqual(refused.status_code, 409)
+
+    def test_account_hides_secrets_and_search_uses_real_rows(self):
+        account = self.client.get("/api/account", headers=AUTH)
+        self.assertEqual(account.status_code, 200)
+        text = account.text
+        self.assertNotIn("dummy-typesafe", text)
+        self.assertNotIn("dummy-tg", text)
+        self.assertNotIn("dummy-vapid", text)
+        self.assertNotIn(TOKEN, text)
+        body = account.json()
+        self.assertFalse(body["integrations"]["email"]["ready"])
+        self.assertFalse(body["integrations"]["telegram"]["ready"])
+        self.assertFalse(body["integrations"]["web_push"]["ready"])
+        self.assertTrue(body["jev"]["host_locked"])
+        self.assertIn("cannot show", body["jev"]["detail"])
+        locked = self.client.post("/api/account/key", headers=AUTH, json={
+            "name": "TYPESAFE_API_KEY", "value": "super-secret-jev",
+        })
+        self.assertEqual(locked.status_code, 409)
+        self.assertNotIn("super-secret-jev", locked.text)
+        self.assertNotIn("dummy-typesafe", locked.text)
+        os.environ.pop("TYPESAFE_API_KEY")
+        secret_path = Path(self.tmp.name) / "secrets.env"
+        os.environ["DESK_SECRETS_PATH"] = str(secret_path)
+        self.addCleanup(lambda: os.environ.pop("DESK_SECRETS_PATH", None))
+        saved = self.client.post("/api/account/key", headers=AUTH, json={
+            "name": "TYPESAFE_API_KEY", "value": "file-only-jev",
+        })
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json(), {"ok": True, "configured": True})
+        self.assertNotIn("file-only-jev", saved.text)
+        self.assertIn("file-only-jev", secret_path.read_text())
+        cleared = self.client.post("/api/account/key", headers=AUTH, json={
+            "name": "TYPESAFE_API_KEY", "clear": True,
+        })
+        self.assertEqual(cleared.json()["configured"], False)
+        self.assertNotIn("file-only-jev", cleared.text)
+        db.execute(
+            "INSERT INTO coins (mint, name, symbol) VALUES (?, ?, ?)",
+            (MINT, "Searchable", "SRCH"),
+        )
+        found = self.client.get("/api/search", headers=AUTH, params={"q": "SRCH"}).json()
+        self.assertEqual(found["rows"][0]["mint"], MINT)
+        self.assertIn("r=savipww", found["rows"][0]["coin_url"])
+        self.assertEqual(self.client.get("/api/search", headers=AUTH, params={"q": ""}).json()["rows"], [])
+
+    def test_coin_leaves_missing_market_fields_null(self):
+        now = time.time()
+        db.execute(
+            "INSERT INTO coins (mint, name, symbol, migrated_at) VALUES (?, ?, ?, ?)",
+            (MINT, "Null Cap", "NUL", now - 3600),
+        )
+        db.execute(
+            "INSERT INTO prices (mint, ts, price, volume_m5) VALUES (?, ?, ?, NULL)",
+            (MINT, now, 1.25),
+        )
+        coin = self.client.get("/api/coin/" + MINT, headers=AUTH).json()
+        self.assertIsNone(coin["stats"]["market_cap"])
+        self.assertIsNone(coin["stats"]["volume_h24"])
+        self.assertEqual(coin["stats"]["holders"], "n/a")
+        self.assertIsNone(coin["stats"]["liquidity_usd"])
+        self.assertEqual(coin["price"], 1.25)
+        self.assertGreater(coin["age_min"], 50)
+        self.assertIsNone(coin["position"])
+        self.assertIsNone(coin["shield"])

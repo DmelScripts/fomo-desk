@@ -3,17 +3,149 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b0f14">
-  <title>Desk</title>
-  <link rel="stylesheet" href="/app.css">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Grok Bot">
+  <title>Grok Bot</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <main id="app">
-    <h1>Desk</h1>
-    <p>Skeleton. Agents are not running yet.</p>
-  </main>
+  <section id="gate" class="gate" hidden>
+    <h1>Grok Bot</h1>
+    <p id="gate-text"></p>
+  </section>
+  <div id="shell" hidden>
+    <header class="nav">
+      <button id="avatar" class="icon-btn" type="button" aria-label="Account"><span class="avatar"></span></button>
+      <button id="brand" class="brand" type="button">Grok Bot <span aria-hidden="true">›</span></button>
+      <span class="nav-gap"></span>
+      <button id="search-open" class="icon-btn" type="button" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="M16 16l4 4"></path></svg>
+      </button>
+      <button id="bell" class="icon-btn" type="button" aria-label="Activity">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"></path><path d="M10 19a2 2 0 0 0 4 0"></path></svg>
+        <span id="bell-dot" class="dot" hidden></span>
+      </button>
+    </header>
+    <p id="fixture" class="fixture" hidden>Synthetic fixture. These rows were inserted for a screenshot and are not a live night.</p>
+    <p id="error" class="error" hidden></p>
+    <div id="search-panel" class="search-panel" hidden>
+      <input id="search" type="search" placeholder="Name, symbol, or mint" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div id="search-results"></div>
+    </div>
+    <main>
+      <section id="view-home" class="view">
+        <div id="home-skel" class="skel-wrap" hidden>
+          <div class="skel skel-balance"></div>
+          <div class="skel skel-chart"></div>
+          <div class="skel skel-card"></div>
+        </div>
+        <div id="home-body" hidden>
+          <div class="balance-row">
+            <div id="balance" class="balance num"></div>
+            <span id="paper-badge" class="pill paper" hidden>PAPER</span>
+          </div>
+          <div class="today-row">
+            <span id="today" class="num today"></span>
+            <span id="multiplier" class="pill mult num"></span>
+          </div>
+          <div class="chart-card">
+            <canvas id="chart-home"></canvas>
+            <p id="chart-empty" class="empty" hidden>Waiting for the first trade</p>
+          </div>
+          <div id="range" class="ranges">
+            <button type="button" data-range="LIVE">LIVE</button>
+            <button type="button" data-range="1H">1H</button>
+            <button type="button" data-range="4H">4H</button>
+            <button type="button" data-range="1D">1D</button>
+            <button type="button" data-range="1W">1W</button>
+            <button type="button" data-range="ALL">ALL</button>
+          </div>
+          <div class="section-head">
+            <h2 id="agents-label">Agents</h2>
+          </div>
+          <div id="cards" class="carousel"></div>
+          <div class="section-head">
+            <h2>Activity</h2>
+            <button id="see-all" type="button">See all</button>
+          </div>
+          <div id="home-activity"></div>
+          <p id="home-activity-empty" class="empty" hidden>Nothing yet tonight</p>
+        </div>
+      </section>
+      <section id="view-agents" class="view" hidden>
+        <h1 class="screen-title">Agents</h1>
+        <div id="agents-list"></div>
+      </section>
+      <section id="view-activity" class="view" hidden>
+        <h1 class="screen-title">Activity</h1>
+        <p id="activity-empty" class="empty" hidden>Nothing yet tonight</p>
+        <div id="activity-list"></div>
+        <button id="activity-more" class="text-btn" type="button" hidden>Older</button>
+      </section>
+      <section id="view-account" class="view" hidden>
+        <h1 class="screen-title">Account</h1>
+        <div id="account-mode" class="card block"></div>
+        <div id="live-confirm" class="card block" hidden>
+          <p>Type LIVE to switch. A full PAPER night has to be on record first.</p>
+          <input id="live-text" type="text" autocomplete="off" autocapitalize="characters" placeholder="LIVE">
+          <button id="live-go" type="button">Confirm</button>
+        </div>
+        <div id="account-stack" class="card block"></div>
+        <div id="account-profile" class="card block"></div>
+        <div id="account-invite" class="card block"></div>
+        <div id="account-settings"></div>
+        <div id="account-integrations" class="card block"></div>
+        <div id="account-key" class="card block"></div>
+        <div id="account-push" class="card block"></div>
+        <p id="account-note" class="note"></p>
+      </section>
+      <section id="view-audit" class="view" hidden>
+        <button id="audit-back" class="text-btn" type="button">Back</button>
+        <h1 id="audit-title" class="screen-title"></h1>
+        <p id="audit-empty" class="empty" hidden>No coin taken apart yet</p>
+        <div id="audit-discs" class="discs"></div>
+        <div id="audit-rows" class="card block"></div>
+        <div id="audit-result"></div>
+        <div id="audit-toggle" class="card block"></div>
+        <div id="audit-fomo"></div>
+      </section>
+      <section id="view-coin" class="view" hidden>
+        <button id="coin-back" class="text-btn" type="button">Back</button>
+        <div class="coin-head">
+          <div>
+            <h1 id="coin-title" class="screen-title"></h1>
+            <p id="coin-sub" class="sub"></p>
+          </div>
+          <span id="coin-shield" class="pill" hidden></span>
+          <span id="coin-paper" class="pill paper" hidden>PAPER</span>
+        </div>
+        <p id="coin-missing" class="empty" hidden>This coin is not on the desk.</p>
+        <div id="coin-body" hidden>
+          <p id="coin-price" class="price num"></p>
+          <p id="coin-change" class="num"></p>
+          <div class="chart-card">
+            <canvas id="chart-coin"></canvas>
+            <p id="coin-empty-chart" class="empty" hidden>No prices yet</p>
+          </div>
+          <div id="coin-stats" class="stats"></div>
+          <div id="coin-position"></div>
+          <div id="coin-exit"></div>
+          <div id="coin-fomo"></div>
+        </div>
+      </section>
+    </main>
+    <nav class="tabs">
+      <button id="tab-home" type="button">Home</button>
+      <button id="tab-agents" type="button">Agents</button>
+      <button id="tab-activity" type="button">Activity</button>
+      <button id="tab-account" type="button">Account</button>
+    </nav>
+  </div>
   <script src="/chart.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -185,8 +185,56 @@ def load_seed() -> dict:
 
 
 def secrets_path() -> Path:
-    """Absolute path to the server-only env file. Do not read this into logs."""
+    """Absolute path to the server-only env file. Do not read this into logs.
+
+    DESK_SECRETS_PATH redirects the file for a test process. It does not
+    change host environment variables.
+    """
+    override = os.environ.get("DESK_SECRETS_PATH")
+    if override:
+        return Path(override)
     return SECRETS_ENV_PATH
+
+
+def set_file_secret(key: str, value: str | None) -> None:
+    """Write or remove one secret in the secrets file.
+
+    A host environment value wins in load_secrets, so this refuses to run
+    while that variable is set. The value is never returned or logged.
+    """
+    if key not in SECRET_KEYS:
+        raise ValueError("unknown secret")
+    if os.environ.get(key):
+        raise PermissionError("host")
+    if value is not None and ("\n" in value or "\r" in value):
+        raise ValueError("invalid secret")
+    path = secrets_path()
+    try:
+        text = path.read_text()
+    except OSError:
+        text = ""
+    kept: list[str] = []
+    replaced = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        raw = stripped[7:].strip() if stripped.startswith("export ") else stripped
+        if raw.startswith(key + "="):
+            replaced = True
+            if value:
+                kept.append(f"{key}={value}")
+            continue
+        kept.append(line)
+    if value and not replaced:
+        kept.append(f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(kept)
+    if body:
+        body += "\n"
+    path.write_text(body)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _file_secrets() -> dict[str, str]:
