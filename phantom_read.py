@@ -17,6 +17,9 @@ import phantom_transport
 log = logging.getLogger("phantom_read")
 
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_DECIMALS = 6
+SELL_AMOUNT = "10000000"
+_MAINNET = {"solana:101", "solana:mainnet", "solana:mainnet-beta"}
 _DROP = {
     "transactiondata", "rawtransaction", "signature", "execution", "signedtransaction",
     "session", "stamper", "privatekey", "secret", "clientsecret", "refreshtoken",
@@ -37,7 +40,7 @@ def quote() -> dict:
         "--buy-chain-id", "solana:mainnet",
         "--sell-token-is-native", "true",
         "--buy-token-mint", USDC,
-        "--amount", "10000000",
+        "--amount", SELL_AMOUNT,
         "--amount-unit", "base",
         "--slippage-tolerance", "1",
         "--exact-out", "false",
@@ -60,15 +63,15 @@ def _run(args: list[str]) -> tuple[str, int]:
     os.chmod(home, 0o700)
     try:
         done = subprocess.run(
-        [binary, *args],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=phantom_auth._child_env(home, binary),
-        cwd=str(home),
-        timeout=30,
-        check=False,
-    )
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=phantom_auth._child_env(home, binary),
+            cwd=str(home),
+            timeout=30,
+            check=False,
+        )
     except subprocess.TimeoutExpired:
         log.info("phantom read %s timeout", args[0])
         return "", 1
@@ -96,6 +99,8 @@ def _balance(text: str, code: int) -> dict:
         if not isinstance(item, dict):
             continue
         cleaned, _omitted = _strip(item)
+        if cleaned.get("spamStatus") == "SPAM":
+            continue
         addresses = []
         for row in cleaned.get("queriedWalletBalances") or []:
             if isinstance(row, dict) and isinstance(row.get("address"), str):
@@ -148,13 +153,17 @@ def _quote(text: str, code: int) -> dict:
         base["transaction_material_omitted"] = True
         return base
     cleaned, omitted = _strip(body)
-    request = cleaned.get("quoteRequest")
-    if isinstance(request, dict):
-        wallet_id = request.get("walletId")
-        if isinstance(wallet_id, str) and wallet_id != phantom_transport.REQUIRED_WALLET_ID:
-            base["status"] = "mismatch"
-            return base
-    taker = _taker(request)
+    request = cleaned.get("quoteRequest") if isinstance(cleaned.get("quoteRequest"), dict) else {}
+    response = cleaned.get("quoteResponse") if isinstance(cleaned.get("quoteResponse"), dict) else {}
+    if request.get("execute") is True or request.get("base64EncodedTx") is True:
+        base["status"] = "blocked"
+        base["transaction_material_omitted"] = True
+        return base
+    wallet_id = request.get("walletId")
+    if isinstance(wallet_id, str) and wallet_id != phantom_transport.REQUIRED_WALLET_ID:
+        base["status"] = "mismatch"
+        return base
+    taker = _taker(request) or _taker(response)
     if taker and taker != phantom_transport.REQUIRED_WALLET:
         base["status"] = "mismatch"
         base["observed_wallet"] = taker
@@ -163,7 +172,17 @@ def _quote(text: str, code: int) -> dict:
         base["status"] = "unable_to_verify"
         base["verify"] = {"error_category": "unable_to_verify", "shape": shape, "fields": {"taker": "missing"}}
         return base
-    expiry = _find_expiry(cleaned.get("quoteResponse"))
+    response_taker = _taker(response)
+    if response_taker and response_taker != phantom_transport.REQUIRED_WALLET:
+        base["status"] = "mismatch"
+        base["observed_wallet"] = response_taker
+        return base
+    bound, decimals = _bound_quote(request, response)
+    if not bound:
+        base["status"] = "unable_to_verify"
+        base["verify"] = {"error_category": "unable_to_verify", "shape": shape, "fields": {"binding": "rejected"}}
+        return base
+    expiry = _find_expiry(response)
     quote_id = _find_quote_id(cleaned.get("quoteResponse"))
     base["status"] = "observed"
     base["provider_expiry_unknown"] = expiry is None
@@ -171,6 +190,11 @@ def _quote(text: str, code: int) -> dict:
     base["quote_id"] = quote_id
     base["transaction_material_omitted"] = omitted
     base["provider"] = "phantom"
+    base["chain"] = "solana:101"
+    base["sell"] = "native"
+    base["buy_mint"] = USDC
+    base["sell_amount"] = SELL_AMOUNT
+    base["buy_decimals"] = decimals
     return base
 
 
@@ -218,6 +242,52 @@ def _strip(value):
             rows.append(child)
         return rows, omitted
     return value, False
+
+
+def _mainnet(chain) -> bool:
+    return isinstance(chain, str) and chain.lower() in _MAINNET
+
+
+def _native_sol(token) -> bool:
+    return (
+        isinstance(token, dict)
+        and token.get("resourceType") == "nativeToken"
+        and str(token.get("slip44")) == "501"
+        and _mainnet(token.get("chainId"))
+    )
+
+
+def _usdc(token):
+    if not isinstance(token, dict) or token.get("address") != USDC or not _mainnet(token.get("chainId")):
+        return False, None
+    decimals = token.get("decimals")
+    if decimals is None:
+        return True, None
+    if isinstance(decimals, bool) or decimals != USDC_DECIMALS:
+        return False, None
+    return True, USDC_DECIMALS
+
+
+def _amount(value) -> bool:
+    return value == SELL_AMOUNT or (isinstance(value, int) and not isinstance(value, bool) and value == int(SELL_AMOUNT))
+
+
+def _bound_quote(request: dict, response: dict):
+    buy_ok, decimals = _usdc(request.get("buyToken"))
+    if not buy_ok or not _native_sol(request.get("sellToken")) or not _amount(request.get("sellAmount")):
+        return False, None
+    response_buy = response.get("buyToken")
+    if response_buy is not None:
+        response_ok, response_decimals = _usdc(response_buy)
+        if not response_ok:
+            return False, None
+        if response_decimals is not None:
+            decimals = response_decimals
+    quoted = response.get("quotes")
+    if isinstance(quoted, list) and quoted and isinstance(quoted[0], dict) and "sellAmount" in quoted[0]:
+        if not _amount(quoted[0].get("sellAmount")):
+            return False, None
+    return True, decimals
 
 
 def _taker(request) -> str | None:

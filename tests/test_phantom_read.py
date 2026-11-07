@@ -43,15 +43,27 @@ if [ "$1" = "wallet" ]; then
     echo '{"items":[{"symbol":"SOL","totalQuantityString":"1","spamStatus":"VERIFIED","logoUri":"https://cdn.example/secret","queriedWalletBalances":[{"address":"GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh","quantityString":"1"}]}]}'
     exit 0
   fi
+  if [ "$mode" = "mixed" ]; then
+    echo '{"items":[{"symbol":"SOL","spamStatus":"VERIFIED","totalQuantityString":"1004","queriedWalletBalances":[{"address":"'"$WALLET"'","quantityString":"5"},{"address":"GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh","quantityString":"999"}]},{"symbol":"SCAM","spamStatus":"SPAM","totalQuantityString":"1","queriedWalletBalances":[{"address":"'"$WALLET"'","quantityString":"1"}]}]}'
+    exit 0
+  fi
   echo '{"items":[{"symbol":"SOL","totalQuantityString":"1000000000","spamStatus":"VERIFIED","logoUri":"https://cdn.example/logo","queriedWalletBalances":[{"address":"'"$WALLET"'","quantityString":"1000000000"}],"session":"nope"}]}'
   exit 0
 fi
 if [ "$1" = "buy" ]; then
-  echo '{"quoteRequest":{"taker":{"address":"'"$WALLET"'"},"execute":false},"quoteResponse":{"quotes":[{"quoteId":"pq-new","sellAmount":"10000000","buyAmount":"1","transactionData":"TXDATA-DO-NOT-STORE"}]}}'
+  if [ "$mode" = "auth" ]; then
+    echo "Request failed with status code 401" >&2
+    exit 1
+  fi
+  if [ "$mode" = "down" ]; then
+    echo "upstream unavailable" >&2
+    exit 1
+  fi
+  echo '{"quoteRequest":{"taker":{"chainId":"solana:101","resourceType":"address","address":"'"$WALLET"'"},"buyToken":{"chainId":"solana:101","resourceType":"address","address":"'"$USDC"'"},"sellToken":{"chainId":"solana:101","resourceType":"nativeToken","slip44":"501"},"sellAmount":"10000000","base64EncodedTx":false,"execute":false},"quoteResponse":{"quotes":[{"quoteId":"pq-new","sellAmount":"10000000","buyAmount":"1","transactionData":"TXDATA-DO-NOT-STORE"}]}}'
   exit 0
 fi
 exit 2
-""".replace("$WALLET", WALLET),
+""".replace("$WALLET", WALLET).replace("$USDC", USDC),
             encoding="utf-8",
         )
         self.bin.chmod(0o755)
@@ -117,6 +129,11 @@ exit 2
         self.assertFalse(body["send"])
         self.assertFalse(body["live_ready"])
         self.assertEqual(body["quote_id"], "pq-new")
+        self.assertEqual(body["chain"], "solana:101")
+        self.assertEqual(body["sell"], "native")
+        self.assertEqual(body["buy_mint"], USDC)
+        self.assertEqual(body["sell_amount"], "10000000")
+        self.assertIsNone(body["buy_decimals"])
         self.assertTrue(body["transaction_material_omitted"])
         self.assertNotIn("TXDATA-DO-NOT-STORE", shown.text)
         args = self._args().splitlines()
@@ -146,8 +163,8 @@ exit 2
         self.assertNotIn(foreign, json.dumps(wrong_wallet))
         self.assertFalse(wrong_wallet["executable"])
         dated = phantom_read._quote(json.dumps({
-            "quoteRequest": {"taker": {"address": WALLET}, "walletId": WALLET_ID},
-            "quoteResponse": {"quotes": [{"quoteId": "pq-exp", "expiresAt": 1700000000}]},
+            "quoteRequest": self._request(),
+            "quoteResponse": {"quotes": [{"quoteId": "pq-exp", "sellAmount": "10000000", "expiresAt": 1700000000}]},
         }), 0)
         self.assertEqual(dated["provider_expiry"], 1700000000)
         self.assertFalse(dated["provider_expiry_unknown"])
@@ -167,6 +184,77 @@ exit 2
         import phantom_runner
         self.assertEqual(phantom_runner.BANKROLL, __import__("decimal").Decimal("100.00"))
         self.assertEqual(phantom_runner.SIZE, __import__("decimal").Decimal("8.00"))
+
+    def test_balance_uses_the_allowlisted_row_and_drops_spam(self):
+        (self.home / "mode").write_text("mixed", encoding="utf-8")
+        shown = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(shown["items"], [{
+            "symbol": "SOL",
+            "total_quantity": "5",
+            "spam_status": "VERIFIED",
+        }])
+        self.assertNotIn("1004", json.dumps(shown))
+        self.assertNotIn("999", json.dumps(shown))
+        self.assertNotIn("SCAM", json.dumps(shown))
+        self.assertNotIn(OLD, json.dumps(shown))
+
+    def test_quote_rejects_a_different_mint_and_does_not_login_on_401(self):
+        self.assertEqual(self.client.post("/api/phantom/quote", json={}).status_code, 401)
+        self.assertEqual(self._args(), "")
+        other = phantom_read._quote(json.dumps({
+            "quoteRequest": self._request(buy="So11111111111111111111111111111111111111112"),
+            "quoteResponse": {"quotes": [{"quoteId": "wrong-mint"}]},
+        }), 0)
+        self.assertEqual(other["status"], "unable_to_verify")
+        self.assertFalse(other["usable"])
+        self.assertFalse(other["executable"])
+        self.assertNotIn("quote_id", other)
+        wrong_decimals = phantom_read._quote(json.dumps({
+            "quoteRequest": self._request(decimals=9),
+            "quoteResponse": {"quotes": [{"quoteId": "wrong-decimals", "sellAmount": "10000000"}]},
+        }), 0)
+        self.assertEqual(wrong_decimals["status"], "unable_to_verify")
+        self.assertIsNone(wrong_decimals.get("buy_decimals"))
+        devnet = self._request()
+        devnet["sellToken"] = {"chainId": "solana:103", "resourceType": "nativeToken", "slip44": "501"}
+        rejected = phantom_read._quote(json.dumps({
+            "quoteRequest": devnet,
+            "quoteResponse": {"quotes": [{"quoteId": "devnet", "sellAmount": "10000000"}]},
+        }), 0)
+        self.assertEqual(rejected["status"], "unable_to_verify")
+        self.assertFalse(rejected["executable"])
+        payload = phantom_read._quote(json.dumps({
+            "quoteRequest": self._request(base64=True),
+            "quoteResponse": {"quotes": [{"quoteId": "payload"}]},
+        }), 0)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["executable"])
+        with self.assertRaises(RuntimeError):
+            phantom_read._run(["buy", "--execute", "true"])
+        self.assertNotIn("true", self._args())
+        (self.home / "mode").write_text("auth", encoding="utf-8")
+        failed = self.client.post("/api/phantom/quote", headers=AUTH, json={}).json()
+        self.assertEqual(failed["status"], "auth_error")
+        self.assertNotIn("login", self._args())
+        (self.home / "mode").write_text("down", encoding="utf-8")
+        down = self.client.post("/api/phantom/quote", headers=AUTH, json={}).json()
+        self.assertEqual(down["status"], "unable_to_verify")
+        self.assertNotIn("upstream", json.dumps(down))
+        self.assertNotIn("login", self._args())
+
+    def _request(self, buy=USDC, decimals=None, base64=False):
+        token = {"chainId": "solana:101", "resourceType": "address", "address": buy}
+        if decimals is not None:
+            token["decimals"] = decimals
+        return {
+            "taker": {"chainId": "solana:101", "resourceType": "address", "address": WALLET},
+            "walletId": WALLET_ID,
+            "buyToken": token,
+            "sellToken": {"chainId": "solana:101", "resourceType": "nativeToken", "slip44": "501"},
+            "sellAmount": "10000000",
+            "base64EncodedTx": base64,
+            "execute": False,
+        }
 
     def _args(self) -> str:
         path = self.home / "args"
