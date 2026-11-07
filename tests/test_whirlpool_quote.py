@@ -59,6 +59,9 @@ class WhirlpoolQuoteTests(unittest.TestCase):
         got = quote.quote_exact_in(pool, arrays, 1000, True, 50, 0, 1)
         self.assertEqual((got["token_est_out"], got["token_min_out"], got["trade_fee"]), (934, 929, 31))
         self.assertLess(got["sqrt_price_after"], got["sqrt_price_before"])
+        exit_quote = quote.quote_exact_in(pool, arrays, 1000, False, 1000, 0, 1)
+        self.assertGreater(exit_quote["token_est_out"], 0)
+        self.assertEqual(quote.sdk_fixture(1000, False, 1000, False, True)["token_est_out"], 918)
         pool["liquidity"] = 0
         zero = quote.quote_exact_in(pool, arrays, 1000, True, 1000, 0, 1)
         self.assertEqual((zero["token_est_out"], zero["token_min_out"], zero["trade_fee"]), (0, 0, 1000))

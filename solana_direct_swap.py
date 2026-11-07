@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+from pathlib import Path
 
 import phantom_transport
 import solana_tx
@@ -106,6 +108,11 @@ SOL_USDC_OBSERVATION = {
 ENABLED = False
 INPUT_LAMPORTS = 10_000_000
 MARKET = "SOL->USDC"
+DIAGNOSTIC = True
+SOL_DECIMALS = 9
+USDC_DECIMALS = 6
+TICKET_USD_MICRO = 8_000_000
+_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sol_usdc_ts8_ticks.json"
 DISC = hashlib.sha256(b"global:swap").digest()[:8]
 PUBLISHED_DISC = bytes([248, 198, 158, 145, 225, 117, 135, 200])
 MIN_SQRT_PRICE = 4295048016
@@ -195,17 +202,132 @@ def snapshot_status() -> dict:
     }
 
 
+def sizing() -> dict:
+    """Pool USDC out per the diagnostic input. This is not an external USD oracle."""
+    est = SOL_USDC_SNAPSHOT["token_est_out"]
+    numerator = TICKET_USD_MICRO * INPUT_LAMPORTS
+    floor = numerator // est
+    remainder = numerator % est
+    return {
+        "diagnostic": True,
+        "probe_lamports": INPUT_LAMPORTS,
+        "probe_usdc_raw": est,
+        "probe_usdc": f"{est / 10 ** USDC_DECIMALS:.6f}",
+        "sol_decimals": SOL_DECIMALS,
+        "usdc_decimals": USDC_DECIMALS,
+        "ticket_usd": "8.00",
+        "ticket_lamports_floor": floor,
+        "ticket_conversion_exact": remainder == 0,
+        "ticket_remainder_micro_usdc": remainder,
+        "probe_is_ticket": False,
+        "whirlpool_fee_lamports": SOL_USDC_SNAPSHOT["trade_fee"],
+        "rent_exemption_refundable": RENT_EXEMPTION_165,
+    }
+
+
+def route_guard() -> dict:
+    """Why this snapshot is not an entry or an exit."""
+    size = sizing()
+    missing = (-23936, -23232)
+    return {
+        "swap_path_verified": False,
+        "diagnostic": True,
+        "probe_is_ticket": size["probe_is_ticket"],
+        "exit_quote": "upward_arrays_not_in_snapshot",
+        "exit_starts_missing": missing,
+        "sign": False,
+        "blockers": (
+            "diagnostic 0.01 SOL probe is not the $8 ticket",
+            "ticket conversion against this quote is not an exact lamport count",
+            "USDC to SOL exit needs tick arrays starting at -23936 and -23232, which were not read",
+        ),
+    }
+
+
+def quote_exit_exact_in(pool: dict, arrays: list[dict], usdc_raw: int, slippage_bps: int, context_slot: int) -> dict:
+    """USDC to SOL. The snapshot does not include the upward arrays, so it refuses them."""
+    have = {item["start_tick_index"] for item in arrays}
+    needed = set(route_guard()["exit_starts_missing"])
+    if pool.get("tick_spacing") == 8 and pool.get("tick_current_index") == SOL_USDC_SNAPSHOT["tick_current_index"] and not needed <= have:
+        raise solana_whirlpool_quote.QuoteError("exit_arrays_absent")
+    quoted = solana_whirlpool_quote.quote_exact_in(pool, arrays, usdc_raw, False, slippage_bps, 0, context_slot)
+    quoted["direction"] = "USDC->SOL"
+    quoted["usdc_decimals"] = USDC_DECIMALS
+    quoted["sol_decimals"] = SOL_DECIMALS
+    return quoted
+
+
+def prepare_diagnostic(slot: int) -> dict:
+    """Unsigned diagnostic transaction. The bytes are not returned or stored."""
+    snap = SOL_USDC_SNAPSHOT
+    if slot != snap["context_slot"]:
+        return {"stale": True, "sign": False, "cli": False, "diagnostic": True, "unsigned_tx_sha256": None, "context_slot": slot}
+    pool, data, accounts = _snapshot_accounts()
+    limit = MIN_SQRT_PRICE + 1
+    blockhash = solana_tx.b58encode(b"\x22" * 32)
+    tx = build(pool, data, accounts, snap["specified_slippage_bps"], limit, blockhash, slot)
+    raw = base64.b64decode(tx)
+    checked = inspect(tx, accounts, snap["specified_slippage_bps"], slot)
+    return {
+        "stale": False,
+        "sign": False,
+        "cli": False,
+        "diagnostic": True,
+        "probe_is_ticket": False,
+        "context_slot": slot,
+        "account_addresses": tuple(sorted(accounts)),
+        "quote_token_est_out": snap["token_est_out"],
+        "quote_token_min_out": snap["token_min_out"],
+        "quote_trade_fee": snap["trade_fee"],
+        "unsigned_tx_sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_checks_passed": checked["byte_checks_passed"],
+        "min_out": checked["min_out"],
+    }
+
+
+def _snapshot_accounts():
+    body = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    pool = SOL_USDC_POOL
+    vault_a = SOL_USDC_OBSERVATION["vault_a"]
+    vault_b = SOL_USDC_OBSERVATION["vault_b"]
+    data = solana_whirlpool.reference_pool(
+        solana_tx.NATIVE_MINT, vault_a, solana_tx.USDC_MINT, vault_b,
+        body["tickSpacing"], body["tickCurrentIndex"], int(body["sqrtPrice"]),
+        fee_rate=body["feeRate"], liquidity=int(body["liquidity"]),
+    )
+    source = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    dest = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
+    accounts = {
+        pool: (solana_whirlpool.PROGRAM_ID, data),
+        source: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, phantom_transport.REQUIRED_WALLET)),
+        dest: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.USDC_MINT, phantom_transport.REQUIRED_WALLET)),
+        vault_a: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, pool)),
+        vault_b: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.USDC_MINT, pool)),
+    }
+    for arr in body["arrays"]:
+        raw = bytearray(solana_whirlpool.reference_tick_array(pool, arr["start"]))
+        for tick, net in arr["initialized"]:
+            offset = 12 + ((tick - arr["start"]) // body["tickSpacing"]) * 113
+            raw[offset] = 1
+            raw[offset + 1:offset + 17] = int(net).to_bytes(16, "little", signed=True)
+        accounts[solana_whirlpool.tick_array_address(pool, arr["start"])] = (solana_whirlpool.PROGRAM_ID, bytes(raw))
+    return pool, data, accounts
+
+
 def paper_lifecycle() -> dict:
-    """No position is opened or closed. The missing quote is not an entry."""
-    snap = snapshot_status()
+    """Diagnostic probe only. No position is opened and no exit is armed."""
+    guard = route_guard()
     return {
         "entry_opened": False,
         "exit_armed": False,
         "position_written": False,
-        "reason": snap["reason"],
+        "entry": "blocked_probe_is_not_ticket",
+        "exit": guard["exit_quote"],
+        "reason": guard["blockers"][0],
         "chat_conditional_live_approval": "not_a_control",
         "recorded_live_applied": False,
         "five_agents": False,
+        "sign": False,
     }
 
 

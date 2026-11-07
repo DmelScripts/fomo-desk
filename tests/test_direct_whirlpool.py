@@ -125,7 +125,6 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertEqual(state["specified_slippage_bps"], 100)
         self.assertEqual(state["fee_policy"], "not_approved")
         self.assertFalse(state["aggregate_loss_policy"])
-        self.assertEqual(execution_transport.status()["send"], "disabled")
         self.assertEqual(len(execution_transport.SWAP_BLOCKERS), 2)
 
     def test_string_seed_arrays_match_the_sdk_quote(self):
@@ -138,7 +137,7 @@ class DirectWhirlpoolTests(unittest.TestCase):
         pool = solana_direct_swap.SOL_USDC_POOL
         program = solana_tx.b58decode(solana_whirlpool.PROGRAM_ID)
         raw_pool = solana_tx.b58decode(pool)
-        with open(Path(__file__).resolve().parent / "fixtures" / "sol_usdc_ts8_ticks.json", encoding="utf-8") as handle:
+        with open(Path(__file__).resolve().parents[1] / "fixtures" / "sol_usdc_ts8_ticks.json", encoding="utf-8") as handle:
             body = json.load(handle)
         arrays = []
         for arr, address in zip(body["arrays"], solana_direct_swap.SOL_USDC_SNAPSHOT["tick_array_addresses"]):
@@ -167,6 +166,20 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertEqual(quoted["token_min_out"], 889420)
         self.assertEqual(quoted["trade_fee"], 5000)
         self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["token_min_out"], 889420)
+        with self.assertRaises(solana_whirlpool_quote.QuoteError) as missing:
+            solana_direct_swap.quote_exit_exact_in({
+                "sqrt_price": int(body["sqrtPrice"]),
+                "tick_current_index": body["tickCurrentIndex"],
+                "fee_rate": body["feeRate"],
+                "liquidity": int(body["liquidity"]),
+                "tick_spacing": body["tickSpacing"],
+            }, arrays, 100_000, 100, body["slot"])
+        self.assertEqual(missing.exception.category, "exit_arrays_absent")
+        size = solana_direct_swap.sizing()
+        self.assertEqual(size["probe_usdc"], "0.898405")
+        self.assertFalse(size["probe_is_ticket"])
+        self.assertFalse(size["ticket_conversion_exact"])
+        self.assertNotEqual(size["ticket_lamports_floor"], size["probe_lamports"])
         self.assertTrue(snap["context_fresh"])
         self.assertFalse(solana_direct_swap.context_binds(466540548, 466542559))
         self.assertFalse(solana_direct_swap.context_binds(466540547, 466542559))

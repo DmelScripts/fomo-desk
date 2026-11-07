@@ -20,7 +20,9 @@ import exit_policy
 import phantom_auth
 import phantom_runner
 import phantom_transport
+import solana_direct_swap
 import solana_inspect
+import spend_policy
 
 _REVIEW = "send_review:"
 _LEDGER = "send_ledger"
@@ -226,6 +228,8 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
 
 
 def status() -> dict:
+    fee = spend_policy.fee_view()
+    aggregate = spend_policy.aggregate_view()
     return {
         "wired": False,
         "signing": "cli_solana_send_behind_gates",
@@ -234,8 +238,8 @@ def status() -> dict:
         "automatic_invocation": False,
         "live_ready": False,
         "executable": False,
-        "fee_policy": "not_approved",
-        "aggregate_loss_policy": False,
+        "fee_policy": "approved" if fee["approved"] else "not_approved",
+        "aggregate_loss_policy": aggregate["approved"],
     }
 
 
@@ -247,6 +251,9 @@ def activation_status() -> dict:
     consent = _consent()
     recorded = _read(_CONSENT)
     policy = exit_policy.view()
+    fee = spend_policy.fee_view()
+    aggregate = spend_policy.aggregate_view()
+    route = solana_direct_swap.route_guard()
     checks = {
         "mode_still_paper": db.get_setting("mode", "PAPER") == "PAPER",
         "agents_still_off": db.get_setting("agents_enabled", "0") == "0",
@@ -257,10 +264,10 @@ def activation_status() -> dict:
         "exit_is_not_aggregate": policy["aggregate_loss_policy"] is False and policy["loss_policy"] == "not_approved",
         "live_request_recorded": consent is not None,
         "live_request_not_applied": consent is None or consent.get("applied") is False,
-        "fee_policy_approved": False,
-        "aggregate_loss_policy_approved": False,
-        "swap_path_verified": False,
-        "signer_enabled": False,
+        "fee_policy_approved": fee["approved"] is True,
+        "aggregate_loss_policy_approved": aggregate["approved"] is True,
+        "swap_path_verified": route["swap_path_verified"] is True,
+        "signer_enabled": fee["approved"] is True and aggregate["approved"] is True and route["swap_path_verified"] is True,
     }
     return {
         "ready": all(checks.values()),
@@ -268,8 +275,9 @@ def activation_status() -> dict:
         "checks": checks,
         "unmet": [name for name, passed in checks.items() if not passed],
         "swap_blockers": list(SWAP_BLOCKERS),
-        "fee_policy": "not_approved",
-        "aggregate_loss_policy": False,
+        "fee_policy": "approved" if fee["approved"] else "not_approved",
+        "aggregate_loss_policy": aggregate["approved"],
+        "route_blockers": list(route["blockers"]),
         "live_ready": False,
         "chat_conditional_live_approval": "not_a_control",
         "recorded_live_applied": isinstance(recorded, dict) and recorded.get("applied") is True,
@@ -287,6 +295,16 @@ def remember_review(intent_id: str, tx_b64: str) -> dict:
     }
     _write(_REVIEW + intent_id, payload)
     return payload
+
+
+def prepare_readonly(slot: int) -> dict:
+    """Inspect the diagnostic direct route. This does not sign or call the CLI."""
+    prepared = solana_direct_swap.prepare_diagnostic(slot)
+    prepared["send"] = False
+    prepared["cli"] = False
+    prepared["fee_policy"] = "approved" if spend_policy.fee_view()["approved"] else "not_approved"
+    prepared["aggregate_loss_policy"] = spend_policy.aggregate_view()["approved"]
+    return prepared
 
 
 def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
@@ -318,8 +336,8 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
         "kill_switch_open": phantom_runner.halted() is False,
         "exit_tuple_effective": exit_policy.view()["effective"] is True,
         "live_request_recorded": _consent() is not None,
-        "fee_policy_approved": False,
-        "aggregate_loss_policy_approved": False,
+        "fee_policy_approved": spend_policy.fee_view()["approved"] is True,
+        "aggregate_loss_policy_approved": spend_policy.aggregate_view()["approved"] is True,
         "reservation_open": False,
         "unknown_submit_clear": False,
         "idempotent": False,
@@ -373,8 +391,8 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
         "unmet": unmet,
         "effects_allowed": not unmet,
         "inspection_category": None if inspected is None else inspected.get("error_category"),
-        "fee_policy": "not_approved",
-        "aggregate_loss_policy": False,
+        "fee_policy": "approved" if spend_policy.fee_view()["approved"] else "not_approved",
+        "aggregate_loss_policy": spend_policy.aggregate_view()["approved"],
         "swap_blockers": list(SWAP_BLOCKERS),
     }
 

@@ -68,6 +68,28 @@ console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
         self.assertEqual(solana_whirlpool.oracle_address(pool), found["oracle"])
         self.assertEqual(solana_whirlpool.tick_array_address(pool, -704), found["tick"])
 
+    def test_inspector_rejects_the_i32_seed_and_accepts_the_string_seed(self):
+        pool = "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm"
+        program = solana_tx.b58decode(solana_whirlpool.PROGRAM_ID)
+        expected = (
+            (-24640, "7nDppuGeG1KBH6hY6Tctg4G2aVoaQYka4A7cFiY3RcNF"),
+            (-25344, "4nyKDVYimL5pFkjZg5TtuxYjecVqaCEBHnqHVJk7bRWs"),
+            (-26048, "62AC6bi6g4DSUdKcXQYEM4EzWm53zgZg66CWHJrbxeqy"),
+        )
+        for start, address in expected:
+            self.assertEqual(solana_whirlpool.tick_array_address(pool, start), address)
+        keys, remaining, accounts, values = _keys()
+        solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+        binary, _bump = solana_tx.find_program_address(
+            [b"tick_array", solana_tx.b58decode(values["pool"]), int(values["starts"][0]).to_bytes(4, "little", signed=True)],
+            program,
+        )
+        self.assertNotEqual(solana_tx.b58encode(binary), values["ticks"][0])
+        keys[7] = solana_tx.b58encode(binary)
+        with self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+            solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+        self.assertEqual(caught.exception.category, "whirlpool_tick_array_unbound")
+
     def test_reference_layout_is_accepted(self):
         keys, remaining, accounts, _values = _keys()
         solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
