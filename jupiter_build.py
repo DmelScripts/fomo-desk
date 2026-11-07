@@ -121,11 +121,12 @@ def evaluate(body: dict, rpc) -> dict:
     inspected["price_impact_pct"] = parsed["price_impact_pct"]
     inspected["price_impact_verified"] = False
     inspected["blockhash_fetched_at"] = parsed["blockhash_fetched_at"]
+    accounts_verified = inspected.get("dex_accounts_verified") is True
     inspected.update(_public_diagnostics(parsed))
     inspected["min_output_formula_ok"] = parsed["threshold_matches_floor"] or parsed["threshold_matches_ceil"]
     inspected["min_output_verified"] = False
     inspected["freshness_guarantee"] = False
-    inspected["dex_accounts_verified"] = False
+    inspected["dex_accounts_verified"] = accounts_verified
     inspected["slippage_verified"] = False
     inspected["spend_verified"] = False
     inspected["intent_verified"] = False

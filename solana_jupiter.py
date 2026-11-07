@@ -132,7 +132,12 @@ def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[s
             f"jupiter instruction {index} mints are not native SOL to USDC",
             "token_mint_unbound", program_ids, index, None, destination_mint, authority,
         )
-    if source_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022} or destination_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+    if source_program == solana_tx.TOKEN_2022 or destination_program == solana_tx.TOKEN_2022:
+        raise GateError(
+            f"jupiter instruction {index} uses token-2022, which this route does not support",
+            "token_2022_unsupported", program_ids, index, None,
+        )
+    if source_program != solana_tx.TOKEN_PROGRAM or destination_program != solana_tx.TOKEN_PROGRAM:
         raise GateError(
             f"jupiter instruction {index} token program is not documented",
             "jupiter_accounts_unbound", program_ids, index, None,
@@ -195,41 +200,53 @@ def _check_whirlpool(index, instruction, keys, program_ids, rpc, commitment, a_t
     from solana_inspect import GateError
     import solana_whirlpool
     remaining = instruction.account_indexes[10:]
+    authority = keys[instruction.account_indexes[0]]
     user_source = keys[instruction.account_indexes[1]]
     user_dest = keys[instruction.account_indexes[2]]
     source_mint = keys[instruction.account_indexes[3]]
     dest_mint = keys[instruction.account_indexes[4]]
-    owner = None
-    data = None
-    if len(remaining) == 11 and rpc is not None:
-        pool = keys[remaining[2]]
-        account = rpc.call("getAccountInfo", [pool, {"encoding": "base64", "commitment": commitment}])
-        value = account.get("value") if isinstance(account, dict) else None
-        if isinstance(value, dict):
-            owner = value.get("owner") if isinstance(value.get("owner"), str) else None
+    wanted = []
+    if len(remaining) == 11:
+        wanted = [
+            keys[remaining[2]], keys[remaining[3]], keys[remaining[4]],
+            keys[remaining[5]], keys[remaining[6]], keys[remaining[7]],
+            keys[remaining[8]], keys[remaining[9]],
+        ]
+    accounts = {}
+    if rpc is not None:
+        for address in wanted:
+            account = rpc.call("getAccountInfo", [address, {"encoding": "base64", "commitment": commitment}])
+            value = account.get("value") if isinstance(account, dict) else None
+            if not isinstance(value, dict):
+                continue
             raw = value.get("data")
             if isinstance(raw, list) and raw and isinstance(raw[0], str):
-                data = base64.b64decode(raw[0], validate=True)
+                accounts[address] = (
+                    value.get("owner") if isinstance(value.get("owner"), str) else "",
+                    base64.b64decode(raw[0], validate=True),
+                )
     try:
         solana_whirlpool.check_swap_accounts(
-            keys, remaining, user_source, user_dest, source_mint, dest_mint, a_to_b, owner, data,
+            keys, remaining, authority, user_source, user_dest, source_mint, dest_mint, a_to_b, accounts,
         )
     except solana_whirlpool.WhirlpoolError as exc:
         raise GateError(exc.reason, exc.category, program_ids, index, _WHIRLPOOL)
+    data = instruction.data
     instruction.parsed = {
         "instruction": "route_v2",
         "swap": "Whirlpool",
         "dex_label": solana_whirlpool.LABEL,
         "dex_program": solana_whirlpool.PROGRAM_ID,
+        "in_amount": int.from_bytes(data[8:16], "little"),
+        "quoted_out_amount": str(int.from_bytes(data[16:24], "little")),
+        "slippage_bps": int.from_bytes(data[24:26], "little"),
+        "route_steps": 1,
         "whirlpool_pool_verified": True,
-        "tick_arrays_verified": False,
-        "dex_accounts_verified": False,
+        "tick_arrays_verified": True,
+        "whirlpool_authority_is_user": True,
+        "dex_accounts_verified": True,
         "idl_sha256": IDL_SHA256,
     }
-    raise GateError(
-        f"jupiter instruction {index} whirlpool pool matches; tick arrays and the signer PDA are not verified",
-        "whirlpool_tick_arrays_unverified", program_ids, index, _WHIRLPOOL,
-    )
 
 
 def _route_plan(data: bytes, cursor: int) -> tuple[int, int]:

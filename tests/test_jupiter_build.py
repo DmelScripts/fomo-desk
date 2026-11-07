@@ -349,7 +349,7 @@ console.log(JSON.stringify({oracle: oracle.toBase58()}));
         fake.tables[pool] = pool_data
         fake.owners[pool] = solana_whirlpool.PROGRAM_ID
         shown = jupiter_build.evaluate(body, solana_inspect.RpcClient(fake))
-        self.assertEqual(shown["error_category"], "whirlpool_tick_arrays_unverified")
+        self.assertEqual(shown["error_category"], "whirlpool_authority_unbound")
         self.assertEqual(shown["instruction_tag"], 17)
         self.assertNotIn("simulateTransaction", fake.methods)
         self.assertNotIn("isBlockhashValid", fake.methods)
@@ -364,7 +364,7 @@ console.log(JSON.stringify({oracle: oracle.toBase58()}));
         swapped.tables[pool] = pool_data
         swapped.owners[pool] = solana_whirlpool.PROGRAM_ID
         rejected = jupiter_build.evaluate(body, solana_inspect.RpcClient(swapped))
-        self.assertEqual(rejected["error_category"], "whirlpool_vault_unbound")
+        self.assertEqual(rejected["error_category"], "whirlpool_authority_unbound")
         self.assertNotIn("simulateTransaction", swapped.methods)
 
     def test_nonzero_fee_does_not_reach_simulation(self):

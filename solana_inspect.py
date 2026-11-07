@@ -154,6 +154,10 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "slippage_bps": slippage_bps,
         "slippage_field_ok": slippage_field_ok,
         "slippage_verified": False,
+        "dex_accounts_verified": any(
+            item.parsed and item.parsed.get("dex_accounts_verified") is True
+            for item in decoded.instructions
+        ),
         "spend_verified": False,
         "intent_verified": False,
         "provider_expiry": None,
