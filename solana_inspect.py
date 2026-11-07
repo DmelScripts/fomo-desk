@@ -79,7 +79,7 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         program_ids = _programs(decoded, keys)
         debited = _debits(decoded, keys)
     except GateError as exc:
-        return _rejected(exc.reason, exc.category, exc.program_ids)
+        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag)
     except (ValueError, RpcError) as exc:
         return _rejected(str(exc), "not_usable")
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
@@ -104,7 +104,7 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         if sim_slot < slot:
             return _rejected("slot is inconsistent", "slot_inconsistent", program_ids)
     except GateError as exc:
-        return _rejected(exc.reason, exc.category, exc.program_ids)
+        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag)
     except (ValueError, RpcError) as exc:
         return _rejected(str(exc), "not_usable", program_ids)
     return {
@@ -126,6 +126,8 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "executable": False,
         "live_ready": False,
         "error_category": None,
+        "instruction_index": None,
+        "instruction_tag": None,
     }
 
 
@@ -201,42 +203,181 @@ def _resolve(decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> lis
 
 
 def _programs(decoded: solana_tx.Decoded, keys: list[str]) -> list[str]:
+    """Name every program before rejecting one instruction."""
     program_ids = []
     for instruction in decoded.instructions:
-        program = keys[instruction.program_index]
-        instruction.program_id = program
-        program_ids.append(program)
-        if program not in solana_tx.ALLOWED_PROGRAMS:
-            raise GateError("program is not verified", "unverified_program", program_ids)
-        if program in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022} and solana_tx.transfer_checked(instruction.data) is None:
-            raise GateError("token instruction is not verified", "unverified_program", program_ids)
-        if program == solana_tx.SYSTEM_PROGRAM and solana_tx.system_transfer(instruction.data) is None:
-            raise GateError("system instruction is not verified", "unverified_program", program_ids)
+        instruction.program_id = keys[instruction.program_index]
+        program_ids.append(instruction.program_id)
+    for index, instruction in enumerate(decoded.instructions):
+        _check_instruction(index, instruction, keys, program_ids)
     return sorted(set(program_ids))
+
+
+def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+    program = instruction.program_id
+    tag = instruction.data[0] if instruction.data else None
+    if program not in solana_tx.ALLOWED_PROGRAMS:
+        raise GateError("program is not verified", "unverified_program", program_ids, index, tag)
+    if program == solana_tx.COMPUTE_BUDGET:
+        if solana_tx.compute_budget_tag(instruction.data) is None:
+            raise GateError(
+                f"compute budget instruction {index} tag {tag} is not verified",
+                "compute_budget_unverified", program_ids, index, tag,
+            )
+        return
+    if program == solana_tx.ASSOCIATED_TOKEN:
+        _check_associated(index, instruction, keys, program_ids)
+        return
+    if program == solana_tx.SYSTEM_PROGRAM:
+        _check_system(index, instruction, keys, program_ids)
+        return
+    if program in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+        _check_token(index, instruction, keys, program_ids)
+
+
+def _check_system(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+    tag = int.from_bytes(instruction.data[:4], "little") if len(instruction.data) >= 4 else None
+    if solana_tx.system_transfer(instruction.data) is not None:
+        return
+    created = solana_tx.system_create(instruction.data)
+    if created is not None:
+        _lamports, owner = created
+        if owner not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+            raise GateError(
+                f"system instruction {index} tag 0 owner is not the token program",
+                "system_owner_unbound", program_ids, index, 0,
+            )
+        if not instruction.account_indexes or keys[instruction.account_indexes[0]] != phantom_transport.REQUIRED_WALLET:
+            raise GateError(
+                f"system instruction {index} tag 0 source is not the allowlisted wallet",
+                "wallet_unbound", program_ids, index, 0,
+            )
+        return
+    raise GateError(
+        f"system instruction {index} tag {tag} is not verified",
+        "system_instruction_unverified", program_ids, index, tag,
+    )
+
+
+def _check_associated(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+    data = instruction.data
+    tag = data[0] if data else None
+    if data not in {b"", bytes([1])}:
+        raise GateError(
+            f"associated token instruction {index} tag {tag} is not verified",
+            "associated_token_unverified", program_ids, index, tag,
+        )
+    if len(instruction.account_indexes) < 4:
+        raise GateError(
+            f"associated token instruction {index} tag {tag} is not verified",
+            "associated_token_unverified", program_ids, index, tag,
+        )
+    payer = keys[instruction.account_indexes[0]]
+    owner = keys[instruction.account_indexes[2]]
+    mint = keys[instruction.account_indexes[3]]
+    if payer != phantom_transport.REQUIRED_WALLET or owner != phantom_transport.REQUIRED_WALLET:
+        raise GateError(
+            f"associated token instruction {index} tag {tag} owner is not the allowlisted wallet",
+            "wallet_unbound", program_ids, index, tag,
+        )
+    if mint not in solana_tx.BOUND_MINTS:
+        raise GateError(
+            f"associated token instruction {index} tag {tag} mint is not bound",
+            "token_mint_unbound", program_ids, index, tag,
+        )
+
+
+def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+    data = instruction.data
+    tag = data[0] if data else None
+    accounts = instruction.account_indexes
+    if tag == 3 and solana_tx.token_transfer(data) is not None:
+        raise GateError(
+            f"token instruction {index} tag 3 does not name a mint",
+            "token_mint_unbound", program_ids, index, 3,
+        )
+    if tag == 12 and solana_tx.transfer_checked(data) is not None and len(accounts) >= 4:
+        mint = keys[accounts[1]]
+        owner = keys[accounts[3]]
+        if owner != phantom_transport.REQUIRED_WALLET:
+            raise GateError(
+                f"token instruction {index} tag 12 owner is not the allowlisted wallet",
+                "wallet_unbound", program_ids, index, 12,
+            )
+        if mint not in solana_tx.BOUND_MINTS:
+            raise GateError(
+                f"token instruction {index} tag 12 mint is not bound",
+                "token_mint_unbound", program_ids, index, 12,
+            )
+        return
+    if tag == 17 and data == bytes([17]) and accounts:
+        return
+    if tag == 9 and data == bytes([9]) and len(accounts) >= 3:
+        if keys[accounts[2]] != phantom_transport.REQUIRED_WALLET:
+            raise GateError(
+                f"token instruction {index} tag 9 authority is not the allowlisted wallet",
+                "wallet_unbound", program_ids, index, 9,
+            )
+        return
+    if tag in {16, 18} and len(data) == 33 and len(accounts) >= 2:
+        owner = solana_tx.b58encode(data[1:33])
+        mint = keys[accounts[1]]
+        if owner != phantom_transport.REQUIRED_WALLET:
+            raise GateError(
+                f"token instruction {index} tag {tag} owner is not the allowlisted wallet",
+                "wallet_unbound", program_ids, index, tag,
+            )
+        if mint not in solana_tx.BOUND_MINTS:
+            raise GateError(
+                f"token instruction {index} tag {tag} mint is not bound",
+                "token_mint_unbound", program_ids, index, tag,
+            )
+        return
+    if tag == 1 and data == bytes([1]) and len(accounts) >= 3:
+        mint = keys[accounts[1]]
+        owner = keys[accounts[2]]
+        if owner != phantom_transport.REQUIRED_WALLET:
+            raise GateError(
+                f"token instruction {index} tag 1 owner is not the allowlisted wallet",
+                "wallet_unbound", program_ids, index, 1,
+            )
+        if mint not in solana_tx.BOUND_MINTS:
+            raise GateError(
+                f"token instruction {index} tag 1 mint is not bound",
+                "token_mint_unbound", program_ids, index, 1,
+            )
+        return
+    raise GateError(
+        f"token instruction {index} tag {tag} is not verified",
+        "token_instruction_unverified", program_ids, index, tag,
+    )
 
 
 def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
     total = 0
     found = False
-    usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     for instruction in decoded.instructions:
         if instruction.program_id == solana_tx.SYSTEM_PROGRAM:
             lamports = solana_tx.system_transfer(instruction.data)
-            source = keys[instruction.account_indexes[0]]
-            if lamports is None or source != phantom_transport.REQUIRED_WALLET:
+            created = solana_tx.system_create(instruction.data)
+            source = keys[instruction.account_indexes[0]] if instruction.account_indexes else None
+            if source != phantom_transport.REQUIRED_WALLET:
                 continue
-            total += lamports
-            found = True
+            if lamports is not None:
+                total += lamports
+                found = True
+            elif created is not None:
+                total += created[0]
+                found = True
         if instruction.program_id in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
             parsed = solana_tx.transfer_checked(instruction.data)
             if parsed is None or len(instruction.account_indexes) < 4:
-                raise ValueError("token instruction is not verified")
+                continue
             mint = keys[instruction.account_indexes[1]]
             owner = keys[instruction.account_indexes[3]]
-            if mint != usdc or owner != phantom_transport.REQUIRED_WALLET:
-                raise ValueError("token movement is not bound")
-            if parsed[0] <= 0:
-                raise ValueError("token movement is not bound")
+            if owner == phantom_transport.REQUIRED_WALLET and mint == solana_tx.NATIVE_MINT:
+                total += parsed[0]
+                found = True
     if not found:
         return None
     return total
@@ -250,18 +391,22 @@ def _slot(result: dict) -> int:
 
 
 class GateError(Exception):
-    def __init__(self, reason: str, category: str, program_ids: list[str] | None = None):
+    def __init__(self, reason: str, category: str, program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None):
         self.reason = reason
         self.category = category
         self.program_ids = program_ids or []
+        self.index = index
+        self.tag = tag
 
 
-def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] | None = None) -> dict:
+def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None) -> dict:
     return {
         "stage": "rejected",
         "chain_ok": False,
         "reason": reason,
         "error_category": category,
+        "instruction_index": index,
+        "instruction_tag": tag,
         "program_ids": sorted(set(program_ids or [])),
         "slippage_verified": False,
         "provider_expiry": None,

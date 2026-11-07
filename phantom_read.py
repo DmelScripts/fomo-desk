@@ -273,6 +273,8 @@ def _preflight(text: str, code: int) -> dict:
     base.update({
         "reason": inspected.get("reason"),
         "error_category": inspected.get("error_category"),
+        "instruction_index": inspected.get("instruction_index"),
+        "instruction_tag": inspected.get("instruction_tag"),
         "program_ids": inspected.get("program_ids") or [],
         "chain_ok": inspected.get("chain_ok", False),
         "genesis_ok": inspected.get("genesis_ok"),

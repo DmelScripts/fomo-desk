@@ -119,3 +119,44 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertEqual(rejected["error_category"], "wrong_network")
         self.assertFalse(rejected["freshness_guarantee"])
         self.assertEqual(wrong.methods, ["getGenesisHash"])
+
+    def test_token_layouts_are_narrow_and_later_programs_are_kept(self):
+        token = solana_tx.TOKEN_PROGRAM
+        system = solana_tx.SYSTEM_PROGRAM
+        native = solana_tx.NATIVE_MINT
+        keys = [WALLET, native, token, system]
+        sync = solana_tx.encode_legacy(WALLET, keys, 2, [
+            (3, [0, 1], (2).to_bytes(4, "little") + (10_000_000).to_bytes(8, "little")),
+            (2, [1], bytes([17])),
+        ], BLOCK)
+        shown = solana_inspect.inspect(sync, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(shown["stage"], "chain_checked")
+        self.assertIn(token, shown["program_ids"])
+        self.assertFalse(shown["slippage_verified"])
+        self.assertFalse(shown["execution_allowed"])
+        unknown = solana_tx.b58encode(b"\x03" * 32)
+        hidden = solana_tx.encode_legacy(WALLET, [WALLET, native, token, unknown], 2, [
+            (2, [1], bytes([7]) + (1).to_bytes(8, "little")),
+            (3, [0], bytes([153])),
+        ], BLOCK)
+        rejected = solana_inspect.inspect(hidden, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(rejected["error_category"], "token_instruction_unverified")
+        self.assertEqual(rejected["instruction_index"], 0)
+        self.assertEqual(rejected["instruction_tag"], 7)
+        self.assertIn(unknown, rejected["program_ids"])
+        self.assertIn(token, rejected["program_ids"])
+        self.assertIn("tag 7", rejected["reason"])
+        plain = solana_tx.encode_legacy(WALLET, [WALLET, native, token], 1, [
+            (2, [0, 1, 0], bytes([3]) + (1).to_bytes(8, "little")),
+        ], BLOCK)
+        unbound = solana_inspect.inspect(plain, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(unbound["error_category"], "token_mint_unbound")
+        self.assertEqual(unbound["instruction_tag"], 3)
+        other_mint = solana_tx.b58encode(b"\x55" * 32)
+        checked = solana_tx.encode_legacy(WALLET, [WALLET, other_mint, native, token], 1, [
+            (3, [0, 1, 2, 0], bytes([12]) + (1).to_bytes(8, "little") + bytes([6])),
+        ], BLOCK)
+        bad_mint = solana_inspect.inspect(checked, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(bad_mint["error_category"], "token_mint_unbound")
+        self.assertEqual(bad_mint["instruction_tag"], 12)
+        self.assertFalse(bad_mint["execution_allowed"])

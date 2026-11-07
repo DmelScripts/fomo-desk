@@ -16,7 +16,10 @@ COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ASSOCIATED_TOKEN = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+NATIVE_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 ALLOWED_PROGRAMS = {SYSTEM_PROGRAM, COMPUTE_BUDGET, TOKEN_PROGRAM, TOKEN_2022, ASSOCIATED_TOKEN}
+BOUND_MINTS = {NATIVE_MINT, USDC_MINT}
 _LOOKUP_META = 56
 _ACTIVE_SLOT = (1 << 64) - 1
 
@@ -164,10 +167,37 @@ def system_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[4:12], "little")
 
 
+def system_create(data: bytes) -> tuple[int, str] | None:
+    """System CreateAccount: u32 tag 0, lamports, space, owner pubkey."""
+    if len(data) != 52 or int.from_bytes(data[:4], "little") != 0:
+        return None
+    lamports = int.from_bytes(data[4:12], "little")
+    if lamports >= 1 << 63:
+        return None
+    return lamports, b58encode(data[20:52])
+
+
 def transfer_checked(data: bytes) -> tuple[int, int] | None:
     if len(data) != 10 or data[0] != 12:
         return None
     return int.from_bytes(data[1:9], "little"), data[9]
+
+
+def token_transfer(data: bytes) -> int | None:
+    """SPL Transfer names an amount and no mint. Tag 3, then a u64."""
+    if len(data) != 9 or data[0] != 3:
+        return None
+    return int.from_bytes(data[1:9], "little")
+
+
+def compute_budget_tag(data: bytes) -> int | None:
+    if not data:
+        return None
+    tag = data[0]
+    expected = {0: 9, 1: 5, 2: 5, 3: 9}
+    if tag not in expected or len(data) != expected[tag]:
+        return None
+    return tag
 
 
 def _compact(data: bytes, index: int) -> tuple[int, int]:
@@ -196,6 +226,21 @@ def encode_v0_transfer_lookup(fee_payer: str, table: str, lamports: int, blockha
     message += bytes([1, 1, 2, 0, 2, len(data)]) + data
     message += bytes([1]) + table_key + bytes([1, 0, 0])
     raw = bytes([1]) + (b"\x00" * 64) + message
+    return base64.b64encode(raw).decode("ascii")
+
+
+def encode_legacy(fee_payer: str, keys: list[str], readonly_unsigned: int, instructions: list[tuple[int, list[int], bytes]], blockhash: str) -> str:
+    """Unsigned legacy transaction. keys[0] is the fee payer."""
+    if not keys or keys[0] != fee_payer or len(keys) > 64 or len(instructions) > 16:
+        raise ValueError("transaction is not usable")
+    raw_keys = b"".join(b58decode(key) for key in keys)
+    body = bytes([1, 0, readonly_unsigned, len(keys)]) + raw_keys + b58decode(blockhash)
+    encoded = bytes([len(instructions)])
+    for program_index, accounts, data in instructions:
+        if len(accounts) > 64 or len(data) > 255:
+            raise ValueError("transaction is not usable")
+        encoded += bytes([program_index, len(accounts), *accounts, len(data)]) + data
+    raw = bytes([1]) + (b"\x00" * 64) + body + encoded
     return base64.b64encode(raw).decode("ascii")
 
 
