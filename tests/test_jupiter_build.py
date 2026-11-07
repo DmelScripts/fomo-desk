@@ -157,6 +157,13 @@ class JupiterBuildTest(unittest.TestCase):
         self.assertTrue(shown["min_output_formula_ok"])
         self.assertFalse(shown["min_output_verified"])
         self.assertFalse(shown["dex_accounts_verified"])
+        self.assertEqual(shown["fee_lamports_ceil"], 0)
+        self.assertEqual(shown["fee_basis"], "instruction_limit")
+        self.assertFalse(shown["fee_authorized"])
+        self.assertEqual(shown["fee_policy"], "not_approved")
+        self.assertTrue(shown["threshold_matches_floor"])
+        self.assertFalse(shown["threshold_rounding_documented"])
+        self.assertEqual(shown["freshness_basis"], "last_valid_block_height")
         self.assertFalse(shown["slippage_verified"])
         self.assertFalse(shown["spend_verified"])
         self.assertFalse(shown["intent_verified"])
@@ -208,14 +215,32 @@ class JupiterBuildTest(unittest.TestCase):
         ceiling = _body(otherAmountThreshold=str(FLOOR + 1))
         self.assertEqual(jupiter_build.parse_build(ceiling)["other_amount_threshold"], str(FLOOR + 1))
 
-    def test_route_v2_discriminator_is_rejected_without_a_layout(self):
-        body = _body()
+    def test_route_v2_reports_the_fee_bound_and_is_not_decoded(self):
+        body = _body(outAmount="897985", otherAmountThreshold="889006")
+        body["computeBudgetInstructions"] = [_ix(
+            solana_tx.COMPUTE_BUDGET, [], bytes([3]) + (1000).to_bytes(8, "little"),
+        )]
         synthetic = solana_jupiter.ROUTE_V2 + (b"\x00" * 32)
         body["swapInstruction"] = dict(body["swapInstruction"], data=base64.b64encode(synthetic).decode("ascii"))
         with self.assertRaises(jupiter_build.BuildError) as caught:
             jupiter_build.parse_build(body)
         self.assertEqual(solana_jupiter.ROUTE_V2.hex(), "bb64facc31c4af14")
         self.assertEqual(caught.exception.category, "jupiter_route_v2_unsupported")
+        details = caught.exception.details
+        self.assertEqual(details["price_micro_lamports"], 1000)
+        self.assertIsNone(details["compute_unit_limit"])
+        self.assertEqual(details["fee_lamports_ceil"], 1400)
+        self.assertEqual(details["fee_basis"], "max_compute_unit_limit")
+        self.assertEqual(details["fee_policy"], "not_approved")
+        self.assertFalse(details["fee_authorized"])
+        self.assertEqual(details["integer_floor_threshold"], "889005")
+        self.assertEqual(details["integer_ceil_threshold"], "889006")
+        self.assertFalse(details["threshold_matches_floor"])
+        self.assertTrue(details["threshold_matches_ceil"])
+        self.assertFalse(details["threshold_rounding_documented"])
+        self.assertFalse(details["min_output_verified"])
+        self.assertFalse(details["freshness_guarantee"])
+        self.assertFalse(details["dex_accounts_verified"])
         self.assertNotIn("raw", caught.exception.reason)
         missing_time = _body()
         missing_time["blockhashWithMetadata"] = {"blockhash": list(b"\x11" * 32), "lastValidBlockHeight": 250_000_000}

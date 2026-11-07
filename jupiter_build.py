@@ -32,13 +32,15 @@ _REQUIRED = {
 }
 _OPTIONAL = {"computeUnitPrice"}
 _IMPACT = re.compile(r"-?\d+(\.\d+)?")
+_MAX_COMPUTE_UNITS = 1_400_000
 _KNOWN_PROGRAMS = solana_tx.ALLOWED_PROGRAMS | {solana_jupiter.PROGRAM_ID}
 
 
 class BuildError(Exception):
-    def __init__(self, reason: str, category: str):
+    def __init__(self, reason: str, category: str, details: dict | None = None):
         self.reason = reason
         self.category = category
+        self.details = details or {}
 
 
 @dataclass
@@ -119,8 +121,10 @@ def evaluate(body: dict, rpc) -> dict:
     inspected["price_impact_pct"] = parsed["price_impact_pct"]
     inspected["price_impact_verified"] = False
     inspected["blockhash_fetched_at"] = parsed["blockhash_fetched_at"]
-    inspected["min_output_formula_ok"] = True
+    inspected.update(_public_diagnostics(parsed))
+    inspected["min_output_formula_ok"] = parsed["threshold_matches_floor"] or parsed["threshold_matches_ceil"]
     inspected["min_output_verified"] = False
+    inspected["freshness_guarantee"] = False
     inspected["dex_accounts_verified"] = False
     inspected["slippage_verified"] = False
     inspected["spend_verified"] = False
@@ -169,9 +173,20 @@ def parse_build(body: dict) -> dict:
         if not isinstance(group, list):
             raise BuildError("jupiter build instructions are malformed", "malformed")
         instructions.extend(_instruction(item) for item in group)
-    _require_supported_swap(instructions)
     tables = _tables(body.get("addressesByLookupTableAddress"))
     blockhash, height, fetched_at = _blockhash(body.get("blockhashWithMetadata"))
+    diagnostics = _public_diagnostics({
+        "instructions": instructions,
+        "out_amount": str(out_amount),
+        "other_amount_threshold": str(threshold),
+        "slippage_bps": slippage,
+        "last_valid_block_height": height,
+        "blockhash_fetched_at": fetched_at,
+    })
+    problem = _swap_problem(instructions)
+    if problem is not None:
+        reason, category = problem
+        raise BuildError(reason, category, diagnostics)
     return {
         "instructions": instructions,
         "tables": tables,
@@ -182,6 +197,7 @@ def parse_build(body: dict) -> dict:
         "slippage_bps": slippage,
         "price_impact_pct": body["priceImpactPct"],
         "blockhash_fetched_at": fetched_at,
+        **diagnostics,
     }
 
 
@@ -264,21 +280,84 @@ def _drain(meta: dict, addresses: list[str], predicate) -> tuple[list[int], list
     return indexes, keys
 
 
-def _require_supported_swap(instructions: list[_Ix]) -> None:
+def _swap_problem(instructions: list[_Ix]) -> tuple[str, str] | None:
     swaps = [item for item in instructions if item.program_id == solana_jupiter.PROGRAM_ID]
     if len(swaps) != 1:
-        raise BuildError("jupiter build swap program is not JUP6", "route_mismatch")
+        return "jupiter build swap program is not JUP6", "route_mismatch"
     data = swaps[0].data
     if len(data) >= 8 and data[:8] == solana_jupiter.ROUTE_V2:
-        raise BuildError(
-            "jupiter build swap is route_v2 and its account layout is not supported",
+        return (
+            "jupiter build swap is route_v2 and the published Jupiter IDL does not include its layout",
             "jupiter_route_v2_unsupported",
         )
     if len(data) < 8 or data[:8] != solana_jupiter._SHARED:
-        raise BuildError(
+        return (
             "jupiter build swap instruction is not shared_accounts_route",
             "jupiter_instruction_unsupported",
         )
+    return None
+
+
+def _public_diagnostics(parsed: dict) -> dict:
+    """Fee and threshold arithmetic. Neither number is spend approval or a fill guarantee."""
+    out_amount = int(parsed["out_amount"])
+    slippage = parsed["slippage_bps"]
+    threshold = int(parsed["other_amount_threshold"])
+    kept = 10_000 - slippage
+    floor = out_amount * kept // 10_000
+    ceil = (out_amount * kept + 9_999) // 10_000
+    fee = _fee_budget(parsed["instructions"])
+    return {
+        "integer_floor_threshold": str(floor),
+        "integer_ceil_threshold": str(ceil),
+        "threshold_matches_floor": threshold == floor,
+        "threshold_matches_ceil": threshold == ceil,
+        "threshold_rounding_documented": False,
+        "min_output_verified": False,
+        "fee_policy": "not_approved",
+        "fee_authorized": False,
+        "freshness_basis": "last_valid_block_height",
+        "freshness_guarantee": False,
+        "provider_expiry": None,
+        "dex_accounts_verified": False,
+        **fee,
+    }
+
+
+def _fee_budget(instructions: list[_Ix]) -> dict:
+    """ceil(price_micro_lamports * compute_unit_limit / 1_000_000).
+
+    Jupiter's build response carries the price and not the limit. The limit is
+    chosen after simulation, so a missing limit uses the documented 1,400,000
+    maximum only as an upper bound. A non-zero price stays unauthorized.
+    """
+    price = None
+    limit = None
+    for instruction in instructions:
+        if instruction.program_id != solana_tx.COMPUTE_BUDGET:
+            continue
+        parsed = solana_tx.compute_budget_payload(instruction.data)
+        if parsed is None:
+            continue
+        kind, payload, _length = parsed
+        if kind == 3 and price is None:
+            price = int.from_bytes(payload, "little")
+        elif kind == 2 and limit is None:
+            limit = int.from_bytes(payload, "little")
+    if price is None:
+        return {
+            "price_micro_lamports": None,
+            "compute_unit_limit": limit,
+            "fee_lamports_ceil": None,
+            "fee_basis": "price_absent",
+        }
+    units = limit if limit is not None else _MAX_COMPUTE_UNITS
+    return {
+        "price_micro_lamports": price,
+        "compute_unit_limit": limit,
+        "fee_lamports_ceil": (price * units + 999_999) // 1_000_000,
+        "fee_basis": "instruction_limit" if limit is not None else "max_compute_unit_limit",
+    }
 
 
 def _route(plan) -> None:

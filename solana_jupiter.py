@@ -19,7 +19,8 @@ _MAX_STEPS = 16
 
 # Anchor discriminators: sha256("global:<name>")[:8].
 _SHARED = hashlib.sha256(b"global:shared_accounts_route").digest()[:8]
-# Named from the anchor global. The account and argument layout is not decoded.
+# The anchor name matches discriminator bb64facc31c4af14. jup-ag/instruction-parser
+# does not publish this instruction, so the accounts and arguments are not decoded.
 ROUTE_V2 = hashlib.sha256(b"global:route_v2").digest()[:8]
 
 # Extra bytes after the Swap enum tag, in the order published by the v6 IDL.
