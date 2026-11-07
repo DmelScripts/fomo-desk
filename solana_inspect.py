@@ -30,6 +30,14 @@ MAINNET_RPC = "https://api.mainnet-beta.solana.com"
 MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 _COMMITMENTS = {"confirmed", "finalized"}
 _MAX_LAMPORTS = 10_000_000
+_MAX_RENT_ACCOUNTS = 2
+_MAX_RENT = solana_tx.TOKEN_ACCOUNT_RENT * _MAX_RENT_ACCOUNTS
+# https://web3.okx.com/onchainos/dev-docs/trade/dex-smart-contract
+OKX_DEX_ROUTER = "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u"
+_MIN_HEAP = 32 * 1024
+_MAX_HEAP = 256 * 1024
+_MAX_COMPUTE_UNITS = 1_400_000
+_MAX_LOADED_ACCOUNTS = 64 * 1024 * 1024
 
 
 class RpcError(RuntimeError):
@@ -77,18 +85,22 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         raw = base64.b64decode(tx_b64, validate=True)
         decoded = solana_tx.decode_transaction(raw)
         keys = _resolve(decoded, rpc, commitment)
-        program_ids = _programs(decoded, keys, rpc, commitment)
-        debited = _debits(decoded, keys)
+        program_ids, findings = _programs(decoded, keys, rpc, commitment)
+        debited, rent = _debits(decoded, keys)
     except GateError as exc:
         return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag, exc.observed_mint, exc.observed_owner)
     except (ValueError, RpcError) as exc:
         return _rejected(str(exc), "not_usable")
     if decoded.signers != [phantom_transport.REQUIRED_WALLET]:
-        return _rejected("an extra signer is required", "extra_signer", program_ids)
+        findings.append(GateError("an extra signer is required", "extra_signer", program_ids))
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
-        return _rejected("fee payer is not the allowlisted wallet", "wallet_unbound", program_ids)
+        findings.append(GateError("fee payer is not the allowlisted wallet", "wallet_unbound", program_ids))
+    if rent > _MAX_RENT:
+        findings.append(GateError("rent is outside the documented token-account bound", "rent_unbound", program_ids))
     if debited is None or debited > max_lamports:
-        return _rejected("debit is not bound", "amount_unbound", program_ids)
+        findings.append(GateError("debit is not bound", "amount_unbound", program_ids))
+    if findings:
+        return _aggregate(findings, program_ids)
     jupiter = [item.parsed for item in decoded.instructions if item.parsed]
     if len(jupiter) > 1:
         return _rejected("more than one jupiter route", "unsupported_route", program_ids)
@@ -132,12 +144,20 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "commitment": commitment,
         "blockhash_slot": slot,
         "simulation_slot": sim_slot,
+        "blockhash_status": "checked",
+        "simulation_status": "checked",
         "debited_lamports": debited,
+        "swap_lamports": debited,
+        "rent_lamports": rent,
         "program_ids": sorted({item.program_id for item in decoded.instructions}),
         "quoted_out_amount": quoted_out,
         "slippage_bps": slippage_bps,
         "slippage_field_ok": slippage_field_ok,
         "slippage_verified": False,
+        "dex_accounts_verified": any(
+            item.parsed and item.parsed.get("dex_accounts_verified") is True
+            for item in decoded.instructions
+        ),
         "spend_verified": False,
         "intent_verified": False,
         "provider_expiry": None,
@@ -236,29 +256,37 @@ def _resolve(decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> lis
 def _programs(decoded: solana_tx.Decoded, keys: list[str], rpc: RpcClient, commitment: str) -> list[str]:
     """Name every program before rejecting one instruction."""
     program_ids = []
+    findings = []
     for instruction in decoded.instructions:
         instruction.program_id = keys[instruction.program_index]
         program_ids.append(instruction.program_id)
     for index, instruction in enumerate(decoded.instructions):
-        _check_instruction(index, instruction, keys, program_ids, decoded, rpc, commitment)
-    _check_fee(decoded, program_ids)
-    return sorted(set(program_ids))
+        try:
+            _check_instruction(index, instruction, keys, program_ids, decoded, rpc, commitment)
+        except GateError as exc:
+            findings.append(exc)
+    try:
+        _check_fee(decoded, program_ids)
+    except GateError as exc:
+        findings.append(exc)
+    return sorted(set(program_ids)), findings
 
 
 def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> None:
     program = instruction.program_id
     tag = instruction.data[0] if instruction.data else None
     if program == solana_jupiter.PROGRAM_ID:
-        solana_jupiter.check_instruction(index, instruction, keys, program_ids)
+        solana_jupiter.check_instruction(index, instruction, keys, program_ids, rpc, commitment)
         return
+    if program == OKX_DEX_ROUTER:
+        raise GateError(
+            f"instruction {index} uses the OKX DEX router and has no supported layout",
+            "okx_route_unsupported", program_ids, index, tag,
+        )
     if program not in solana_tx.ALLOWED_PROGRAMS:
         raise GateError("program is not verified", "unverified_program", program_ids, index, tag)
     if program == solana_tx.COMPUTE_BUDGET:
-        if solana_tx.compute_budget_tag(instruction.data) is None:
-            raise GateError(
-                f"compute budget instruction {index} tag {tag} is not verified",
-                "compute_budget_unverified", program_ids, index, tag,
-            )
+        _check_compute(index, instruction, program_ids)
         return
     if program == solana_tx.ASSOCIATED_TOKEN:
         _check_associated(index, instruction, keys, program_ids)
@@ -267,24 +295,80 @@ def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: lis
         _check_system(index, instruction, keys, program_ids, decoded, rpc, commitment)
         return
     if program in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
-        _check_token(index, instruction, keys, program_ids, rpc, commitment)
+        _check_token(index, instruction, keys, program_ids, decoded, rpc, commitment)
 
 
-def _check_fee(decoded: solana_tx.Decoded, program_ids: list[str]) -> None:
-    for index, instruction in enumerate(decoded.instructions):
-        if instruction.program_id != solana_tx.COMPUTE_BUDGET:
-            continue
-        tag = instruction.data[0]
-        if tag == 3 and int.from_bytes(instruction.data[1:9], "little") != 0:
-            raise GateError(
-                f"compute budget instruction {index} tag 3 moves lamports",
-                "fee_unbound", program_ids, index, 3,
-            )
-        if tag == 0 and int.from_bytes(instruction.data[5:9], "little") != 0:
+def _check_compute(index: int, instruction: solana_tx.Instruction, program_ids: list[str]) -> None:
+    parsed = solana_tx.compute_budget_payload(instruction.data)
+    tag = instruction.data[0] if instruction.data else None
+    if parsed is None:
+        raise GateError(
+            f"compute budget instruction {index} tag {tag} length {len(instruction.data)} is not verified",
+            "compute_budget_unverified", program_ids, index, tag,
+        )
+    kind, payload, _length = parsed
+    if kind == 0:
+        fee = int.from_bytes(payload[4:8], "little")
+        if fee != 0:
             raise GateError(
                 f"compute budget instruction {index} tag 0 moves lamports",
                 "fee_unbound", program_ids, index, 0,
             )
+        return
+    if kind == 1:
+        heap = int.from_bytes(payload, "little")
+        if heap < _MIN_HEAP or heap > _MAX_HEAP or heap % 1024 != 0:
+            raise GateError(
+                f"compute budget instruction {index} tag 1 heap {heap} is outside the documented bounds",
+                "compute_budget_out_of_bounds", program_ids, index, 1,
+            )
+        return
+    if kind == 2:
+        limit = int.from_bytes(payload, "little")
+        if not 1 <= limit <= _MAX_COMPUTE_UNITS:
+            raise GateError(
+                f"compute budget instruction {index} tag 2 limit {limit} is outside the documented bounds",
+                "compute_budget_out_of_bounds", program_ids, index, 2,
+            )
+        return
+    if kind == 3:
+        price = int.from_bytes(payload, "little")
+        if price != 0:
+            raise GateError(
+                f"compute budget instruction {index} tag 3 moves lamports",
+                "fee_unbound", program_ids, index, 3,
+            )
+        return
+    loaded = int.from_bytes(payload, "little")
+    if not 1 <= loaded <= _MAX_LOADED_ACCOUNTS:
+        raise GateError(
+            f"compute budget instruction {index} tag 4 limit {loaded} is outside the documented bounds",
+            "compute_budget_out_of_bounds", program_ids, index, 4,
+        )
+
+
+def _aggregate(findings: list[GateError], program_ids: list[str]) -> dict:
+    first = findings[0]
+    result = _rejected(first.reason, first.category, program_ids, first.index, first.tag, first.observed_mint, first.observed_owner)
+    result["findings"] = [
+        {
+            "error_category": item.category,
+            "instruction_index": item.index,
+            "instruction_tag": item.tag,
+            "reason": item.reason,
+            **({"observed_mint": item.observed_mint} if item.observed_mint else {}),
+            **({"observed_owner": item.observed_owner} if item.observed_owner else {}),
+        }
+        for item in findings
+    ]
+    result["blockhash_status"] = "not_run"
+    result["simulation_status"] = "not_run"
+    return result
+
+
+def _check_fee(decoded: solana_tx.Decoded, program_ids: list[str]) -> None:
+    """Fees are rejected inside the compute-budget decoder. Kept so callers stay stable."""
+    return None
 
 
 def _native_account(address: str, rpc: RpcClient, commitment: str, program_ids: list[str], index: int, tag: int | None) -> None:
@@ -346,13 +430,13 @@ def _check_system(index: int, instruction: solana_tx.Instruction, keys: list[str
                 f"system instruction {index} tag 2 source is not the allowlisted wallet",
                 "wallet_unbound", program_ids, index, 2,
             )
-        if dest == phantom_transport.REQUIRED_WALLET or _initialized_native(dest, decoded, keys):
+        if dest == phantom_transport.REQUIRED_WALLET or _initialized_native(dest, decoded, keys) or dest in _created_native_accounts(decoded, keys, index):
             return
         _native_account(dest, rpc, commitment, program_ids, index, 2)
         return
     created = solana_tx.system_create(instruction.data)
     if created is not None:
-        _lamports, owner = created
+        _lamports, _space, owner = created
         if owner not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
             raise GateError(
                 f"system instruction {index} tag 0 owner is not the token program",
@@ -398,7 +482,30 @@ def _check_associated(index: int, instruction: solana_tx.Instruction, keys: list
         )
 
 
-def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], rpc: RpcClient, commitment: str) -> None:
+def _created_native_accounts(decoded: solana_tx.Decoded, keys: list[str], before_index: int) -> set[str]:
+    """Native wSOL ATAs created earlier in this transaction.
+
+    The address must be the associated-token PDA for the allowlisted wallet and
+    the native mint. A later transfer, SyncNative, or close can bind that
+    address. An account created for any other owner or mint is not included.
+    """
+    created = set()
+    for index, instruction in enumerate(decoded.instructions):
+        if index >= before_index or instruction.program_id != solana_tx.ASSOCIATED_TOKEN:
+            continue
+        if instruction.data not in {b"", bytes([1])} or len(instruction.account_indexes) < 6:
+            continue
+        payer, ata, owner, mint, system, token_program = (keys[item] for item in instruction.account_indexes[:6])
+        if payer != phantom_transport.REQUIRED_WALLET or owner != phantom_transport.REQUIRED_WALLET:
+            continue
+        if mint != solana_tx.NATIVE_MINT or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
+            continue
+        if ata == solana_tx.associated_token_address(owner, mint, token_program):
+            created.add(ata)
+    return created
+
+
+def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> None:
     data = instruction.data
     tag = data[0] if data else None
     accounts = instruction.account_indexes
@@ -427,7 +534,8 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
             )
         return
     if tag == 17 and data == bytes([17]) and accounts:
-        _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 17)
+        if keys[accounts[0]] not in _created_native_accounts(decoded, keys, index):
+            _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 17)
         return
     if tag == 9 and data == bytes([9]) and len(accounts) >= 3:
         if keys[accounts[2]] != phantom_transport.REQUIRED_WALLET:
@@ -440,7 +548,8 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
                 f"token instruction {index} tag 9 destination is not the allowlisted wallet",
                 "close_destination_unbound", program_ids, index, 9,
             )
-        _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 9)
+        if keys[accounts[0]] not in _created_native_accounts(decoded, keys, index):
+            _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 9)
         return
     if tag in {16, 18} and len(data) == 33 and len(accounts) >= 2:
         owner = solana_tx.b58encode(data[1:33])
@@ -476,8 +585,16 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
     )
 
 
-def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
-    total = 0
+def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> tuple[int | None, int]:
+    """Split the wallet's SOL into the swap principal and recognized token-account rent.
+
+    A 165-byte token-program create contributes at most one default rent-exempt
+    balance to rent. Lamports above that, transfers, and native TransferChecked
+    amounts stay in the swap principal. Rent is not added to the 0.01 SOL cap.
+    """
+    swap = 0
+    rent = 0
+    rent_accounts = 0
     found = False
     for instruction in decoded.instructions:
         if instruction.program_id == solana_tx.SYSTEM_PROGRAM:
@@ -487,11 +604,24 @@ def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
             if source != phantom_transport.REQUIRED_WALLET:
                 continue
             if lamports is not None:
-                total += lamports
+                swap += lamports
                 found = True
             elif created is not None:
-                total += created[0]
-                found = True
+                created_lamports, space, owner = created
+                recognized = (
+                    owner in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}
+                    and space == solana_tx.TOKEN_ACCOUNT_SPACE
+                )
+                if recognized:
+                    rent_accounts += 1
+                    rent_part = min(created_lamports, solana_tx.TOKEN_ACCOUNT_RENT)
+                    rent += rent_part
+                    if created_lamports > rent_part:
+                        swap += created_lamports - rent_part
+                        found = True
+                else:
+                    swap += created_lamports
+                    found = True
         if instruction.program_id in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
             parsed = solana_tx.transfer_checked(instruction.data)
             if parsed is None or len(instruction.account_indexes) < 4:
@@ -499,11 +629,13 @@ def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
             mint = keys[instruction.account_indexes[1]]
             owner = keys[instruction.account_indexes[3]]
             if owner == phantom_transport.REQUIRED_WALLET and mint == solana_tx.NATIVE_MINT:
-                total += parsed[0]
+                swap += parsed[0]
                 found = True
+    if rent_accounts > _MAX_RENT_ACCOUNTS:
+        rent = _MAX_RENT + 1
     if not found:
-        return None
-    return total
+        return None, rent
+    return swap, rent
 
 
 def _slot(result: dict) -> int:

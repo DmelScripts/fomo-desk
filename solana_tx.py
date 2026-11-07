@@ -8,6 +8,7 @@ the message and is reported as base58 for isBlockhashValid.
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import dataclass, field
 
 _ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -168,14 +169,22 @@ def system_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[4:12], "little")
 
 
-def system_create(data: bytes) -> tuple[int, str] | None:
+# Rent-exempt minimum for one 165-byte token account.
+# getMinimumBalanceForRentExemption(165) returned 1_488_440 at minContextSlot
+# 466540548. The older formula result was 2_039_280 and is not the current bound.
+TOKEN_ACCOUNT_SPACE = 165
+TOKEN_ACCOUNT_RENT = 1_488_440
+
+
+def system_create(data: bytes) -> tuple[int, int, str] | None:
     """System CreateAccount: u32 tag 0, lamports, space, owner pubkey."""
     if len(data) != 52 or int.from_bytes(data[:4], "little") != 0:
         return None
     lamports = int.from_bytes(data[4:12], "little")
+    space = int.from_bytes(data[12:20], "little")
     if lamports >= 1 << 63:
         return None
-    return lamports, b58encode(data[20:52])
+    return lamports, space, b58encode(data[20:52])
 
 
 def transfer_checked(data: bytes) -> tuple[int, int] | None:
@@ -198,14 +207,62 @@ def token_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[1:9], "little")
 
 
-def compute_budget_tag(data: bytes) -> int | None:
-    if not data:
-        return None
-    tag = data[0]
-    expected = {0: 9, 1: 5, 2: 5, 3: 9}
-    if tag not in expected or len(data) != expected[tag]:
-        return None
-    return tag
+def compute_budget_payload(data: bytes) -> tuple[int, bytes, int] | None:
+    """Return tag, payload, and total length for a documented compute-budget encoding.
+
+    web3.js writes a u8 discriminant. The Rust bincode encoding writes a u32
+    discriminant. Payload widths are the same: deprecated request-units is two
+    u32s, heap and compute limit and loaded-account limit are one u32, and the
+    price is one u64.
+    """
+    short = {0: 8, 1: 4, 2: 4, 3: 8, 4: 4}
+    if data and data[0] in short and len(data) == 1 + short[data[0]]:
+        return data[0], data[1:], len(data)
+    if len(data) >= 4:
+        tag = int.from_bytes(data[:4], "little")
+        payload = data[4:]
+        if tag in short and len(payload) == short[tag]:
+            return tag, payload, len(data)
+    return None
+
+
+def find_program_address(seeds: list[bytes], program: bytes) -> tuple[bytes, int]:
+    """Solana findProgramAddress. Off-curve check matches the web3.js PDA rule."""
+    for bump in range(255, -1, -1):
+        digest = hashlib.sha256(b"".join(seeds) + bytes([bump]) + program + b"ProgramDerivedAddress").digest()
+        if not _point_on_curve(digest):
+            return digest, bump
+    raise ValueError("program address is not usable")
+
+
+def associated_token_address(owner: str, mint: str, token_program: str) -> str:
+    """SPL associated-token PDA: [owner, token program, mint]."""
+    derived, _bump = find_program_address(
+        [b58decode(owner), b58decode(token_program), b58decode(mint)],
+        b58decode(ASSOCIATED_TOKEN),
+    )
+    return b58encode(derived)
+
+
+def _point_on_curve(point: bytes) -> bool:
+    if len(point) != 32:
+        return False
+    prime = (1 << 255) - 19
+    y = int.from_bytes(point, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    if y >= prime:
+        return False
+    d = (-121665 * pow(121666, prime - 2, prime)) % prime
+    y2 = y * y % prime
+    numerator = (y2 - 1) % prime
+    denominator = (d * y2 + 1) % prime
+    if denominator == 0:
+        return False
+    x2 = numerator * pow(denominator, prime - 2, prime) % prime
+    if x2 == 0:
+        return sign == 0
+    return pow(x2, (prime - 1) // 2, prime) == 1
 
 
 def _compact(data: bytes, index: int) -> tuple[int, int]:
@@ -235,6 +292,35 @@ def encode_v0_transfer_lookup(fee_payer: str, table: str, lamports: int, blockha
     message += bytes([1]) + table_key + bytes([1, 0, 0])
     raw = bytes([1]) + (b"\x00" * 64) + message
     return base64.b64encode(raw).decode("ascii")
+
+
+def message_bytes(tx_b64: str) -> bytes:
+    """The message after the signature block. This is what getFeeForMessage prices."""
+    _count, index, raw = _signed(tx_b64)
+    return raw[index:]
+
+
+def first_signature(tx_b64: str) -> str:
+    """The fee payer signature. An unsigned transaction does not have one."""
+    count, index, raw = _signed(tx_b64)
+    if count < 1 or index < 64:
+        raise ValueError("transaction is not usable")
+    signature = raw[index - 64 * count:index - 64 * count + 64]
+    if signature == b"\x00" * 64:
+        raise ValueError("transaction is unsigned")
+    return b58encode(signature)
+
+
+def _signed(tx_b64: str) -> tuple[int, int, bytes]:
+    raw = base64.b64decode(tx_b64, validate=True)
+    count, index = _compact(raw, 0)
+    if count < 1 or count > 8:
+        raise ValueError("transaction is not usable")
+    start = index
+    index += 64 * count
+    if index >= len(raw) or start != index - 64 * count:
+        raise ValueError("transaction is not usable")
+    return count, index, raw
 
 
 def encode_legacy(fee_payer: str, keys: list[str], readonly_unsigned: int, instructions: list[tuple[int, list[int], bytes]], blockhash: str, required: int = 1) -> str:
