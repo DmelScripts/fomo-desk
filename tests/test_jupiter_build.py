@@ -215,33 +215,66 @@ class JupiterBuildTest(unittest.TestCase):
         ceiling = _body(otherAmountThreshold=str(FLOOR + 1))
         self.assertEqual(jupiter_build.parse_build(ceiling)["other_amount_threshold"], str(FLOOR + 1))
 
-    def test_route_v2_reports_the_fee_bound_and_is_not_decoded(self):
+    def test_route_v2_goonfi_is_decoded_and_its_accounts_stay_unverified(self):
+        self.assertEqual(solana_jupiter.ROUTE_V2.hex(), "bb64facc31c4af14")
+        self.assertEqual(solana_jupiter.IDL_SHA256, "e6c2b425ec740922ee91aa7a3278cea07f4bc00a3ed9efa4eca16facb481bfca")
         body = _body(outAmount="897985", otherAmountThreshold="889006")
-        body["computeBudgetInstructions"] = [_ix(
+        event = solana_tx.b58encode(b"\x70" * 32)
+        accounts = [
+            _account(WALLET, signer=True, writable=True),
+            _account(solana_tx.b58encode(b"\x66" * 32), writable=True),
+            _account(solana_tx.b58encode(b"\x69" * 32), writable=True),
+            _account(NATIVE),
+            _account(USDC),
+            _account(TOKEN),
+            _account(TOKEN),
+            _account(solana_tx.b58encode(b"\x69" * 32), writable=True),
+            _account(event),
+            _account(solana_jupiter.PROGRAM_ID),
+            _account(DEX, writable=True),
+        ]
+        data = (
+            solana_jupiter.ROUTE_V2
+            + (10_000_000).to_bytes(8, "little")
+            + (897985).to_bytes(8, "little")
+            + (100).to_bytes(2, "little")
+            + (0).to_bytes(2, "little")
+            + (0).to_bytes(2, "little")
+            + (1).to_bytes(4, "little")
+            + bytes([121, 0])
+            + (10_000).to_bytes(2, "little")
+            + bytes([0, 1])
+        )
+        self.assertEqual(len(data), 40)
+        body["swapInstruction"] = _ix(solana_jupiter.PROGRAM_ID, accounts, data)
+        fake = _rpc()
+        shown = jupiter_build.evaluate(body, solana_inspect.RpcClient(fake))
+        self.assertEqual(shown["error_category"], "dex_accounts_unverified")
+        self.assertEqual(shown["instruction_tag"], 121)
+        self.assertEqual(shown["simulation_status"], "not_run")
+        self.assertNotIn("simulateTransaction", fake.methods)
+        self.assertFalse(shown["dex_accounts_verified"])
+        self.assertFalse(shown["freshness_guarantee"])
+        self.assertFalse(shown["fee_authorized"])
+        self.assertTrue(shown["threshold_matches_ceil"])
+        self.assertFalse(shown["min_output_verified"])
+        self.assertFalse(shown["execution_allowed"])
+        priced = _body(outAmount="897985", otherAmountThreshold="889006")
+        priced["swapInstruction"] = body["swapInstruction"]
+        priced["computeBudgetInstructions"] = [_ix(
             solana_tx.COMPUTE_BUDGET, [], bytes([3]) + (1000).to_bytes(8, "little"),
         )]
-        synthetic = solana_jupiter.ROUTE_V2 + (b"\x00" * 32)
-        body["swapInstruction"] = dict(body["swapInstruction"], data=base64.b64encode(synthetic).decode("ascii"))
-        with self.assertRaises(jupiter_build.BuildError) as caught:
-            jupiter_build.parse_build(body)
-        self.assertEqual(solana_jupiter.ROUTE_V2.hex(), "bb64facc31c4af14")
-        self.assertEqual(caught.exception.category, "jupiter_route_v2_unsupported")
-        details = caught.exception.details
-        self.assertEqual(details["price_micro_lamports"], 1000)
-        self.assertIsNone(details["compute_unit_limit"])
-        self.assertEqual(details["fee_lamports_ceil"], 1400)
-        self.assertEqual(details["fee_basis"], "max_compute_unit_limit")
-        self.assertEqual(details["fee_policy"], "not_approved")
-        self.assertFalse(details["fee_authorized"])
-        self.assertEqual(details["integer_floor_threshold"], "889005")
-        self.assertEqual(details["integer_ceil_threshold"], "889006")
-        self.assertFalse(details["threshold_matches_floor"])
-        self.assertTrue(details["threshold_matches_ceil"])
-        self.assertFalse(details["threshold_rounding_documented"])
-        self.assertFalse(details["min_output_verified"])
-        self.assertFalse(details["freshness_guarantee"])
-        self.assertFalse(details["dex_accounts_verified"])
-        self.assertNotIn("raw", caught.exception.reason)
+        parsed = jupiter_build.parse_build(priced)
+        self.assertEqual(parsed["fee_lamports_ceil"], 1400)
+        self.assertEqual(parsed["fee_policy"], "not_approved")
+        self.assertFalse(parsed["fee_authorized"])
+        unknown = bytes(data)
+        unknown = unknown[:34] + bytes([120]) + unknown[35:]
+        body["swapInstruction"] = _ix(solana_jupiter.PROGRAM_ID, accounts, unknown)
+        other = _rpc()
+        rejected = jupiter_build.evaluate(body, solana_inspect.RpcClient(other))
+        self.assertEqual(rejected["error_category"], "unsupported_route")
+        self.assertNotIn("simulateTransaction", other.methods)
         missing_time = _body()
         missing_time["blockhashWithMetadata"] = {"blockhash": list(b"\x11" * 32), "lastValidBlockHeight": 250_000_000}
         with self.assertRaises(jupiter_build.BuildError) as timed:

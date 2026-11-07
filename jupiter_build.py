@@ -285,11 +285,8 @@ def _swap_problem(instructions: list[_Ix]) -> tuple[str, str] | None:
     if len(swaps) != 1:
         return "jupiter build swap program is not JUP6", "route_mismatch"
     data = swaps[0].data
-    if len(data) >= 8 and data[:8] == solana_jupiter.ROUTE_V2:
-        return (
-            "jupiter build swap is route_v2 and the published Jupiter IDL does not include its layout",
-            "jupiter_route_v2_unsupported",
-        )
+    if len(data) >= 8 and data[:8] in {solana_jupiter.ROUTE_V2, solana_jupiter._SHARED}:
+        return None
     if len(data) < 8 or data[:8] != solana_jupiter._SHARED:
         return (
             "jupiter build swap instruction is not shared_accounts_route",

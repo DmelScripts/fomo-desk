@@ -1,0 +1,14 @@
+{
+  "program_id": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+  "idl_account": "C88XWfp26heEmDkmfSzeXP7Fd7GQJ2j9dDTUsyiZbUTa",
+  "derivation": "anchor-0.29 IdlAccount::address: find_program_address([], program) then create_with_seed(base, anchor:idl, program)",
+  "account_owner": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+  "account_discriminator_sha256": "internal:IdlAccount",
+  "idl_authority": "9u9iZBWqGsp5hXBxkVZtBTuLSGNAG9gEQLgpuVw39ASg",
+  "program_upgrade_authority": null,
+  "metadata": {"name": "jupiter", "version": "0.1.0", "spec": "0.1.0"},
+  "decompressed_sha256": "e6c2b425ec740922ee91aa7a3278cea07f4bc00a3ed9efa4eca16facb481bfca",
+  "route_v2_discriminator": [187, 100, 250, 204, 49, 196, 175, 20],
+  "goonfi_v2_swap_variant": 121,
+  "goonfi_accounts_verified": false
+}
