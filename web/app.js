@@ -728,11 +728,23 @@
       });
       rootNode.appendChild(block);
     });
+    var ticket = state.settings && state.settings.ticket;
+    var note = el("p", ticket || "", "note");
+    note.id = "settings-ticket";
+    if (!ticket) note.hidden = true;
+    rootNode.insertBefore(note, rootNode.firstChild);
   }
 
   function settingControl(item) {
     var row = el("div", null, "setting");
-    row.appendChild(el("span", item.key, "grow mono"));
+    var title = el("span", null, "grow");
+    title.appendChild(el("strong", item.label || item.key));
+    title.appendChild(el("span", " " + item.key, "mono muted"));
+    if (item.note) title.appendChild(el("span", item.note, "sub"));
+    if (item.min != null && item.max != null) {
+      title.appendChild(el("span", "Range " + item.min + " to " + item.max, "sub"));
+    }
+    row.appendChild(title);
     if (item.values) {
       item.values.forEach(function (value) {
         var button = el("button", value, "text-btn");
@@ -1014,7 +1026,8 @@
       var card = el("div", null, "card block");
       var stop = coin.exit_lines ? coin.exit_lines.stop : null;
       var trail = coin.exit_lines ? coin.exit_lines.trail : null;
-      card.appendChild(el("p", "Stop " + (num(stop) ? usd(stop) : "—")));
+      var carried = num(coin.position.stop_pct) ? " · -" + Number(coin.position.stop_pct).toFixed(2) + "%" : "";
+      card.appendChild(el("p", "Stop " + (num(stop) ? usd(stop) : "—") + carried + " carried"));
       card.appendChild(el("p", "Trail " + (num(trail) ? usd(trail) : "not trailing")));
       var left = coin.position.timeout_left_s;
       var leftText = "Time left —";

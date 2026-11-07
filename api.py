@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import math
 import os
 import time
 from typing import Any
@@ -21,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import links
 from agents.executor import paper_balance, set_mode
 from bus import covered_price_mints, hub
-from config import SECRET_KEYS, SETTING_GROUPS, SETTING_RULES, load_secrets, report_boundary
+from config import SECRET_KEYS, SETTING_COPY, SETTING_GROUPS, SETTING_RULES, load_secrets, report_boundary
 from db import AGENT_NAMES, agents_enabled, get_float, get_setting, query, set_setting
 
 router = APIRouter()
@@ -491,8 +492,8 @@ def _coin(mint: str) -> dict:
             "open": pos["closed_at"] is None,
         }
         trail = None
-        if pos["trail_active"] and pos["peak_price"] is not None:
-            trail = float(pos["peak_price"]) * (1 - get_float("trail_pct") / 100.0)
+        if pos["trail_active"] and pos["peak_price"] is not None and pos["trail_giveback_pct"] is not None:
+            trail = float(pos["peak_price"]) * (1 - float(pos["trail_giveback_pct"]) / 100.0)
         current = trail if trail is not None else pos["stop_price"]
         carried = None
         if pos["entry_price"] and pos["stop_price"] is not None and float(pos["entry_price"]) != 0:
@@ -689,14 +690,17 @@ def _public_settings() -> dict:
         groups[group] = []
         for key in keys:
             rule = SETTING_RULES.get(key)
-            item = {"key": key, "value": get_setting(key)}
+            label, note = SETTING_COPY.get(key, (key, ""))
+            item = {"key": key, "label": label, "note": note, "value": get_setting(key)}
             if rule and rule[0] == "number":
                 item["min"] = rule[1]
                 item["max"] = rule[2]
             elif rule and rule[0] == "enum":
                 item["values"] = list(rule[1])
+            elif rule and rule[0] == "bool":
+                item["kind"] = "bool"
             groups[group].append(item)
-    return {"groups": groups}
+    return {"groups": groups, "ticket": _ticket_note("paper_start_stack")}
 
 
 def _check_setting(key: str, value: Any) -> str:
@@ -705,18 +709,22 @@ def _check_setting(key: str, value: Any) -> str:
     rule = SETTING_RULES.get(key)
     if rule is None:
         raise HTTPException(status_code=400, detail="unknown setting")
-    if key == "mode" and str(value).upper() == "LIVE":
-        raise HTTPException(status_code=400, detail="LIVE requires POST /api/mode with confirm")
+    if key == "mode":
+        raise HTTPException(status_code=400, detail="mode changes use POST /api/mode")
     kind = rule[0]
     if kind == "number":
+        if isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{key} must be a number from {rule[1]} to {rule[2]}")
         try:
-            number = float(value)
+            number = float(str(value).strip())
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail=f"{key} must be a number from {rule[1]} to {rule[2]}")
-        if number < rule[1] or number > rule[2]:
-            raise HTTPException(status_code=400, detail=f"{key} must be from {rule[1]} to {rule[2]}")
-        text = str(int(number)) if number == int(number) and key not in {"min_alive_6h", "min_organic", "max_chase", "bundled_penalty", "fees_ref_discount", "min_ticket_usd"} else str(value)
-        return text
+        if not math.isfinite(number) or number < rule[1] or number > rule[2]:
+            raise HTTPException(status_code=400, detail=f"{key} must be a number from {rule[1]} to {rule[2]}")
+        whole = {"min_alive_6h", "min_organic", "max_chase", "bundled_penalty", "fees_ref_discount", "min_ticket_usd"}
+        if number == int(number) and key not in whole:
+            return str(int(number))
+        return str(number)
     if kind == "enum":
         text = str(value)
         if text not in rule[1]:
@@ -748,15 +756,21 @@ def _check_setting(key: str, value: Any) -> str:
 
 
 def _ticket_note(key: str) -> str | None:
-    if key not in {"paper_start_stack", "stack_pct", "below_min", "min_ticket_usd"}:
-        return None
+    """PAPER uses paper_start_stack. LIVE stack is a different number."""
     from agents.executor import ticket_warning
-    return ticket_warning(
-        get_float("paper_start_stack"),
-        get_float("stack_pct"),
-        get_float("min_ticket_usd"),
-        get_setting("below_min", "bump") or "bump",
-    )
+    watched = {"paper_start_stack", "stack_pct", "below_min", "min_ticket_usd", "stack"}
+    if key not in watched:
+        return None
+    pct = get_float("stack_pct")
+    ticket = get_float("min_ticket_usd")
+    below = get_setting("below_min", "bump") or "bump"
+    if key == "stack":
+        raw = get_setting("stack")
+        if raw in (None, ""):
+            return None
+        note = ticket_warning(float(raw), pct, ticket, below)
+        return None if note is None else "LIVE stack: " + note
+    return ticket_warning(get_float("paper_start_stack"), pct, ticket, below)
 
 
 @router.get("/api/state")

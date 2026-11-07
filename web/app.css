@@ -215,6 +215,9 @@ main {
 .switch.on i { left: 22px; }
 .switch:disabled { opacity: 0.4; }
 .setting { display: block; padding: 12px 0; }
+.setting .sub, .setting strong { display: block; }
+#settings-ticket { color: #ff9f0a; padding: 4px 0 12px; }
+.setting .muted { color: var(--tertiary); }
 .setting .grow { display: block; margin-bottom: 8px; }
 .setting input[type="range"] { width: 100%; }
 .setting input[type="number"] { width: 140px; margin-top: 8px; }

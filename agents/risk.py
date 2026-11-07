@@ -88,13 +88,18 @@ class Risk:
         state["peak"] = peak
         if price >= entry * (1 + db.get_float("trail_start_pct") / 100.0):
             state["trail"] = True
-        trail_on = bool(state.get("trail") or row.get("trail_active"))
+        trail_on = bool(state.get("trail") or _col(row, "trail_active"))
         state["trail"] = trail_on
         stop_line = entry * (1 - state["stop_pct"] / 100.0)
-        trail_line = peak * (1 - db.get_float("trail_pct") / 100.0)
+        giveback = _trail_giveback(row, state) if trail_on else None
+        trail_line = None if giveback is None else peak * (1 - giveback / 100.0)
         db.execute(
-            "UPDATE positions SET peak_price = ?, stop_price = ?, trail_active = ? WHERE id = ?",
-            (peak, stop_line, 1 if trail_on else 0, row["id"]),
+            """
+            UPDATE positions
+            SET peak_price = ?, stop_price = ?, trail_active = ?, trail_giveback_pct = ?
+            WHERE id = ?
+            """,
+            (peak, stop_line, 1 if trail_on else 0, giveback, row["id"]),
         )
         db.execute(
             "INSERT INTO prices (mint, ts, price, volume_m5) VALUES (?, ?, ?, NULL)",
@@ -221,6 +226,29 @@ class Risk:
             return
         state["reminded"] = True
         self.desk.notifier.push(f"{name} still open", "still open", url, _sell_buttons(url, row["mint"]))
+
+
+def _col(row, name):
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _trail_giveback(row, state) -> float:
+    """Armed trail keeps its giveback. A looser setting does not replace it."""
+    setting = db.get_float("trail_pct")
+    carried = _col(row, "trail_giveback_pct")
+    if carried is None:
+        carried = state.get("trail_giveback")
+    if carried is None:
+        carried = setting
+    elif setting < float(carried) - 1e-9:
+        carried = setting
+    carried = float(carried)
+    state["trail_giveback"] = carried
+    row["trail_giveback_pct"] = carried
+    return carried
 
 
 def _copy(reason: str, name: str, pnl: float, pct: float, stop_pct: float) -> tuple[str, str, str, str]:

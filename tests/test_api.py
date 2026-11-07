@@ -42,7 +42,7 @@ class TestApi(unittest.TestCase):
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
         body = health.json()
-        self.assertEqual(body["step"], 9)
+        self.assertEqual(body["step"], 10)
         self.assertFalse(body["agents_enabled"])
         self.assertNotIn("dummy-app-token", health.text)
         self.assertEqual(self.client.get("/api/state").status_code, 401)
@@ -319,7 +319,8 @@ class TestApi(unittest.TestCase):
         body = account.json()
         self.assertFalse(body["integrations"]["email"]["ready"])
         self.assertFalse(body["integrations"]["telegram"]["ready"])
-        self.assertFalse(body["integrations"]["web_push"]["ready"])
+        self.assertTrue(body["integrations"]["web_push"]["ready"])
+        self.assertEqual(body["integrations"]["web_push"]["channel"], "webpush")
         self.assertTrue(body["jev"]["host_locked"])
         self.assertIn("cannot show", body["jev"]["detail"])
         locked = self.client.post("/api/account/key", headers=AUTH, json={

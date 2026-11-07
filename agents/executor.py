@@ -56,7 +56,10 @@ def ticket_warning(stack_usd: float, stack_pct: float, min_ticket_usd: float, be
     if str(below_min).lower() == "bump":
         pct = min_ticket_usd / stack_usd * 100.0 if stack_usd else 0
         return f"tickets bumped to ${min_ticket_usd:.2f} = {pct:.2f}% of stack"
-    return f"every coin will be skipped, stack under ${min_stack:.2f}"
+    return (
+        f"every coin will be skipped, stack under ${min_stack:.2f}. "
+        "Switch below_min to bump, or raise the stack."
+    )
 
 
 def paper_balance() -> float:
@@ -175,7 +178,7 @@ class Executor:
         url = links.coin_url(mint, "solana")
         now = self.desk.now()
         if reason or size is None:
-            self._signal(mint, now, fresh_price, None, url, mode, "skipped", reason)
+            self._signal(mint, now, fresh_price, None, url, mode, "skipped", reason, None, None)
             self.sent.add(mint)
             self.desk.bus.publish("signal", {
                 "agent": "executor", "mint": mint, "signalPrice": fresh_price, "sizeUsd": None,
@@ -194,12 +197,12 @@ class Executor:
         pushed = self._push(title, body, url, mint)
         status = "bought" if mode == "PAPER" else "sent"
         if not pushed and mode == "LIVE":
-            self._signal(mint, now, fresh_price, size, url, mode, "skipped", "push failed")
+            self._signal(mint, now, fresh_price, size, url, mode, "skipped", "push failed", title, body)
             log.warning("push failed")
             return {"mint": mint, "status": "skipped", "reason": "push failed", "link": url, "mode": mode}
         if not pushed:
             log.warning("push failed")
-        self._signal(mint, now, fresh_price, size, url, mode, "sent" if mode == "LIVE" else "bought", None)
+        self._signal(mint, now, fresh_price, size, url, mode, "sent" if mode == "LIVE" else "bought", None, title, body)
         self.sent.add(mint)
         if mode == "PAPER":
             self._fill(mint, name, now, float(fresh_price), size, pct, stop, mode)
@@ -275,13 +278,19 @@ class Executor:
         )
         self.desk.bus.risk.put_nowait({"mint": mint, "name": name, "price": price})
 
-    def _signal(self, mint, now, price, size, url, mode, status, reason) -> None:
+    def _signal(self, mint, now, price, size, url, mode, status, reason, push_title=None, push_body=None) -> None:
         db.execute(
             """
-            INSERT INTO signals (mint, ts, price, size_usd, stack_pct, link, mode, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO signals (
+                mint, ts, price, size_usd, stack_pct, link, mode, status, push_title, push_body
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (mint, now, price, size, db.get_float("stack_pct"), url, mode if mode in ("PAPER", "LIVE") else "PAPER", status if status != "skipped" else "skipped"),
+            (
+                mint, now, price, size, db.get_float("stack_pct"), url,
+                mode if mode in ("PAPER", "LIVE") else "PAPER",
+                status if status != "skipped" else "skipped",
+                push_title, push_body,
+            ),
         )
 
     def _push(self, title, body, url, mint) -> bool:

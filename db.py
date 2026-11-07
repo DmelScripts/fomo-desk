@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS signals (
     stack_pct REAL,
     link TEXT,
     mode TEXT CHECK (mode IN ('PAPER', 'LIVE')),
-    status TEXT
+    status TEXT,
+    push_title TEXT,
+    push_body TEXT
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -87,7 +89,8 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_reason TEXT,
     pnl_usd REAL,
     fees_usd REAL,
-    mode TEXT CHECK (mode IN ('PAPER', 'LIVE'))
+    mode TEXT CHECK (mode IN ('PAPER', 'LIVE')),
+    trail_giveback_pct REAL
 );
 
 CREATE TABLE IF NOT EXISTS activity (
@@ -212,6 +215,30 @@ def init_db() -> None:
                 (now,),
             )
             conn.execute("PRAGMA user_version=2")
+        if version < 3:
+            # Additive columns only. Existing rows, subscriptions, and owner
+            # settings stay. notifier moves telegram -> webpush only when the
+            # owner never wrote a change_log row for it.
+            for table, column, ddl in (
+                ("signals", "push_title", "ALTER TABLE signals ADD COLUMN push_title TEXT"),
+                ("signals", "push_body", "ALTER TABLE signals ADD COLUMN push_body TEXT"),
+                ("positions", "trail_giveback_pct", "ALTER TABLE positions ADD COLUMN trail_giveback_pct REAL"),
+            ):
+                have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in have:
+                    conn.execute(ddl)
+            owned = conn.execute(
+                "SELECT 1 FROM change_log WHERE key = 'notifier' LIMIT 1"
+            ).fetchone()
+            if owned is None:
+                conn.execute(
+                    """
+                    UPDATE settings SET value = 'webpush', updated_at = ?
+                    WHERE key = 'notifier' AND value = 'telegram'
+                    """,
+                    (now,),
+                )
+            conn.execute("PRAGMA user_version=3")
         conn.commit()
     finally:
         conn.close()

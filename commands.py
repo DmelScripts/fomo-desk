@@ -70,6 +70,7 @@ ALIASES = (
     ("poll", "poll_s"),
     ("fees", "fees_ref_discount"),
     ("notifier", "notifier"),
+    ("auditor.enabled", "enabled"),
     ("dev", "max_dev_pct"),
     ("lp", "min_lp_locked_pct"),
     ("h1", "max_h1_change_pct"),
@@ -243,7 +244,7 @@ def _buy(mint: str, row) -> dict:
     start = _night_start()
     pushed = db.query(
         """
-        SELECT mint, ts, price, size_usd, stack_pct, link, mode, status
+        SELECT mint, ts, price, size_usd, stack_pct, link, mode, status, push_title, push_body
         FROM signals
         WHERE mint = ? AND ts >= ? AND status IN ('sent', 'bought')
         ORDER BY ts DESC LIMIT 1
@@ -270,22 +271,29 @@ def _buy(mint: str, row) -> dict:
 
 
 def _resend(signal, coin: dict) -> dict:
-    """Send tonight's Buy button again. Does not write a signal or a position."""
+    """Send tonight's Buy button again. Does not write a signal or a position.
+
+    New signals store the push text. Older rows do not, so the resend does
+    not borrow today's stop or trail.
+    """
     from notifier import Notifier
     url = signal["link"] or coin["coin_url"]
-    name = coin["symbol"] or coin["name"] or coin["mint"]
-    size = signal["size_usd"]
-    pct = signal["stack_pct"]
-    if size is None:
-        title = f"Buy {name}"
+    stored = signal["push_title"] if "push_title" in signal.keys() else None
+    if stored:
+        title = stored
+        body = signal["push_body"] or ""
     else:
-        pct_text = "" if pct is None else f" · {float(pct):.2f}% of stack"
-        title = f"Buy {name} · ${float(size):.2f}{pct_text}"
-    stop = db.get_float("stop_pct")
-    trail = db.get_float("trail_pct")
-    body = f"stop -{_num(stop)}% · trail {_num(trail)}%"
+        name = coin["symbol"] or coin["name"] or coin["mint"]
+        size = signal["size_usd"]
+        pct = signal["stack_pct"]
+        if size is None:
+            title = f"Buy {name}"
+        else:
+            pct_text = "" if pct is None else f" · {float(pct):.2f}% of stack"
+            title = f"Buy {name} · ${float(size):.2f}{pct_text}"
+        body = "Original push text was not stored."
     mode = (db.get_setting("mode", "PAPER") or "PAPER").upper()
-    shown = f"PAPER · {title}" if mode == "PAPER" else title
+    shown = title if str(title).startswith("PAPER · ") or mode != "PAPER" else f"PAPER · {title}"
     Notifier(mode=mode).push(title, body, url, [{"label": "Buy on FOMO", "url": url}], activity=False)
     return _ok(f"{shown}\n{body}\n{url}", coins=[coin], buttons=[{"label": "Buy on FOMO", "url": url}])
 
@@ -384,7 +392,12 @@ def _set(phrase: str, value: str) -> dict:
         return _ok(str(exc.detail), refused=True)
     old = db.get_setting(key)
     db.set_setting(key, stored, "command")
-    return _ok(f"{LABELS.get(key, key)} {_face(key, old)} -> {_face(key, stored)}")
+    text = f"{LABELS.get(key, key)} {_face(key, old)} -> {_face(key, stored)}"
+    from api import _ticket_note
+    note = _ticket_note(key)
+    if note:
+        text = f"{text}\n{note}"
+    return _ok(text)
 
 
 def _stack(raw: str) -> dict:
@@ -397,7 +410,12 @@ def _stack(raw: str) -> dict:
     old = db.get_setting("stack")
     db.set_setting("stack", stored, "command")
     previous = "unset" if old in (None, "") else old
-    return _ok(f"LIVE stack {previous} -> {stored}")
+    text = f"LIVE stack {previous} -> {stored}"
+    from api import _ticket_note
+    note = _ticket_note("stack")
+    if note:
+        text = f"{text}\n{note}"
+    return _ok(text)
 
 
 def _live(folded: str) -> dict:

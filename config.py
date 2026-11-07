@@ -73,7 +73,8 @@ SETTINGS_DEFAULTS = {
     "mode": "PAPER",
     "paper_start_stack": "200",
     "report_time": "08:00",
-    "notifier": "telegram",
+    # Telegram was skipped. New databases use the channel that actually sends.
+    "notifier": "webpush",
     "rpc_url": "https://api.mainnet-beta.solana.com",
     "push_rejects": "false",
     "fees_ref_discount": "0.10",
@@ -158,9 +159,64 @@ SETTING_GROUPS = {
         "timeout_min_gain_pct", "risk.confirm_window_min",
     ],
     "desk": [
-        "mode", "paper_start_stack", "report_time", "notifier", "rpc_url",
+        "mode", "paper_start_stack", "stack", "report_time", "notifier", "rpc_url",
         "push_rejects", "fees_ref_discount", "fomo_handle",
     ],
+}
+
+# Labels for the Account tab. Bounds live in SETTING_RULES. The prompt requires
+# a sane range and does not list the numbers; those ranges are local choices.
+# Percent fields that describe a share of a position or pool stay inside 0–100.
+# Probabilities stay inside 0–1. Polls cannot be faster than 5s. A ticket cannot
+# be below the $5 fee step. agents_enabled is not a setting.
+SETTING_COPY = {
+    "min_liquidity_usd": ("Minimum liquidity", "USD. Scanner kills a pool below this."),
+    "max_top10_pct": ("Max top 10 holders", "Shared by scanner and auditor. One value."),
+    "max_h1_change_pct": ("Max 1h price change", "Percent. Scanner only."),
+    "poll_s": ("Scanner poll", "Seconds. Risk uses risk.poll_s, not this."),
+    "min_pool_age_min": ("Minimum pool age", "Minutes. Shared by scanner and auditor."),
+    "max_wait_min": ("Maximum wait", "Minutes in the waiting room."),
+    "runner_h24_pct": ("Runner 24h change", "Percent that marks a name as a runner."),
+    "enabled": ("Take apart before buying", "auditor.enabled. Turning this off asks twice."),
+    "max_dev_pct": ("Max dev holding", "Percent of supply."),
+    "min_lp_locked_pct": ("Minimum LP locked", "Percent."),
+    "max_bundled": ("Max bundled wallets", "Largest funded-together group."),
+    "max_delegated_accounts": ("Max delegated accounts", "Accounts on one delegate."),
+    "retries": ("Source retries", "Tries before a layer is no data."),
+    "analyst_mode": ("Analyst mode", "jev uses the saved key. rules does not."),
+    "min_alive_6h": ("Minimum alive", "0 to 1."),
+    "min_organic": ("Minimum organic", "0 to 1."),
+    "max_chase": ("Maximum chase", "0 to 1."),
+    "min_score": ("Minimum score", "0 to 100."),
+    "timeout_s": ("Analyst timeout", "Seconds. Not the risk timeout."),
+    "alive_volume_h1": ("Rules alive volume", "USD of 1h volume for a score of 1."),
+    "organic_buys_h1": ("Rules organic buys", "1h buys for a score of 1."),
+    "bundled_penalty": ("Rules bundled penalty", "Multiplier from this many bundled wallets."),
+    "flush_drop_m5_pct": ("Rules flush drop", "Percent down in 5 minutes."),
+    "chase_h1_pct": ("Rules chase 1h", "Percent. Not max_chase."),
+    "stack_pct": ("Stack percent", "Percent of the stack for one ticket."),
+    "max_pool_pct": ("Max pool percent", "Percent of pool liquidity."),
+    "min_ticket_usd": ("Minimum ticket", "USD. The fee step starts at 5."),
+    "below_min": ("Below the minimum", "bump raises the ticket. skip sends nothing."),
+    "recheck_liq_drop_pct": ("Recheck liquidity drop", "Percent."),
+    "recheck_price_up_pct": ("Recheck price rise", "Percent."),
+    "confirm_window_min": ("Executor confirm window", "Minutes. Risk uses risk.confirm_window_min."),
+    "risk.poll_s": ("Risk poll", "Seconds. Not the scanner poll."),
+    "stop_pct": ("Stop", "Percent below entry. A position keeps its own stop."),
+    "trail_start_pct": ("Trail starts", "Percent above entry."),
+    "trail_pct": ("Trail giveback", "Percent off the peak. An armed trail only tightens."),
+    "timeout_h": ("Risk timeout", "Hours. Not the analyst timeout."),
+    "timeout_min_gain_pct": ("Timeout minimum gain", "Percent. Below this, a timeout can fire."),
+    "risk.confirm_window_min": ("Risk confirm window", "Minutes. Not the executor window."),
+    "mode": ("Mode", "Use the PAPER / LIVE switch. LIVE stays locked here."),
+    "paper_start_stack": ("PAPER starting stack", "USD. Not the LIVE stack and not the home balance."),
+    "stack": ("LIVE stack", "USD. Used only in LIVE. Unset until you set it."),
+    "report_time": ("Report time", "Vietnam clock, HH:MM."),
+    "notifier": ("Notifier", "webpush is the channel. Telegram is not connected."),
+    "rpc_url": ("Solana RPC", "HTTPS URL."),
+    "push_rejects": ("Push rejects", "Also push auditor and analyst rejects."),
+    "fees_ref_discount": ("Referral discount", "Fraction off the fee. 0.10 is 10%."),
+    "fomo_handle": ("FOMO username", "From the signup step."),
 }
 
 

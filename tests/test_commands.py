@@ -116,6 +116,8 @@ class TestCommands(unittest.TestCase):
         before = db.query("SELECT COUNT(*) AS n FROM signals")[0]["n"]
         reply = commands.run("/buy ALP")
         self.assertTrue(reply["text"].startswith("PAPER · Buy ALP"))
+        self.assertIn("Original push text was not stored.", reply["text"])
+        self.assertNotIn("stop -", reply["text"])
         self.assertIn(url, reply["text"])
         self.assertEqual(reply["buttons"], [{"label": "Buy on FOMO", "url": url}])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM signals")[0]["n"], before)
@@ -256,5 +258,5 @@ class TestCommands(unittest.TestCase):
         self.assertNotIn(TOKEN, ok.text)
         self.assertEqual(client.post("/api/command", headers=AUTH, json={}).status_code, 400)
         health = client.get("/health")
-        self.assertEqual(health.json()["step"], 9)
+        self.assertEqual(health.json()["step"], 10)
         self.assertFalse(health.json()["agents_enabled"])
