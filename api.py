@@ -673,6 +673,11 @@ def _secret_flags(name: str) -> dict:
     return {"configured": bool(loaded), "host_locked": bool(os.environ.get(name))}
 
 
+def _phantom_status() -> dict:
+    from phantom_runner import public_status
+    return public_status()
+
+
 def listed_quotes() -> list:
     from quotes import listed
     return listed()
@@ -710,6 +715,7 @@ def _account() -> dict:
             "detail": jev_detail,
         },
         "quotes": listed_quotes(),
+        "phantom": _phantom_status(),
     }
 
 
@@ -981,6 +987,30 @@ def quote_result(request: Request, body: dict) -> dict:
     require_app_token(request)
     from quotes import record_result
     return record_result(body)
+
+
+@router.post("/api/phantom/run")
+def phantom_run(request: Request, body: dict) -> dict:
+    """PAPER runner only. It cannot send or switch the desk to LIVE."""
+    require_app_token(request)
+    from phantom_runner import run_intent
+    return run_intent(body)
+
+
+@router.post("/api/phantom/halt")
+def phantom_halt(request: Request, body: dict) -> dict:
+    """Revoke or release the kill switch. Send stays off."""
+    require_app_token(request)
+    from phantom_runner import set_halt
+    return set_halt(body)
+
+
+@router.post("/api/phantom/reconcile")
+def phantom_reconcile(request: Request, body: dict) -> dict:
+    """Close an unknown submit without quoting or sending again."""
+    require_app_token(request)
+    from phantom_runner import reconcile_unknown
+    return reconcile_unknown(body)
 
 
 @router.post("/api/push")

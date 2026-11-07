@@ -55,11 +55,18 @@ TABLES = {
         "provider_quote_id", "failure", "request_json", "created_at", "updated_at",
         "observed_at", "import_json",
     ),
+    "phantom_control": ("key", "value", "updated_at"),
+    "phantom_reservations": (
+        "intent_id", "status", "wallet_id", "wallet", "chain", "pair_json",
+        "amount_usd", "fee_usd", "reserved_usd", "slippage", "entry_quote_id",
+        "exit_quote_id", "fx_sol_usd", "fx_at", "result_json", "created_at", "updated_at",
+    ),
+    "phantom_alerts": ("id", "ts", "kind", "detail"),
 }
 
 TIMESTAMP_COLUMNS = {
     "migrated_at", "ts", "opened_at", "closed_at", "until", "created_at", "updated_at",
-    "observed_at",
+    "observed_at", "fx_at",
 }
 BOOLEAN_COLUMNS = {"pass", "alive_6h", "organic", "flush", "chase", "trail_active"}
 ID_TABLES = ("scans", "audits", "verdicts", "signals", "positions", "activity")
@@ -71,6 +78,9 @@ PRIMARY_KEYS = {
     "reports": "window_id",
     "restart_events": "event_id",
     "quotes": "id",
+    "phantom_control": "key",
+    "phantom_reservations": "intent_id",
+    "phantom_alerts": "id",
 }
 INDEXES = {
     "prices": ("mint", "ts"),
@@ -144,7 +154,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

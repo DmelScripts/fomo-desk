@@ -209,6 +209,39 @@ CREATE TABLE IF NOT EXISTS quotes (
     import_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS phantom_control (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS phantom_reservations (
+    intent_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    wallet_id TEXT,
+    wallet TEXT,
+    chain TEXT,
+    pair_json TEXT NOT NULL,
+    amount_usd TEXT,
+    fee_usd TEXT,
+    reserved_usd TEXT,
+    slippage REAL,
+    entry_quote_id TEXT,
+    exit_quote_id TEXT,
+    fx_sol_usd TEXT,
+    fx_at REAL,
+    result_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS phantom_alerts (
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_scans_mint_ts ON scans (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_audits_mint_ts ON audits (mint, ts);
@@ -355,6 +388,12 @@ def init_db() -> None:
             if "import_json" not in have:
                 conn.execute("ALTER TABLE quotes ADD COLUMN import_json TEXT")
             conn.execute("PRAGMA user_version=9")
+        if version < 10:
+            conn.execute(
+                "INSERT OR IGNORE INTO phantom_control (key, value, updated_at) VALUES ('halt', '1', ?)",
+                (now,),
+            )
+            conn.execute("PRAGMA user_version=10")
         conn.commit()
     finally:
         conn.close()

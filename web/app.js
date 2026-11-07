@@ -701,8 +701,22 @@
     renderIntegrations();
     renderKey();
     renderPush();
+    renderPhantom();
     renderQuotes();
     renderCommand();
+  }
+
+  function renderPhantom() {
+    var node = $("account-phantom");
+    if (!node) return;
+    clear(node);
+    var row = (state.account && state.account.phantom) || {};
+    node.appendChild(el("h2", "Phantom"));
+    node.appendChild(el("p", "PAPER application control. Not a wallet policy and not live authority.", "muted"));
+    node.appendChild(el("p", "Bankroll $" + (row.bankroll_usd || "100.00") + " · one ticket $" + (row.size_usd || "8.00") + ". The $47.50 FOMO bump does not apply."));
+    node.appendChild(el("p", "Transport " + (row.transport || "BLOCKED") + " · " + (row.auth || "AWAITING_OWNER_AUTH_PROCEDURE")));
+    node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
+    node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
   }
 
   function renderQuotes() {

@@ -126,7 +126,7 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(db.query("SELECT endpoint FROM push_subs")[0]["endpoint"], "https://push.example/kept")
         conn = db.connect()
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 10)
             columns = [row[1] for row in conn.execute("PRAGMA table_info(positions)")]
             self.assertIn("trail_giveback_pct", columns)
         finally:
