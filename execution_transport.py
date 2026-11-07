@@ -23,6 +23,7 @@ import phantom_runner
 import phantom_transport
 import risk_limits
 import solana_inspect
+import solana_tx
 
 _REVIEW = "send_review:"
 _LEDGER = "send_ledger"
@@ -152,7 +153,7 @@ def _signature(text: str) -> str | None:
     return None
 
 
-def _claim(intent_id: str, digest: str, expected_review: dict) -> bool:
+def _claim(intent_id: str, digest: str, expected_review: dict, message_info: dict) -> bool:
     """One transaction moves sim_open to submit_unknown and records the digest."""
 
     def work(conn):
@@ -191,7 +192,15 @@ def _claim(intent_id: str, digest: str, expected_review: dict) -> bool:
         )
         if updated.rowcount != 1:
             return False
-        ledger[intent_id] = {"sha256": digest, "status": "submit_unknown"}
+        ledger[intent_id] = {
+            "sha256": digest, "status": "submit_unknown",
+            "message_sha256": message_info["message_sha256"],
+            "blockhash": message_info["blockhash"],
+            "wallet": phantom_transport.REQUIRED_WALLET,
+            "wallet_id": phantom_transport.REQUIRED_WALLET_ID,
+            "network": NETWORK, "attempted_at": now,
+            "reservation_sha256": _reservation_digest({**dict(row), "status": "submit_unknown", "updated_at": now}),
+        }
         conn.execute(
             """
             INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
@@ -217,6 +226,9 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
         return {"status": "refused", "reason": "intent", "send": False, "resend": False, "subprocess": []}
     try:
         raw = _bytes(tx_b64)
+        message_info = _message_info(raw)
+        if any(message_info["signatures"][0]):
+            raise ValueError("transaction must be unsigned")
     except Exception:
         return {"status": "refused", "reason": "bytes", "send": False, "resend": False, "subprocess": []}
     digest = hashlib.sha256(raw).hexdigest()
@@ -241,7 +253,7 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     if code != 0 or not identity["ok"]:
         reason = "auth_expired" if code != 0 or identity["reason"] == "auth_expired" else "wallet_mismatch"
         return {"status": "refused", "reason": reason, "send": False, "resend": False, "subprocess": seen}
-    if not _claim(intent_id, digest, review):
+    if not _claim(intent_id, digest, review, message_info):
         return {"status": "refused", "reason": "reservation_lost", "send": False, "resend": False, "subprocess": seen}
     try:
         code, text = runner(send_argv(binary, base64.b64encode(raw).decode("ascii")), env, timeout)
@@ -251,7 +263,50 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     signature = _signature(text) if code == 0 else None
     if signature is None:
         return {"status": "submit_unknown", "reason": "ambiguous", "send": False, "resend": False, "subprocess": seen}
-    return {"status": "submitted", "reason": None, "send": True, "signature": signature, "resend": False, "subprocess": seen}
+    try:
+        persisted = _record_receipt(intent_id, digest, signature)
+    except Exception:
+        # A persistence error after broadcast must never make this retryable.
+        persisted = False
+    return {
+        "status": "submitted" if persisted else "submit_unknown",
+        "reason": None if persisted else "receipt_persistence_failed",
+        "send": True, "signature": signature, "resend": False,
+        "subprocess": seen, "receipt_persisted": persisted, "confirmed": False,
+    }
+
+
+def _record_receipt(intent_id: str, digest: str, signature: str) -> bool:
+    """Store the CLI receipt, never a fill or a released reservation."""
+    def work(conn):
+        row = conn.execute("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
+        stored = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
+        if row is None or row["status"] != "submit_unknown" or stored is None:
+            return False
+        ledger = json.loads(stored["value"])
+        record = ledger.get(intent_id) if isinstance(ledger, dict) else None
+        if (not isinstance(record, dict) or record.get("sha256") != digest or record.get("signature") is not None
+            or record.get("reservation_sha256") != _reservation_digest(row)):
+            return False
+        record.update({"signature": signature, "status": "submitted_unconfirmed", "receipt_at": time.time()})
+        conn.execute("UPDATE phantom_control SET value = ?, updated_at = ? WHERE key = ?",
+                     (json.dumps(ledger, separators=(",", ":"), sort_keys=True), time.time(), _LEDGER))
+        return True
+    return db.exclusive(work) is True
+
+
+def _message_info(raw: bytes) -> dict:
+    """Decode the exact message independently of its mutable signature bytes."""
+    decoded = solana_tx.decode_transaction(raw)
+    if decoded.fee_payer != phantom_transport.REQUIRED_WALLET or decoded.signers != [phantom_transport.REQUIRED_WALLET]:
+        raise ValueError("transaction wallet is not bound")
+    count, start = solana_tx._compact(raw, 0)
+    signatures, offset = solana_tx._take(raw, start, count * 64)
+    message = raw[offset:]
+    return {"decoded": decoded, "message": message,
+            "message_sha256": hashlib.sha256(message).hexdigest(),
+            "blockhash": decoded.blockhash,
+            "signatures": [signatures[index:index + 64] for index in range(0, len(signatures), 64)]}
 
 
 def status() -> dict:
@@ -413,18 +468,236 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
     }
 
 
-def reconcile(intent_id: str) -> dict:
-    """A provider status cannot confirm a send this adapter did not record."""
-    if not isinstance(intent_id, str) or intent_id not in _ledger():
-        return {"status": "not_run", "send": False, "complete": False, "confirmation": None, "executable": False}
-    return {
-        "status": "refused",
-        "reason": "recorded send is not a confirmation",
-        "send": False,
-        "complete": False,
-        "confirmation": None,
-        "executable": False,
-    }
+def reconciliation_rpc(*, transport=None):
+    """Pinned mainnet client restricted to the three receipt-review reads.
+
+    Construction performs no I/O. Tests inject an envelope transport; production
+    callers cannot provide a URL, redirects or signing/broadcast RPC methods.
+    """
+    def request(payload):
+        import httpx
+        deadline = time.monotonic() + 15.0
+        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False, trust_env=False) as client:
+            with client.stream("POST", solana_inspect.MAINNET_RPC, json=payload) as response:
+                response.raise_for_status()
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if time.monotonic() > deadline:
+                        raise solana_inspect.RpcError("receipt response timed out")
+                    if len(body) > 262144:
+                        raise solana_inspect.RpcError("receipt response exceeds limit")
+        return json.loads(body)
+
+    class ReceiptRpcClient:
+        def call(self, method, params):
+            if method not in {"getGenesisHash", "getSignatureStatuses", "getTransaction"} or not isinstance(params, list):
+                raise solana_inspect.RpcError("receipt RPC method is not allowed")
+            envelope = (request if transport is None else transport)(
+                {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            )
+            if (not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0"
+                or type(envelope.get("id")) is not int or envelope["id"] != 1
+                or envelope.get("error") is not None or "result" not in envelope):
+                raise solana_inspect.RpcError("receipt RPC envelope is not usable")
+            result = envelope["result"]
+            if method == "getGenesisHash":
+                if not isinstance(result, str) or not result:
+                    raise solana_inspect.RpcError("receipt genesis is not usable")
+            elif not isinstance(result, dict) and not (method == "getTransaction" and result is None):
+                raise solana_inspect.RpcError("receipt RPC result is not usable")
+            return result
+
+    return ReceiptRpcClient()
+
+
+def reconcile(intent_id: str, *, rpc=None, commitment: str = "confirmed") -> dict:
+    """Read-only chain evidence. Neither a receipt nor this observation is a fill.
+
+    The full reservation remains held, including after verified chain evidence,
+    until production position/loss bookkeeping consumes that evidence atomically.
+    Missing or conflicting responses never release capacity or permit a resend.
+    """
+    base = {"send": False, "complete": False, "confirmation": None,
+            "executable": False, "live_ready": False, "live_ledger_verified": False,
+            "fill_verified": False, "reservation_retained": True, "resend": False}
+    record = _ledger().get(intent_id) if isinstance(intent_id, str) else None
+    if not isinstance(record, dict):
+        return {**base, "status": "not_run", "reason": "recorded_send_missing"}
+    signature = record.get("signature")
+    if (not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature)
+        or record.get("wallet") != phantom_transport.REQUIRED_WALLET
+        or record.get("wallet_id") != phantom_transport.REQUIRED_WALLET_ID
+        or record.get("network") != NETWORK
+        or not isinstance(record.get("message_sha256"), str)):
+        return {**base, "status": "refused", "reason": "receipt_binding_missing"}
+    if rpc is None:
+        return {**base, "status": "refused", "reason": "rpc_required"}
+    if commitment not in {"confirmed", "finalized"}:
+        return {**base, "status": "refused", "reason": "commitment_invalid"}
+    try:
+        if rpc.call("getGenesisHash", []) != solana_inspect.MAINNET_GENESIS:
+            raise ValueError("network_mismatch")
+        statuses = rpc.call("getSignatureStatuses", [[signature], {"searchTransactionHistory": True}])
+        value = statuses.get("value") if isinstance(statuses, dict) else None
+        context = statuses.get("context") if isinstance(statuses, dict) else None
+        if not isinstance(context, dict) or not _integer(context.get("slot")) or not isinstance(value, list) or len(value) != 1:
+            raise ValueError("status_invalid")
+        state = value[0]
+        if state is None:
+            return {**base, "status": "pending", "reason": "signature_not_found"}
+        if not isinstance(state, dict) or "err" not in state or not _integer(state.get("slot")) or state["slot"] > context["slot"]:
+            raise ValueError("status_invalid")
+        accepted = {"finalized"} if commitment == "finalized" else {"confirmed", "finalized"}
+        if state.get("confirmationStatus") not in accepted:
+            return {**base, "status": "pending", "reason": "confirmation_pending"}
+        transaction = rpc.call("getTransaction", [signature, {"encoding": "base64", "commitment": commitment, "maxSupportedTransactionVersion": 0}])
+        if transaction is None:
+            return {**base, "status": "pending", "reason": "transaction_not_found"}
+        evidence = _chain_evidence(transaction, state, record)
+    except ValueError as error:
+        return {**base, "status": "refused", "reason": str(error)}
+    except Exception:
+        return {**base, "status": "pending", "reason": "rpc_unavailable"}
+    try:
+        recorded = _record_observation(intent_id, record, evidence)
+    except Exception:
+        recorded = False
+    if not recorded:
+        return {**base, "status": "refused", "reason": "receipt_changed"}
+    return {**base, "status": "chain_confirmed" if evidence["transaction_succeeded"] else "chain_failed",
+            "confirmation": evidence["confirmation"], "receipt_verified": True,
+            "actual_network_fee_verified": True, "actual_total_fee_verified": False,
+            "evidence": evidence}
+
+
+def _integer(value, *, maximum: int = (1 << 64) - 1) -> bool:
+    return type(value) is int and 0 <= value <= maximum
+
+
+def _chain_evidence(transaction: dict, state: dict, receipt: dict) -> dict:
+    if not isinstance(transaction, dict) or not _integer(transaction.get("slot")) or transaction.get("slot") != state["slot"]:
+        raise ValueError("transaction_slot_mismatch")
+    encoded = transaction.get("transaction")
+    if not isinstance(encoded, list) or len(encoded) != 2 or encoded[1] != "base64":
+        raise ValueError("transaction_bytes_missing")
+    try:
+        raw = _bytes(encoded[0])
+        info = _message_info(raw)
+    except Exception as error:
+        raise ValueError("transaction_bytes_invalid") from error
+    if info["message_sha256"] != receipt["message_sha256"] or info["blockhash"] != receipt.get("blockhash"):
+        raise ValueError("transaction_message_mismatch")
+    signed = info["signatures"][0]
+    if solana_tx.b58encode(signed) != receipt["signature"]:
+        raise ValueError("transaction_signature_mismatch")
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        Ed25519PublicKey.from_public_bytes(solana_tx.b58decode(phantom_transport.REQUIRED_WALLET)).verify(signed, info["message"])
+    except Exception as error:
+        raise ValueError("transaction_signature_invalid") from error
+    decoded = info["decoded"]
+    if transaction.get("version") != ("legacy" if decoded.version == "legacy" else 0):
+        raise ValueError("transaction_version_mismatch")
+    meta = transaction.get("meta")
+    if not isinstance(meta, dict) or "err" not in meta or meta["err"] != state["err"]:
+        raise ValueError("transaction_status_mismatch")
+    if meta["err"] is not None and not isinstance(meta["err"], dict):
+        raise ValueError("transaction_error_invalid")
+    keys = list(decoded.static_keys)
+    if decoded.lookups:
+        loaded = meta.get("loadedAddresses")
+        if not isinstance(loaded, dict):
+            raise ValueError("loaded_addresses_missing")
+        for field, wanted in (("writable", sum(len(item.writable) for item in decoded.lookups)),
+                              ("readonly", sum(len(item.readonly) for item in decoded.lookups))):
+            addresses = loaded.get(field)
+            if not isinstance(addresses, list) or len(addresses) != wanted:
+                raise ValueError("loaded_addresses_invalid")
+            for address in addresses:
+                _public_key(address)
+            keys.extend(addresses)
+    if len(set(keys)) != len(keys):
+        raise ValueError("transaction_accounts_ambiguous")
+    before, after, fee = meta.get("preBalances"), meta.get("postBalances"), meta.get("fee")
+    if (not isinstance(before, list) or not isinstance(after, list) or len(before) != len(keys) or len(after) != len(keys)
+        or not _integer(fee) or any(not _integer(value) for value in before + after)
+        or sum(before) - sum(after) != fee):
+        raise ValueError("transaction_balances_invalid")
+    if meta["err"] is not None and (before[0] - after[0] != fee or before[1:] != after[1:]):
+        raise ValueError("failed_transaction_balances_invalid")
+    token_before = _token_balances(meta.get("preTokenBalances"), keys)
+    token_after = _token_balances(meta.get("postTokenBalances"), keys)
+    if (solana_tx.TOKEN_PROGRAM in keys or solana_tx.TOKEN_2022 in keys) and not (token_before or token_after):
+        raise ValueError("token_balances_missing")
+    token_deltas = []
+    for index in sorted(set(token_before) | set(token_after)):
+        old, new = token_before.get(index), token_after.get(index)
+        identity = old or new
+        if old and new and old[:4] != new[:4]:
+            raise ValueError("token_balance_identity_changed")
+        delta = (new[4] if new else 0) - (old[4] if old else 0)
+        if meta["err"] is not None and delta:
+            raise ValueError("failed_transaction_token_changes")
+        if identity[1] == phantom_transport.REQUIRED_WALLET:
+            token_deltas.append({"account": keys[index], "mint": identity[0], "decimals": identity[2], "delta_base_units": str(delta)})
+    return {"confirmation": state["confirmationStatus"], "slot": state["slot"],
+            "signature": receipt["signature"], "message_sha256": receipt["message_sha256"],
+            "wallet": phantom_transport.REQUIRED_WALLET, "network": NETWORK,
+            "transaction_succeeded": meta["err"] is None,
+            "network_fee_lamports": fee, "wallet_lamport_delta": after[0] - before[0],
+            "wallet_token_deltas": token_deltas}
+
+
+def _public_key(address) -> None:
+    try:
+        if solana_tx.b58encode(solana_tx.b58decode(address)) != address:
+            raise ValueError("key")
+    except Exception as error:
+        raise ValueError("balance_public_key_invalid") from error
+
+
+def _token_balances(rows, keys: list[str]) -> dict:
+    if not isinstance(rows, list):
+        raise ValueError("token_balance_metadata_missing")
+    result = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("token_balance_invalid")
+        index = row.get("accountIndex")
+        amount = row.get("uiTokenAmount")
+        if (not _integer(index, maximum=len(keys) - 1) or index in result or not isinstance(amount, dict)
+            or not _integer(amount.get("decimals"), maximum=255)):
+            raise ValueError("token_balance_invalid")
+        _public_key(row.get("mint"))
+        _public_key(row.get("owner"))
+        value = amount.get("amount")
+        if not isinstance(value, str) or not re.fullmatch(r"0|[1-9][0-9]{0,19}", value) or int(value) >= 1 << 64:
+            raise ValueError("token_balance_invalid")
+        if row.get("programId") not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+            raise ValueError("token_program_invalid")
+        result[index] = (row["mint"], row["owner"], amount["decimals"], row["programId"], int(value))
+    return result
+
+
+def _record_observation(intent_id: str, expected: dict, evidence: dict) -> bool:
+    def work(conn):
+        stored = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
+        row = conn.execute("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
+        if stored is None or row is None or row["status"] != "submit_unknown":
+            return False
+        if row["wallet"] != phantom_transport.REQUIRED_WALLET or row["wallet_id"] != phantom_transport.REQUIRED_WALLET_ID or row["chain"] != NETWORK:
+            return False
+        ledger = json.loads(stored["value"])
+        if (not isinstance(ledger, dict) or ledger.get(intent_id) != expected
+            or expected.get("reservation_sha256") != _reservation_digest(row)):
+            return False
+        ledger[intent_id]["chain_observation"] = evidence
+        ledger[intent_id]["status"] = "chain_confirmed" if evidence["transaction_succeeded"] else "chain_failed"
+        conn.execute("UPDATE phantom_control SET value = ?, updated_at = ? WHERE key = ?",
+                     (json.dumps(ledger, separators=(",", ":"), sort_keys=True), time.time(), _LEDGER))
+        return True
+    return db.exclusive(work) is True
 
 
 def _consent():

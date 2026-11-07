@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -32,18 +33,15 @@ class TestPhantomTransport(unittest.TestCase):
         self.assertEqual(body["package"], "@phantom/mcp-server@1.2.9")
         self.assertEqual(body["cli"], "@phantom/cli@3.0.0")
         self.assertIsNone(phantom_transport.quote({"tool": "buy"}).get("quote"))
-        home = "/tmp/phantom-probe-home"
-        script = Path("/tmp/phantom-probe.sh")
-        script.write_text("#!/bin/sh\necho up > \"$HOME/started\"\nsleep 30\n", encoding="utf-8")
-        script.chmod(0o755)
-        probed = phantom_transport.probe_stdio([str(script)], home)
-        self.assertEqual(probed["transport"], "BLOCKED")
-        self.assertFalse(probed["probe"]["stdin_written"])
-        self.assertFalse(probed["probe"]["tool_call"])
-        self.assertTrue(probed["probe"]["started"])
-        self.assertTrue((Path(home) / "started").is_file())
-        self.assertFalse(phantom_transport.probe_stdio(["phantom-mcp", "login"], home)["probe"]["started"])
-        self.assertEqual(phantom_transport.probe_stdio([str(script)], "/workspace")["probe"].get("reason"), "refused_home")
+        with patch("subprocess.Popen", side_effect=AssertionError("legacy probe spawned a process")) as spawn:
+            for command in (["phantom", "solana", "send"], ["phantom", "transfer"], ["/bin/sh", "-c", "exit 0"], []):
+                probed = phantom_transport.probe_stdio(command, "/tmp/phantom-probe-home")
+                self.assertEqual(probed["transport"], "BLOCKED")
+                self.assertFalse(probed["probe"]["stdin_written"])
+                self.assertFalse(probed["probe"]["tool_call"])
+                self.assertFalse(probed["probe"]["started"])
+                self.assertEqual(probed["probe"]["reason"], "legacy_probe_disabled")
+            spawn.assert_not_called()
 
 
 class TestPhantomRunner(unittest.TestCase):

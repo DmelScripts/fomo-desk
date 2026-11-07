@@ -15,7 +15,7 @@ logs/*
 !logs/.gitkeep
 
 # Phantom CLI installed by scripts/install-phantom.sh. Not source.
-node_modules/
+node_modules
 .tools/
 
 # secrets — never commit
@@ -24,3 +24,4 @@ node_modules/
 *.pem
 .desk-secrets/
 secrets/
+encrypted.data

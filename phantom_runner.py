@@ -191,6 +191,16 @@ class PaperRuntime:
 
 def _drive(conn, spec: dict, runtime) -> dict:
     row = _row(conn, spec["intent_id"])
+    if row is None or row["status"] == "reserved":
+        # The outer checks can become stale while this request waits for the
+        # reservation transaction. Recheck entry controls under the same lock
+        # as the reservation/fill; exits and unknown reconciliation stay open.
+        mode = conn.execute("SELECT value FROM settings WHERE key='mode'").fetchone()
+        if mode is None or mode["value"] != "PAPER":
+            raise HTTPException(status_code=409, detail="LIVE locked")
+        halt = conn.execute("SELECT value FROM phantom_control WHERE key='halt'").fetchone()
+        if halt is None or halt["value"] != "0":
+            return _stopped("halted", "kill_switch")
     if row is not None:
         if row["status"] == "submit_unknown":
             result = _result(row, "submit_unknown", "reconcile_before_resubmit")

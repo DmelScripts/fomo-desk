@@ -684,6 +684,7 @@ def listed_quotes() -> list:
 
 
 def _account() -> dict:
+    from limited_simulation import status as simulation_status
     handle = get_setting("fomo_handle")
     profile = links.profile_url(handle) if handle else None
     jev = _secret_flags("TYPESAFE_API_KEY")
@@ -716,6 +717,7 @@ def _account() -> dict:
         },
         "quotes": listed_quotes(),
         "phantom": _phantom_status(),
+        "sol_usdc_simulation": simulation_status(),
     }
 
 
@@ -1051,12 +1053,59 @@ def phantom_exit_policy_view(request: Request) -> JSONResponse:
     return JSONResponse(view(), headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/phantom/readiness")
+def phantom_readiness(request: Request) -> JSONResponse:
+    """Expose remaining activation checks without probing or changing the wallet."""
+    require_app_token(request)
+    from execution_transport import activation_status
+    return JSONResponse(activation_status(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/sol-usdc-simulation")
+def phantom_sol_usdc_simulation(request: Request, body: dict | None = None) -> JSONResponse:
+    require_app_token(request)
+    if (not isinstance(body, dict) or set(body) != {"intent_id"}
+            or not isinstance(body.get("intent_id"), str) or not 1 <= len(body["intent_id"]) <= 80):
+        raise HTTPException(status_code=400, detail="one simulation intent_id is required")
+    from limited_simulation import run
+    return JSONResponse(run(body["intent_id"]), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/direct-review")
+def phantom_direct_review(request: Request, body: dict | None = None) -> JSONResponse:
+    """Fetch a read-only SOL/USDC sample; no wallet session or send is used."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import solana_direct_review
+    try:
+        result = solana_direct_review.prepare().report()
+    except solana_direct_review.ReviewError as exc:
+        return JSONResponse({
+            "status": "blocked", "reason": exc.category,
+            "live_ready": False, "execution_allowed": False, "send": False,
+        }, status_code=409, headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/phantom/risk-limits")
 def phantom_risk_limits_view(request: Request) -> JSONResponse:
     """Read separately approved fee/loss limits; this cannot activate trading."""
     require_app_token(request)
     from risk_limits import view
     return JSONResponse(view(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/receipt-review")
+def phantom_receipt_review(request: Request, body: dict | None = None) -> JSONResponse:
+    """Read confirmed receipt evidence without releasing funds or resending."""
+    require_app_token(request)
+    if (not isinstance(body, dict) or set(body) != {"intent_id"}
+            or not isinstance(body.get("intent_id"), str) or not 1 <= len(body["intent_id"]) <= 80):
+        raise HTTPException(status_code=400, detail="one recorded intent_id is required")
+    from execution_transport import reconcile, reconciliation_rpc
+    result = reconcile(body["intent_id"], rpc=reconciliation_rpc())
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/phantom/risk-limits")

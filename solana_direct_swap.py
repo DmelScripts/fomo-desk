@@ -146,7 +146,7 @@ def decode_swap_data(data: bytes) -> dict | None:
     }
 
 
-def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int) -> str:
+def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes] | None], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int) -> str:
     """Unsigned wrapped swap. The threshold is the quote of these account bytes."""
     direction = _direction(pool_data)
     state = solana_whirlpool.pool_state(pool_data)
@@ -248,8 +248,13 @@ def transaction_from_fields(pool: str, pool_data: bytes, source: str, dest: str,
     return solana_tx.encode_legacy(authority, keys, len(readonly), instructions, blockhash, required=len(signers))
 
 
-def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, context_slot: int) -> dict:
-    """Read the wrapped swap. The minimum output is recomputed from the accounts."""
+def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes] | None], slippage_bps: int, context_slot: int) -> dict:
+    """Check swap bytes and prior creates; recompute its minimum from the pool.
+
+    An explicitly missing wallet ATA may be created by the verified plan.
+    Existing accounts still require full token identity checks. These are
+    offline byte checks; RPC provenance is bound by solana_direct_review.
+    """
     body = {
         "enabled": False,
         "mounted": False,
@@ -267,6 +272,8 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         "quote_freshness": "unverified",
         "wallet_verified": False,
         "wrap_verified": False,
+        "token_account_creation_plan_verified": False,
+        "missing_wallet_token_account_count": None,
         "min_out": None,
         "context_slot": None,
         "blockhash": None,
@@ -355,6 +362,7 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         solana_whirlpool.check_swap_accounts(
             decoded.static_keys, instruction.account_indexes[:11], phantom_transport.REQUIRED_WALLET,
             source, dest, solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, direction, accounts,
+            planned_creations=plan["creations"],
         )
         arrays = _quote_arrays(pool, pool_data, accounts, direction)
         quote = solana_whirlpool_quote.quote_exact_in(
@@ -378,6 +386,8 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
     body["threshold_matches_quote"] = True
     body["wallet_verified"] = True
     body["wrap_verified"] = True
+    body["token_account_creation_plan_verified"] = True
+    body["missing_wallet_token_account_count"] = sum(accounts[address] is None for address in (source, dest))
     body["output_computed_from_pool"] = True
     body["byte_checks_passed"] = True
     body["sqrt_price_before"] = quote["sqrt_price_before"]
@@ -462,7 +472,8 @@ def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
     kinds = [_kind(decoded, item) for item in decoded.instructions]
     if kinds != ["create", "create", "transfer", "sync", "swap"]:
         return {"error": "wrap_unbound"}
-    return {"swap": swap, "lamports": transfer, "wsol": wsol, "usdc": usdc}
+    return {"swap": swap, "lamports": transfer, "wsol": wsol, "usdc": usdc,
+            "creations": {wsol: (solana_tx.NATIVE_MINT, wallet), usdc: (solana_tx.USDC_MINT, wallet)}}
 
 
 def _kind(decoded: solana_tx.Decoded, instruction: solana_tx.Instruction) -> str:

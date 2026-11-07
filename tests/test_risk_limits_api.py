@@ -1,11 +1,13 @@
 """Authenticated limit configuration and real runner reservation boundaries."""
 import os
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 import db
 import phantom_runner
 import phantom_transport
@@ -70,6 +72,21 @@ class TestRiskLimitsAPI(unittest.TestCase):
         self.assertEqual(risk_limits.view()["cumulative_realized_losses_usd"], "4.20")
         self.assertEqual(enter("next")["reason"], "total_loss_limit")
 
+    def test_readiness_separates_approved_limits_from_execution_evidence(self):
+        path = "/api/phantom/readiness"
+        self.assertEqual(self.client.get(path).status_code, 401)
+        self.client.post("/api/phantom/risk-limits", headers=self.auth, json=self.policy)
+        result = self.client.get(path, headers=self.auth)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers["cache-control"], "no-store")
+        body = result.json()
+        self.assertTrue(body["checks"]["fee_policy_approved"])
+        self.assertTrue(body["checks"]["aggregate_loss_policy_approved"])
+        for check in ("actual_fees_verified", "live_ledger_verified", "swap_path_verified", "signer_enabled"):
+            self.assertIn(check, body["unmet"])
+        self.assertFalse(body["ready"])
+        self.assertFalse(body["live_ready"])
+
     def test_revocation_and_changed_retry_cannot_bypass_the_stored_reservation(self):
         self.client.post("/api/phantom/risk-limits", headers=self.auth, json=self.policy)
         phantom_runner.set_halt({"halted": False})
@@ -87,3 +104,61 @@ class TestRiskLimitsAPI(unittest.TestCase):
         revoked = phantom_runner.run_intent(body, runtime=NoQuote(), cycle="entry")
         self.assertEqual(revoked["reason"], "approval_revoked")
         self.assertEqual(phantom_runner.run_intent(self.intent("new"), runtime=NoQuote(), cycle="entry")["reason"], "approval_revoked")
+
+    def _control_change_between_entry_check_and_transaction(self, control, *, reserved):
+        self.client.post("/api/phantom/risk-limits", headers=self.auth, json=self.policy)
+        db.set_setting("mode", "PAPER", "test")
+        db.execute("UPDATE phantom_control SET value='0' WHERE key='halt'")
+        intent_id = f"race-{control}-{reserved}"
+        body = self.intent(intent_id)
+        if reserved:
+            spec = phantom_runner._spec(body)
+            db.exclusive(lambda conn: phantom_runner._insert(conn, spec, "reserved", spec["reserved"], None))
+        observed = threading.Event()
+        resume = threading.Event()
+        original_halted = phantom_runner.halted
+
+        def pause_after_outer_snapshot():
+            value = original_halted()
+            observed.set()
+            if not resume.wait(timeout=5):
+                raise AssertionError("test did not release entry request")
+            return value
+
+        class NoQuote:
+            name = "paper_simulation"
+
+            def quote(self, _spec):
+                raise AssertionError("a changed entry control reached the quote")
+
+        with patch.object(phantom_runner, "halted", side_effect=pause_after_outer_snapshot):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(phantom_runner.run_intent, body, NoQuote(), "entry")
+                try:
+                    self.assertTrue(observed.wait(timeout=5))
+                    # Commit the other request after the old snapshot and before
+                    # the entry's reservation transaction is allowed to start.
+                    if control == "halt":
+                        db.execute("UPDATE phantom_control SET value='1' WHERE key='halt'")
+                    else:
+                        db.set_setting("mode", "LIVE", "test")
+                finally:
+                    resume.set()
+                if control == "halt":
+                    self.assertEqual(pending.result(timeout=5)["reason"], "kill_switch")
+                else:
+                    with self.assertRaises(HTTPException) as rejected:
+                        pending.result(timeout=5)
+                    self.assertEqual(rejected.exception.status_code, 409)
+        rows = db.query("SELECT status FROM phantom_reservations WHERE intent_id=?", (intent_id,))
+        self.assertEqual([row["status"] for row in rows], ["reserved"] if reserved else [])
+
+    def test_concurrent_halt_blocks_new_and_previously_reserved_entries(self):
+        for reserved in (False, True):
+            with self.subTest(reserved=reserved):
+                self._control_change_between_entry_check_and_transaction("halt", reserved=reserved)
+
+    def test_concurrent_mode_change_blocks_new_and_previously_reserved_entries(self):
+        for reserved in (False, True):
+            with self.subTest(reserved=reserved):
+                self._control_change_between_entry_check_and_transaction("mode", reserved=reserved)

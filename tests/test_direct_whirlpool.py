@@ -162,6 +162,41 @@ class DirectWhirlpoolTests(unittest.TestCase):
         shown = solana_direct_swap.inspect(closing, accounts, BPS, SLOT)
         self.assertEqual(shown["error_category"], "existing_account_close_forbidden")
 
+    def test_proven_missing_atas_require_the_exact_prior_creation_plan(self):
+        pool, data, original, source, dest = _pool()
+        tx = solana_direct_swap.build(pool, data, original, BPS, LIMIT, BLOCK, SLOT)
+        accounts = {**original, source: None, dest: None}
+        checked = solana_direct_swap.inspect(tx, accounts, BPS, SLOT)
+        self.assertTrue(checked["byte_checks_passed"])
+        self.assertTrue(checked["token_account_creation_plan_verified"])
+        self.assertEqual(checked["missing_wallet_token_account_count"], 2)
+        self.assertFalse(checked["live_ready"])
+        self.assertIsNone(accounts[source])
+        decoded = solana_tx.decode_transaction(base64.b64decode(tx))
+        instructions = [(item.program_index, list(item.account_indexes), item.data) for item in decoded.instructions]
+        alterations = [instructions[1:], [instructions[2], *instructions[:2], *instructions[3:]]]
+        for field, index in ((1, decoded.static_keys.index(dest)), (2, decoded.static_keys.index(dest)), (3, decoded.static_keys.index(USDC))):
+            changed = [(program, list(indexes), payload) for program, indexes, payload in instructions]
+            changed[0][1][field] = index
+            alterations.append(changed)
+        alterations.append([(instructions[0][0], instructions[0][1], b"\x00"), *instructions[1:]])
+        for changed in alterations:
+            altered = solana_tx.encode_legacy(WALLET, decoded.static_keys, decoded.readonly_unsigned, changed, BLOCK)
+            with self.subTest(instructions=changed):
+                self.assertFalse(solana_direct_swap.inspect(altered, accounts, BPS, SLOT)["byte_checks_passed"])
+
+    def test_creation_plan_never_bypasses_unread_or_invalid_existing_accounts(self):
+        pool, data, original, source, _dest = _pool()
+        tx = solana_direct_swap.build(pool, data, original, BPS, LIMIT, BLOCK, SLOT)
+        absent = dict(original)
+        del absent[source]
+        self.assertEqual(solana_direct_swap.inspect(tx, absent, BPS, SLOT)["error_category"], "account_unread")
+        for record in ((None, None), (solana_tx.SYSTEM_PROGRAM, b""), (solana_tx.SYSTEM_PROGRAM, original[source][1]),
+                       (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(NATIVE, solana_tx.SYSTEM_PROGRAM)),
+                       (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(USDC, WALLET))):
+            with self.subTest(record=record):
+                self.assertFalse(solana_direct_swap.inspect(tx, {**original, source: record}, BPS, SLOT)["byte_checks_passed"])
+
     def test_caller_slot_does_not_prove_snapshot_freshness_or_live_slippage(self):
         pool, data, accounts, _source, _dest = _pool()
         tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT)

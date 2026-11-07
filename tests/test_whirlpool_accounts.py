@@ -73,6 +73,13 @@ console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
         keys, remaining, accounts, _values = _keys()
         solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
 
+    def test_missing_token_account_without_verified_creation_plan_is_rejected(self):
+        keys, remaining, accounts, _values = _keys()
+        accounts[keys[3]] = None
+        with self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+            solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+        self.assertEqual(caught.exception.category, "account_unread")
+
     def test_tick_array_pda_does_not_use_binary_integer_seed(self):
         pool = solana_tx.b58encode(b"\x21" * 32)
         wrong, _ = solana_tx.find_program_address(

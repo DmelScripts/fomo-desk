@@ -28,6 +28,10 @@ html, body {
 body { min-height: 100dvh; }
 button, input { font: inherit; color: inherit; }
 button { background: none; border: 0; padding: 0; }
+.simulation-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; margin-top: 20px; }
+.simulation-actions button { min-height: 44px; }
+.simulation-actions .fomo-btn { width: auto; padding: 0 18px; margin-top: 0; }
+.simulation-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 .num { font-variant-numeric: tabular-nums; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .nav {

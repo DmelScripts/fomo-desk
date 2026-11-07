@@ -195,8 +195,14 @@ def check_oracle_account(pool: str, pool_data: bytes, accounts: dict[str, tuple[
         raise WhirlpoolError("whirlpool trading is not enabled at the snapshot timestamp", "whirlpool_trade_disabled")
 
 
-def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]]) -> None:
-    """Check one Orca swap account list. route_v2's signer is the user."""
+def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes] | None], *, planned_creations: dict[str, tuple[str, str]] | None = None) -> None:
+    """Check one swap. Direct callers may supply validated prior ATA creates.
+
+    A planned creation only covers an explicitly absent RPC account (None),
+    never an unread key or invalid existing account. The caller must first
+    validate the actual create instructions, their order, payer and metadata.
+    Jupiter callers do not supply a creation plan and retain strict reads.
+    """
     # Orca's swap struct is 11 accounts. A live Jupiter route_v2 had 12 remaining
     # accounts. No published Jupiter layout says the extra one is a program-id
     # prefix, so a longer tail is rejected rather than stripped.
@@ -233,8 +239,9 @@ def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: s
         raise WhirlpoolError("whirlpool vault accounts do not match the pool", "whirlpool_vault_unbound")
     if keys[remaining[10]] != oracle_address(pool):
         raise WhirlpoolError("whirlpool oracle is not the published PDA", "whirlpool_oracle_unbound")
-    _token_identity(accounts, user_source, source_mint, user_authority, "whirlpool_owner_unbound")
-    _token_identity(accounts, user_dest, dest_mint, user_authority, "whirlpool_owner_unbound")
+    creations = planned_creations or {}
+    _token_identity(accounts, user_source, source_mint, user_authority, "whirlpool_owner_unbound", planned_creation=creations.get(user_source))
+    _token_identity(accounts, user_dest, dest_mint, user_authority, "whirlpool_owner_unbound", planned_creation=creations.get(user_dest))
     _token_identity(accounts, vault_a, mint_a, pool, "whirlpool_vault_unbound")
     _token_identity(accounts, vault_b, mint_b, pool, "whirlpool_vault_unbound")
     _tick_arrays(keys, remaining[7:10], pool, spacing, current, a_to_b, accounts)
@@ -242,8 +249,15 @@ def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: s
         raise WhirlpoolError("whirlpool input mint is not the route input", "whirlpool_mint_unbound")
 
 
-def _token_identity(accounts: dict[str, tuple[str, bytes]], address: str, mint: str, owner: str | None, category: str) -> None:
+def _token_identity(accounts: dict[str, tuple[str, bytes] | None], address: str, mint: str, owner: str | None, category: str, *, planned_creation: tuple[str, str] | None = None) -> None:
     record = accounts.get(address)
+    if address in accounts and record is None and planned_creation is not None:
+        if (
+            owner is not None and planned_creation == (mint, owner)
+            and address == solana_tx.associated_token_address(owner, mint, solana_tx.TOKEN_PROGRAM)
+        ):
+            return
+        raise WhirlpoolError("missing token account is not bound to its ATA creation", category)
     if record is None or record[1] is None:
         raise WhirlpoolError("whirlpool token account was not read", "account_unread")
     if record[0] != solana_tx.TOKEN_PROGRAM or len(record[1]) != 165 or record[1][108] != 1:

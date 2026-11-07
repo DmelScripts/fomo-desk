@@ -33,6 +33,9 @@
     seenBalance: "",
     commandDraft: "",
     commandReply: "",
+    simulationBusy: false,
+    simulationIntent: "",
+    simulationResult: null,
   };
 
   function $(id) {
@@ -701,9 +704,64 @@
     renderIntegrations();
     renderKey();
     renderPush();
+    renderSolSimulation();
     renderPhantom();
     renderQuotes();
     renderCommand();
+  }
+
+  function renderSolSimulation() {
+    var node = $("account-sol-simulation");
+    if (!node) return;
+    clear(node);
+    var row = (state.account && state.account.sol_usdc_simulation) || {};
+    var risk = (state.account && state.account.phantom && state.account.phantom.risk_limits) || {};
+    var limits = risk.limits || {};
+    node.appendChild(el("h2", "SOL/USDC simulation"));
+    node.appendChild(el("p", "Paper trades only. Fixed example prices; no wallet orders.", "muted"));
+    node.appendChild(el("p", "Example prices: SOL $100 and USDC $1, with no price movement.", "muted"));
+    node.appendChild(el("p", "$100 simulation fund · $8 per round trip."));
+    if (risk.approved) {
+      node.appendChild(el("p", "Total loss limit " + usd(Number(limits.max_total_loss_usd)) + " · fee limit " + usd(Number(limits.max_round_trip_fee_usd)) + " per round trip."));
+      node.appendChild(el("p", "Simulation assumes $0.20 in entry and exit fees. Losses used: " + usd(Number(risk.cumulative_realized_losses_usd || 0)) + ".", "muted"));
+    } else {
+      node.appendChild(el("p", "Set the loss and fee limits before running a simulation.", "muted"));
+    }
+    var result = state.simulationResult || row.latest_result;
+    if (result && result.status === "sim_closed") {
+      node.appendChild(el("p", "Last simulated result: " + usd(Number(result.realized_pnl)) + " after assumed fees."));
+    } else if (result) {
+      node.appendChild(el("p", "No simulation completed. Check the pause setting, limits and available funds.", "muted"));
+    }
+    if (!row.ready) node.appendChild(el("p", row.halted ? "Simulation paused." : "Simulation is waiting for its limits and paper-only controls.", "muted"));
+    var actions = el("div", null, "simulation-actions");
+    var run = el("button", state.simulationBusy ? "Running simulation…" : "Run $8 simulation", "fomo-btn");
+    run.type = "button";
+    run.disabled = state.simulationBusy || !row.ready;
+    run.addEventListener("click", function () {
+      if (!state.simulationIntent) state.simulationIntent = root.crypto.randomUUID();
+      state.simulationBusy = true;
+      renderSolSimulation();
+      call("/api/phantom/sol-usdc-simulation", { method: "POST", body: { intent_id: state.simulationIntent } }).then(function (body) {
+        state.simulationResult = body;
+        if (body.status === "sim_closed" || body.status === "rejected") state.simulationIntent = "";
+        state.simulationBusy = false;
+        return loadAll();
+      }).catch(function (error) {
+        state.simulationBusy = false;
+        renderSolSimulation();
+        if (!(error && error.auth)) noteError(error);
+      });
+    });
+    actions.appendChild(run);
+    var pause = el("button", row.halted ? "Resume simulation" : "Pause simulation", "text-btn");
+    pause.type = "button";
+    pause.disabled = state.simulationBusy;
+    pause.addEventListener("click", function () {
+      call("/api/phantom/halt", { method: "POST", body: { halted: !row.halted } }).then(loadAll).catch(noteError);
+    });
+    actions.appendChild(pause);
+    node.appendChild(actions);
   }
 
   function renderPhantom() {
@@ -717,7 +775,7 @@
     node.appendChild(el("p", "Transport " + (row.transport || "BLOCKED") + " · " + (row.auth || "AWAITING_OWNER_AUTH_PROCEDURE") + " · evidence " + (row.auth_evidence || "none")));
     node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
     node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
-    node.appendChild(el("p", "A read-only quote is not execution. Execution transport is not implemented.", "muted"));
+    node.appendChild(el("p", "Signing is disabled. Account and transaction reviews do not place orders.", "muted"));
     var exitPolicy = row.exit_policy || {};
     node.appendChild(el("p", exitPolicy.effective
       ? "Exit rules for the $100 allocation are approved. They are not a loss limit and LIVE stays off."

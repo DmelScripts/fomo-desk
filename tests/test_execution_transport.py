@@ -1,5 +1,7 @@
 """The signer reads desk state. A caller-supplied all-clear is not accepted."""
 import json
+import base64
+import copy
 import subprocess
 import threading
 import time
@@ -419,6 +421,316 @@ class CliBridgeTest(ExecutionTransportTest):
         self.assertIs(captured["kwargs"]["shell"], False)
         self.assertEqual(captured["argv"], ["phantom", "wallet", "addresses", "--format", "json"])
         self.assertTrue(callable(phantom_auth._binary))
+
+
+class ReconciliationTest(unittest.TestCase):
+    """Synthetic keys/receipts only. No wallet key or network is accessed."""
+
+    def setUp(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        self.key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+        self.wallet = solana_tx.b58encode(self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
+        self.wallet_patch = patch.object(phantom_transport, "REQUIRED_WALLET", self.wallet)
+        self.wallet_patch.start()
+        self.addCleanup(self.wallet_patch.stop)
+        self.tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        db.set_setting("mode", "PAPER", "test")
+        phantom_runner.set_halt({"halted": False})
+        self.intent = "synthetic-receipt"
+        now = time.time()
+        db.execute("""INSERT INTO phantom_reservations
+            (intent_id, status, wallet_id, wallet, chain, pair_json, amount_usd, fee_usd,
+             reserved_usd, slippage, fx_sol_usd, fx_at, created_at, updated_at)
+            VALUES (?, 'sim_open', ?, ?, 'solana:mainnet', '{}', '8.00', '0.20',
+                    '8.20', 1, '150.00', ?, ?, ?)""",
+                   (self.intent, WALLET_ID, self.wallet, now, now, now))
+        self.tx = solana_tx.encode_legacy_transfer(self.wallet, solana_tx.b58encode(b"\x22" * 32), 10_000_000, BLOCK)
+        self.raw = base64.b64decode(self.tx)
+        self.signed_bytes = self.key.sign(self.raw[65:])
+        self.signature = solana_tx.b58encode(self.signed_bytes)
+        self.signed_tx = base64.b64encode(self.raw[:1] + self.signed_bytes + self.raw[65:]).decode()
+        execution_transport.remember_review(self.intent, self.tx)
+        self.runner = RecordingRunner(
+            identity=(0, json.dumps({"walletId": WALLET_ID, "addresses": [{"addressType": "solana", "address": self.wallet}]})),
+            send=(0, json.dumps({"signature": self.signature, "networkId": execution_transport.CLI_MAINNET_NETWORK, "account": self.wallet})),
+        )
+        self.responses = {
+            "getGenesisHash": execution_transport.solana_inspect.MAINNET_GENESIS,
+            "getSignatureStatuses": {"context": {"slot": 322}, "value": [{"slot": 321, "err": None, "confirmationStatus": "confirmed"}]},
+            "getTransaction": {"slot": 321, "version": "legacy", "transaction": [self.signed_tx, "base64"],
+                "meta": {"err": None, "fee": 5000, "preBalances": [100_000_000, 0, 1],
+                         "postBalances": [89_995_000, 10_000_000, 1], "preTokenBalances": [], "postTokenBalances": []}},
+        }
+        self.rpc_calls = []
+
+    def _submit(self):
+        return execution_transport.send_after_identity(self.intent, self.tx, self.runner)
+
+    def _rpc(self, mutate=None):
+        parent = self
+        class FakeReadOnlyRpc:
+            def call(self, method, params):
+                parent.rpc_calls.append((method, params))
+                if mutate and method == "getTransaction":
+                    mutate()
+                return copy.deepcopy(parent.responses[method])
+        return FakeReadOnlyRpc()
+
+    def _held(self):
+        row = execution_transport._reservation(self.intent)
+        self.assertEqual(row["status"], "submit_unknown")
+        self.assertEqual(row["reserved_usd"], "8.20")
+        self.assertIsNone(row["realized_pnl"])
+
+    def test_receipt_persisted_durably_without_treating_signature_as_fill(self):
+        result = self._submit()
+        self.assertTrue(result["receipt_persisted"])
+        self.assertFalse(result["confirmed"])
+        receipt = execution_transport._ledger()[self.intent]
+        self.assertEqual(receipt["status"], "submitted_unconfirmed")
+        self.assertEqual(receipt["signature"], self.signature)
+        self.assertEqual(receipt["message_sha256"], execution_transport.hashlib.sha256(self.raw[65:]).hexdigest())
+        self.assertNotIn(self.tx, json.dumps(receipt))
+        db.init_db()  # A database restart does not lose the receipt or release it.
+        self._held()
+        again = self._submit()
+        self.assertEqual(again["subprocess"], [])
+
+    def test_readonly_rpc_client_rejects_send_and_preserves_null_transaction(self):
+        calls = []
+        def transport(payload):
+            calls.append(payload)
+            return {"jsonrpc": "2.0", "id": 1, "result": None}
+        client = execution_transport.reconciliation_rpc(transport=transport)
+        for method in ("sendTransaction", "requestAirdrop", "simulateTransaction", "getBalance"):
+            with self.subTest(method=method):
+                with self.assertRaises(execution_transport.solana_inspect.RpcError):
+                    client.call(method, [])
+        self.assertEqual(calls, [])
+        self.assertIsNone(client.call("getTransaction", [self.signature]))
+        self.assertEqual(calls[0]["method"], "getTransaction")
+        with self.assertRaises(execution_transport.solana_inspect.RpcError):
+            client.call("getSignatureStatuses", [])
+        for envelope in ({"result": {}}, {"jsonrpc": "2.0", "id": True, "result": {}},
+                         {"jsonrpc": "2.0", "id": 1, "result": {}, "error": {"code": -1}}):
+            with self.subTest(envelope=envelope):
+                bad = execution_transport.reconciliation_rpc(transport=lambda _payload: envelope)
+                with self.assertRaises(execution_transport.solana_inspect.RpcError):
+                    bad.call("getTransaction", [])
+
+    def test_default_reconcile_does_not_implicitly_create_rpc_or_network(self):
+        self._submit()
+        with patch.object(execution_transport, "reconciliation_rpc") as factory:
+            result = execution_transport.reconcile(self.intent)
+            self.assertEqual(result["reason"], "rpc_required")
+            factory.assert_not_called()
+
+    def test_rpc_http_transport_pins_endpoint_and_bounds_response(self):
+        import httpx
+        captured = {}
+        chunks = [b'{"jsonrpc":"2.0","id":1,"result":"mainnet-test-genesis"}']
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def raise_for_status(self): pass
+            def iter_bytes(self): return iter(chunks)
+        class FakeClient:
+            def __init__(self, **kwargs): captured["options"] = kwargs
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def stream(self, method, url, **kwargs):
+                captured["request"] = (method, url, kwargs)
+                return FakeResponse()
+        with patch.object(httpx, "Client", FakeClient):
+            client = execution_transport.reconciliation_rpc()
+            self.assertEqual(client.call("getGenesisHash", []), "mainnet-test-genesis")
+            self.assertEqual(captured["request"][0:2], ("POST", execution_transport.solana_inspect.MAINNET_RPC))
+            self.assertFalse(captured["options"]["follow_redirects"])
+            self.assertFalse(captured["options"]["trust_env"])
+            self.assertEqual(captured["options"]["timeout"].connect, 5.0)
+            self.assertEqual(captured["options"]["timeout"].read, 10.0)
+            chunks = [b"x" * 262145]
+            with self.assertRaisesRegex(execution_transport.solana_inspect.RpcError, "exceeds limit"):
+                client.call("getTransaction", [])
+            chunks = [b"{}"]
+            with patch.object(execution_transport.time, "monotonic", side_effect=[0, 16]):
+                with self.assertRaisesRegex(execution_transport.solana_inspect.RpcError, "timed out"):
+                    client.call("getTransaction", [])
+
+    def test_successful_chain_evidence_records_actual_network_fee_but_keeps_reserve(self):
+        self._submit()
+        with patch.object(execution_transport, "_spawn") as spawn:
+            result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+            spawn.assert_not_called()
+        self.assertEqual(result["status"], "chain_confirmed")
+        self.assertTrue(result["receipt_verified"])
+        self.assertTrue(result["actual_network_fee_verified"])
+        self.assertFalse(result["actual_total_fee_verified"])
+        self.assertFalse(result["fill_verified"])
+        self.assertFalse(result["live_ledger_verified"])
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["evidence"]["network_fee_lamports"], 5000)
+        self.assertEqual(result["evidence"]["wallet_lamport_delta"], -10_005_000)
+        self.assertEqual([method for method, _ in self.rpc_calls], ["getGenesisHash", "getSignatureStatuses", "getTransaction"])
+        self.assertEqual(execution_transport._ledger()[self.intent]["chain_observation"], result["evidence"])
+        self._held()
+        self.assertEqual(execution_transport.reconcile(self.intent, rpc=self._rpc())["status"], "chain_confirmed")
+
+    def test_failed_transaction_is_not_a_fill_and_only_verifies_charged_network_fee(self):
+        self._submit()
+        error = {"InstructionError": [0, {"Custom": 1}]}
+        self.responses["getSignatureStatuses"]["value"][0]["err"] = error
+        meta = self.responses["getTransaction"]["meta"]
+        meta["err"] = error
+        meta["postBalances"] = [99_995_000, 0, 1]
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+        self.assertEqual(result["status"], "chain_failed")
+        self.assertFalse(result["evidence"]["transaction_succeeded"])
+        self.assertEqual(result["evidence"]["network_fee_lamports"], 5000)
+        self._held()
+
+    def test_missing_or_unconfirmed_evidence_keeps_reservation(self):
+        self._submit()
+        original = copy.deepcopy(self.responses)
+        for variant in ("missing_status", "processed", "missing_tx", "finality_pending"):
+            with self.subTest(variant=variant):
+                self.responses = copy.deepcopy(original)
+                commitment = "confirmed"
+                if variant == "missing_status":
+                    self.responses["getSignatureStatuses"]["value"] = [None]
+                elif variant == "processed":
+                    self.responses["getSignatureStatuses"]["value"][0]["confirmationStatus"] = "processed"
+                elif variant == "missing_tx":
+                    self.responses["getTransaction"] = None
+                else:
+                    commitment = "finalized"
+                result = execution_transport.reconcile(self.intent, rpc=self._rpc(), commitment=commitment)
+                self.assertEqual(result["status"], "pending")
+                self._held()
+
+    def test_conflicting_message_signature_network_and_metadata_are_refused(self):
+        self._submit()
+        original = copy.deepcopy(self.responses)
+        mutations = {
+            "network": lambda r: r.update(getGenesisHash="devnet"),
+            "slot": lambda r: r["getTransaction"].update(slot=320),
+            "message": lambda r: r["getTransaction"].update(transaction=[base64.b64encode(self.raw[:1] + self.signed_bytes + self.raw[65:-1] + b"\xff").decode(), "base64"]),
+            "signature": lambda r: r["getTransaction"].update(transaction=[base64.b64encode(self.raw[:1] + b"\x33" * 64 + self.raw[65:]).decode(), "base64"]),
+            "meta": lambda r: r["getTransaction"].update(meta=None),
+            "fee": lambda r: r["getTransaction"]["meta"].update(fee=True),
+            "balance_count": lambda r: r["getTransaction"]["meta"].update(preBalances=[100]),
+            "conservation": lambda r: r["getTransaction"]["meta"].update(fee=5001),
+            "token_metadata": lambda r: r["getTransaction"]["meta"].update(postTokenBalances=None),
+            "status_error": lambda r: r["getTransaction"]["meta"].update(err={"InstructionError": [0, "InvalidArgument"]}),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                self.responses = copy.deepcopy(original)
+                mutate(self.responses)
+                result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+                self.assertEqual(result["status"], "refused")
+                self.assertNotIn("chain_observation", execution_transport._ledger()[self.intent])
+                self._held()
+
+    def test_matching_forged_signature_still_fails_ed25519_verification(self):
+        self._submit()
+        ledger = execution_transport._ledger()
+        ledger[self.intent]["signature"] = "1" * 64
+        execution_transport._write(execution_transport._LEDGER, ledger)
+        self.responses["getTransaction"]["transaction"] = [self.tx, "base64"]
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+        self.assertEqual(result["reason"], "transaction_signature_invalid")
+        self._held()
+
+    def test_changed_receipt_or_reservation_during_rpc_is_not_recorded(self):
+        self._submit()
+        def mutate():
+            db.execute("UPDATE phantom_reservations SET fee_usd='0.21' WHERE intent_id=?", (self.intent,))
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc(mutate))
+        self.assertEqual(result["reason"], "receipt_changed")
+        self.assertNotIn("chain_observation", execution_transport._ledger()[self.intent])
+        self._held()
+
+    def test_rpc_failure_and_receipt_persistence_failure_never_allow_retry(self):
+        with patch.object(execution_transport, "_record_receipt", return_value=False):
+            result = self._submit()
+        self.assertEqual(result["status"], "submit_unknown")
+        self.assertFalse(result["receipt_persisted"])
+        self.assertEqual(execution_transport.reconcile(self.intent, rpc=self._rpc())["reason"], "receipt_binding_missing")
+        self.assertEqual(self.rpc_calls, [])
+        self.assertEqual(self._submit()["subprocess"], [])
+        self._held()
+
+    def test_already_signed_input_is_rejected_before_any_runner_call(self):
+        execution_transport.remember_review(self.intent, self.signed_tx)
+        result = execution_transport.send_after_identity(self.intent, self.signed_tx, self.runner)
+        self.assertEqual(result["reason"], "bytes")
+        self.assertEqual(self.runner.calls, [])
+
+    def test_finalized_evidence_and_rpc_failure_are_distinguished(self):
+        self._submit()
+        class UnavailableRpc:
+            def call(self, _method, _params):
+                raise RuntimeError("synthetic network failure")
+        pending = execution_transport.reconcile(self.intent, rpc=UnavailableRpc())
+        self.assertEqual(pending["reason"], "rpc_unavailable")
+        self.assertNotIn("chain_observation", execution_transport._ledger()[self.intent])
+        self.responses["getSignatureStatuses"]["value"][0]["confirmationStatus"] = "finalized"
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc(), commitment="finalized")
+        self.assertEqual(result["confirmation"], "finalized")
+        self.assertEqual(execution_transport._ledger()[self.intent]["status"], "chain_confirmed")
+        self._held()
+
+    def test_receipt_changed_during_rpc_cannot_be_overwritten(self):
+        self._submit()
+        def mutate():
+            ledger = execution_transport._ledger()
+            ledger[self.intent]["signature"] = "1" * 64
+            execution_transport._write(execution_transport._LEDGER, ledger)
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc(mutate))
+        self.assertEqual(result["reason"], "receipt_changed")
+        self.assertEqual(execution_transport._ledger()[self.intent]["signature"], "1" * 64)
+        self.assertNotIn("chain_observation", execution_transport._ledger()[self.intent])
+        self._held()
+
+    def test_token_metadata_requires_unique_indexes_and_consistent_identity(self):
+        self._submit()
+        token = {"accountIndex": 1, "mint": solana_tx.USDC_MINT, "owner": self.wallet,
+                 "programId": solana_tx.TOKEN_PROGRAM, "uiTokenAmount": {"amount": "100", "decimals": 6}}
+        mutations = [
+            lambda row: row.update(accountIndex=True),
+            lambda row: row.update(accountIndex=99),
+            lambda row: row.update(owner="bad-key"),
+            lambda row: row.update(programId=solana_tx.SYSTEM_PROGRAM),
+            lambda row: row["uiTokenAmount"].update(amount="NaN"),
+            lambda row: row["uiTokenAmount"].update(amount="18446744073709551616"),
+            lambda row: row["uiTokenAmount"].update(decimals=True),
+            lambda row: row["uiTokenAmount"].update(decimals=7),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                meta = self.responses["getTransaction"]["meta"]
+                meta["preTokenBalances"] = [copy.deepcopy(token)]
+                changed = copy.deepcopy(token)
+                mutate(changed)
+                meta["postTokenBalances"] = [changed]
+                result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+                self.assertEqual(result["status"], "refused")
+                self._held()
+        meta["postTokenBalances"] = [token, token]
+        self.assertEqual(execution_transport.reconcile(self.intent, rpc=self._rpc())["reason"], "token_balance_invalid")
+
+    def test_failed_transaction_cannot_report_successful_balance_movements(self):
+        self._submit()
+        error = {"InstructionError": [0, "InvalidArgument"]}
+        self.responses["getSignatureStatuses"]["value"][0]["err"] = error
+        self.responses["getTransaction"]["meta"]["err"] = error
+        result = execution_transport.reconcile(self.intent, rpc=self._rpc())
+        self.assertEqual(result["reason"], "failed_transaction_balances_invalid")
+        self._held()
 
 
 def solana_inspect_rpc():
