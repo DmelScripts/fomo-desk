@@ -135,6 +135,11 @@ def oracle_address(pool: str) -> str:
 
 
 def tick_array_address(pool: str, start: int) -> str:
+    """Program PDA. Fixed and dynamic init both seed this with a little-endian i32.
+
+    @orca-so/whirlpools-client@7.0.0 getTickArrayAddress instead uses the
+    decimal string of the start index. That helper is a different address.
+    """
     derived, _bump = solana_tx.find_program_address(
         [b"tick_array", solana_tx.b58decode(pool), int(start).to_bytes(4, "little", signed=True)],
         solana_tx.b58decode(PROGRAM_ID),

@@ -169,10 +169,11 @@ def system_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[4:12], "little")
 
 
-# Default rent-exempt lamports for one 165-byte token account:
-# (128 + space) * DEFAULT_LAMPORTS_PER_BYTE_YEAR * 2.
+# Rent-exempt minimum for one 165-byte token account.
+# getMinimumBalanceForRentExemption(165) returned 1_488_440 at minContextSlot
+# 466540548. The older formula result was 2_039_280 and is not the current bound.
 TOKEN_ACCOUNT_SPACE = 165
-TOKEN_ACCOUNT_RENT = (128 + TOKEN_ACCOUNT_SPACE) * (1_000_000_000 // 100 * 365 // (1024 * 1024)) * 2
+TOKEN_ACCOUNT_RENT = 1_488_440
 
 
 def system_create(data: bytes) -> tuple[int, int, str] | None:

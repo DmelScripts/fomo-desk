@@ -1,11 +1,14 @@
 """Wrapped direct Whirlpool route. No network, no Phantom process, and no send."""
 import unittest
 
+import base64
+
 import execution_transport
 import phantom_transport
 import solana_direct_swap
 import solana_tx
 import solana_whirlpool
+import solana_whirlpool_quote
 from tests.test_solana_inspect import BLOCK
 
 WALLET = phantom_transport.REQUIRED_WALLET
@@ -59,6 +62,14 @@ class DirectWhirlpoolTests(unittest.TestCase):
         pool, data, accounts, _source, _dest = _pool()
         tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT)
         result = solana_direct_swap.inspect(tx, accounts, BPS, SLOT)
+        decoded = solana_tx.decode_transaction(base64.b64decode(tx))
+        swap = next(item for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_whirlpool.PROGRAM_ID)
+        parsed = solana_direct_swap.decode_swap_data(swap.data)
+        state = solana_whirlpool.pool_state(data)
+        arrays = solana_direct_swap._quote_arrays(pool, data, accounts, True)
+        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, 10_000_000, True, 100, LIMIT, SLOT)
+        self.assertEqual(parsed["other_amount_threshold"], quoted["token_min_out"])
+        self.assertEqual(result["min_out"], quoted["token_min_out"])
         self.assertTrue(result["byte_checks_passed"])
         self.assertTrue(result["wrap_verified"])
         self.assertTrue(result["output_computed_from_pool"])
@@ -109,7 +120,8 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertFalse(state["enabled"])
         self.assertFalse(state["mounted"])
         self.assertEqual(state["production_path"], "phantom_cli_unchanged")
-        self.assertEqual(state["live_quote"], "blocked_tick_arrays_absent")
+        self.assertEqual(state["live_quote"], "program_tick_array_accounts_absent")
+        self.assertEqual(state["specified_slippage_bps"], 100)
         self.assertEqual(state["fee_policy"], "not_approved")
         self.assertFalse(state["aggregate_loss_policy"])
         self.assertEqual(execution_transport.status()["send"], "disabled")
@@ -118,7 +130,24 @@ class DirectWhirlpoolTests(unittest.TestCase):
     def test_live_snapshot_has_no_tick_arrays_and_does_not_quote(self):
         snap = solana_direct_swap.snapshot_status()
         self.assertEqual(snap["quote"], "not_computed")
-        self.assertEqual(snap["reason"], "tick_arrays_absent")
+        self.assertEqual(snap["reason"], "program_tick_array_accounts_absent")
+        self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["liquidity"], 576950119138)
+        self.assertTrue(solana_direct_swap.SOL_USDC_SNAPSHOT["program_pda_matches_batch"])
+        self.assertFalse(solana_direct_swap.SOL_USDC_SNAPSHOT["string_helper_pda_matches_batch"])
+        self.assertTrue(solana_direct_swap.SOL_USDC_SNAPSHOT["fixed_and_dynamic_same_program_pda"])
+        pool = solana_direct_swap.SOL_USDC_POOL
+        program = solana_tx.b58decode(solana_whirlpool.PROGRAM_ID)
+        raw_pool = solana_tx.b58decode(pool)
+        for start, requested in (
+            (-24640, "2Em5ctCiXrMyFDrcNYuK8sJyxu3773sxLnb8pr7uawEY"),
+            (-25344, "BnXc8W397zg66J7uq8tYydnyRF3nb9SsyXRNdT4QUvmR"),
+            (-26048, "EeD3cajrp1TTbUJpjwrw1gbxJksigZD6q3rch93eEYjy"),
+        ):
+            self.assertEqual(solana_whirlpool.tick_array_address(pool, start), requested)
+            string_seed, _bump = solana_tx.find_program_address(
+                [b"tick_array", raw_pool, str(start).encode()], program,
+            )
+            self.assertNotEqual(solana_tx.b58encode(string_seed), requested)
         self.assertTrue(snap["tick_arrays_match_current_tick"])
         self.assertFalse(snap["tick_arrays_present"])
         self.assertFalse(snap["adaptive_fee"])

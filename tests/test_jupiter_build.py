@@ -389,7 +389,7 @@ console.log(JSON.stringify({oracle: oracle.toBase58()}));
 
 class RentSplitTest(unittest.TestCase):
     def test_rent_is_not_added_to_the_swap_cap(self):
-        self.assertEqual(RENT, 2_039_280)
+        self.assertEqual(RENT, 1_488_440)
         system = solana_tx.SYSTEM_PROGRAM
         create = (
             (0).to_bytes(4, "little")
