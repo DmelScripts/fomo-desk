@@ -1,10 +1,9 @@
 """Guarded Phantom sign-and-send adapter. It is not mounted and not enabled.
 
-Phantom's documented call is client.signAndSendTransaction, which signs and
-broadcasts. This module does not construct that client. submit() can call an
-injected signer only after the desk's own rows and a fresh inspection agree.
-Fee policy and aggregate loss are separate decisions and are not approved.
-The Jupiter route_v2 Whirlpool proof gaps block activation as well.
+The concrete bridge is the pinned `phantom solana send --confirmed true`
+command, using the binary and HOME the desk already uses for that session.
+submit() does not start it while fee, aggregate, slippage, or route checks
+fail. Those checks stay false. No session file is copied.
 """
 
 from __future__ import annotations
@@ -12,10 +11,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
+import subprocess
 import time
 
 import db
 import exit_policy
+import phantom_auth
 import phantom_runner
 import phantom_transport
 import solana_inspect
@@ -30,17 +32,203 @@ SWAP_BLOCKERS = (
 )
 
 
-class DisabledSigner:
-    """Default signer. It has no client and cannot reach Phantom."""
+NETWORK = "solana:mainnet"
+_SIGNATURE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,88}$")
+_BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
-    def sign_and_send_transaction(self, *, wallet_id, transaction, network_id, account):
-        raise RuntimeError("signer is disabled")
+
+def addresses_argv(binary: str) -> list[str]:
+    """Same read command the desk already uses to identify the server session."""
+    return [binary, "wallet", "addresses", "--format", "json"]
+
+
+def send_argv(binary: str, transaction: str) -> list[str]:
+    """Sign-and-broadcast as separate arguments. There is no stdin transaction."""
+    if not isinstance(binary, str) or not binary or any(char in binary for char in "\n\r\x00") or binary.startswith("-"):
+        raise ValueError("binary")
+    if not isinstance(transaction, str) or not _BASE64.fullmatch(transaction):
+        raise ValueError("transaction")
+    return [
+        binary,
+        "solana",
+        "send",
+        "--transaction",
+        transaction,
+        "--network-id",
+        NETWORK,
+        "--wallet-id",
+        phantom_transport.REQUIRED_WALLET_ID,
+        "--confirmed",
+        "true",
+        "--format",
+        "json",
+    ]
+
+
+def _spawn(argv: list[str], env: dict, timeout: float):
+    """One list invocation. stdin is closed and the shell is not used."""
+    if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
+        raise ValueError("argv")
+    done = subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=env.get("HOME"),
+        timeout=timeout,
+        check=False,
+        shell=False,
+    )
+    return done.returncode, (done.stdout + done.stderr).decode("utf-8", "replace")[:8000]
+
+
+def _production_runner(argv: list[str], _env: dict, timeout: float):
+    binary = phantom_auth._binary()
+    home = phantom_auth._home()
+    if not argv or argv[0] != binary:
+        raise RuntimeError("binary mismatch")
+    return _spawn(argv, phantom_auth._child_env(home, binary), timeout)
+
+
+def _identity(text: str) -> dict:
+    if phantom_auth._auth_text(text) or "user_code" in text or "approval_url" in text:
+        return {"ok": False, "reason": "auth_expired"}
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        body = json.loads(text[start : end + 1]) if start >= 0 and end > start else None
+    except json.JSONDecodeError:
+        body = None
+    rows = body.get("addresses") if isinstance(body, dict) else None
+    solana = None
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and row.get("addressType") == "solana":
+                solana = row.get("address")
+                break
+    matched = (
+        isinstance(body, dict)
+        and body.get("walletId") == phantom_transport.REQUIRED_WALLET_ID
+        and solana == phantom_transport.REQUIRED_WALLET
+    )
+    return {"ok": matched, "reason": None if matched else "wallet_mismatch"}
+
+
+def _signature(text: str) -> str | None:
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        body = json.loads(text[start : end + 1]) if start >= 0 and end > start else None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    if body.get("networkId") != NETWORK or body.get("account") != phantom_transport.REQUIRED_WALLET:
+        return None
+    signature = body.get("signature")
+    if isinstance(signature, str) and _SIGNATURE.fullmatch(signature):
+        return signature
+    return None
+
+
+def _claim(intent_id: str, digest: str) -> bool:
+    """One transaction moves sim_open to submit_unknown and records the digest."""
+
+    def work(conn):
+        row = conn.execute(
+            "SELECT status, wallet, wallet_id, amount_usd FROM phantom_reservations WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+        if row is None or row["status"] != "sim_open":
+            return False
+        if (
+            row["wallet"] != phantom_transport.REQUIRED_WALLET
+            or row["wallet_id"] != phantom_transport.REQUIRED_WALLET_ID
+            or row["amount_usd"] != "8.00"
+        ):
+            return False
+        current = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
+        ledger = {}
+        if current is not None:
+            try:
+                ledger = json.loads(current["value"])
+            except json.JSONDecodeError:
+                return False
+        if not isinstance(ledger, dict) or intent_id in ledger:
+            return False
+        now = time.time()
+        updated = conn.execute(
+            "UPDATE phantom_reservations SET status = 'submit_unknown', updated_at = ? WHERE intent_id = ? AND status = 'sim_open'",
+            (now, intent_id),
+        )
+        if updated.rowcount != 1:
+            return False
+        ledger[intent_id] = {"sha256": digest, "status": "submit_unknown"}
+        conn.execute(
+            """
+            INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (_LEDGER, json.dumps(ledger, separators=(",", ":"), sort_keys=True), now),
+        )
+        return True
+
+    return db.exclusive(work) is True
+
+
+def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "phantom", timeout: float = 30) -> dict:
+    """Verify the current server wallet, then broadcast the reviewed bytes once.
+
+    The addresses command runs before the send command. A mismatch, an auth
+    error, or a timeout of that read does not start the send. A timeout or
+    ambiguous send result stays submit_unknown and is not retried.
+    """
+    if not isinstance(intent_id, str) or not intent_id:
+        return {"status": "refused", "reason": "intent", "send": False, "resend": False, "subprocess": []}
+    try:
+        raw = _bytes(tx_b64)
+    except Exception:
+        return {"status": "refused", "reason": "bytes", "send": False, "resend": False, "subprocess": []}
+    digest = hashlib.sha256(raw).hexdigest()
+    review = _read(_REVIEW + intent_id)
+    reservation = _reservation(intent_id)
+    if (
+        not isinstance(review, dict)
+        or review.get("sha256") != digest
+        or review.get("wallet") != phantom_transport.REQUIRED_WALLET
+        or review.get("network") != NETWORK
+        or reservation is None
+        or reservation["status"] != "sim_open"
+        or intent_id in _ledger()
+    ):
+        return {"status": "refused", "reason": "not_claimable", "send": False, "resend": False, "subprocess": []}
+    env = phantom_auth._child_env(phantom_auth._home(), binary if binary.startswith("/") else None)
+    seen = []
+    try:
+        code, text = runner(addresses_argv(binary), env, timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return {"status": "refused", "reason": "auth_expired", "send": False, "resend": False, "subprocess": ["addresses"]}
+    seen.append("addresses")
+    identity = _identity(text)
+    if code != 0 or not identity["ok"]:
+        reason = "auth_expired" if code != 0 or identity["reason"] == "auth_expired" else "wallet_mismatch"
+        return {"status": "refused", "reason": reason, "send": False, "resend": False, "subprocess": seen}
+    if not _claim(intent_id, digest):
+        return {"status": "refused", "reason": "reservation_lost", "send": False, "resend": False, "subprocess": seen}
+    try:
+        code, text = runner(send_argv(binary, base64.b64encode(raw).decode("ascii")), env, timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return {"status": "submit_unknown", "reason": "timeout", "send": False, "resend": False, "subprocess": seen + ["send"]}
+    seen.append("send")
+    signature = _signature(text) if code == 0 else None
+    if signature is None:
+        return {"status": "submit_unknown", "reason": "ambiguous", "send": False, "resend": False, "subprocess": seen}
+    return {"status": "submitted", "reason": None, "send": True, "signature": signature, "resend": False, "subprocess": seen}
 
 
 def status() -> dict:
     return {
         "wired": False,
-        "signing": "disabled",
+        "signing": "cli_solana_send_behind_gates",
         "send": "disabled",
         "complete": False,
         "automatic_invocation": False,
@@ -97,29 +285,25 @@ def remember_review(intent_id: str, tx_b64: str) -> dict:
     return payload
 
 
-def submit(intent_id: str, tx_b64: str, *, signer=None, rpc=None) -> dict:
-    """Refuse unless every desk gate and a fresh inspection agree.
-
-    The injected signer is not the default. The default cannot reach Phantom.
-    """
+def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
+    """Start the CLI bridge only when decide() has no unmet check. It never does."""
+    if not isinstance(intent_id, str) or not isinstance(tx_b64, str):
+        raise TypeError("string inputs required")
     decision = decide(intent_id, tx_b64, rpc)
     decision["signature"] = None
     decision["signer_called"] = False
     decision["send"] = False
     decision["executable"] = False
     decision["live_ready"] = False
+    decision["subprocess"] = []
     if decision["unmet"]:
         return decision
-    if signer is None:
-        decision["unmet"].append("signer_disabled")
-        return decision
-    signer.sign_and_send_transaction(
-        wallet_id=phantom_transport.REQUIRED_WALLET_ID,
-        transaction=tx_b64,
-        network_id="solana:mainnet",
-        account=phantom_transport.REQUIRED_WALLET,
-    )
-    decision["signer_called"] = True
+    result = send_after_identity(intent_id, tx_b64, runner or _production_runner)
+    decision["signer_called"] = "send" in result.get("subprocess", [])
+    decision["send"] = result.get("send") is True
+    decision["subprocess"] = list(result.get("subprocess", []))
+    decision["signature"] = result.get("signature")
+    decision["bridge"] = result.get("status")
     return decision
 
 
