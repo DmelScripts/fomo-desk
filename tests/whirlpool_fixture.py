@@ -85,7 +85,7 @@ def _accounts() -> dict:
 class FakeTransport:
     """JSON-RPC envelopes for the read methods. This does not open a socket."""
 
-    def __init__(self, slot: int = 466547240, fee: int = 6000, height: int = 900, last_valid: int = 5000, valid: bool = True, sim_err=None, drop: str | None = None):
+    def __init__(self, slot: int = 466547240, fee: int = 6000, height: int = 900, last_valid: int = 5000, valid: bool = True, sim_err=None, drop: str | None = None, tip: int | None = None):
         import solana_tx
         self.slot = slot
         self.fee = fee
@@ -94,7 +94,10 @@ class FakeTransport:
         self.valid = valid
         self.sim_err = sim_err
         self.drop = drop
+        self.tip = slot if tip is None else tip
         self.payloads = []
+        self.statuses = None
+        self.transaction = None
         self.blockhash = solana_tx.b58encode(b"\x44" * 32)
 
     def __call__(self, payload):
@@ -114,6 +117,8 @@ class FakeTransport:
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": values}}
         if method == "getMinimumBalanceForRentExemption":
             return {"jsonrpc": "2.0", "id": 1, "result": 1488440}
+        if method == "getSlot":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.tip}
         if method == "getLatestBlockhash":
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"blockhash": self.blockhash, "lastValidBlockHeight": self.last_valid}}}
         if method == "getFeeForMessage":
@@ -122,6 +127,10 @@ class FakeTransport:
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": self.valid}}
         if method == "getBlockHeight":
             return {"jsonrpc": "2.0", "id": 1, "result": self.height}
+        if method == "getSignatureStatuses":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.statuses}
+        if method == "getTransaction":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.transaction}
         if method == "simulateTransaction":
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"err": self.sim_err, "unitsConsumed": 12000}}}
         return {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": method}}

@@ -278,7 +278,8 @@ def route_guard() -> dict:
         and SOL_USDC_SNAPSHOT["exit_token_est_out"] > 0
     )
     return {
-        "swap_path_verified": verified,
+        "swap_path_verified": False,
+        "snapshot_matches_recorded_quote": verified,
         "future_exit_guaranteed": False,
         "diagnostic": True,
         "probe_is_ticket": False,
@@ -467,10 +468,6 @@ def prepare_from_state(fetched: dict) -> dict:
         quote = solana_whirlpool_quote.quote_exact_in(
             state, arrays, spend, True, SOL_USDC_SNAPSHOT["specified_slippage_bps"], MIN_SQRT_PRICE + 1, slot,
         )
-        exit_tx, exit_quote = build_exit(
-            pool, data, accounts, SOL_USDC_SNAPSHOT["specified_slippage_bps"], blockhash, slot,
-            quote["token_est_out"], fetched["usdc_raw"],
-        )
     except (ValueError, solana_whirlpool.WhirlpoolError, solana_whirlpool_quote.QuoteError):
         empty["reason"] = "quote"
         empty["stale"] = False
@@ -480,11 +477,7 @@ def prepare_from_state(fetched: dict) -> dict:
         network_fee_lamports=fetched.get("network_fee_lamports"),
         rent_lamports=fetched.get("rent_lamports"),
     )
-    if not exit_closes_acquired(exit_tx, quote["token_est_out"], fetched["usdc_raw"]):
-        empty["reason"] = "exit_amount"
-        return empty
     entry_raw = base64.b64decode(tx)
-    exit_raw = base64.b64decode(exit_tx)
     entry_message = solana_tx.message_bytes(tx)
     public = {
         "ok": checked["byte_checks_passed"] is True and fees["fee_cap_ok"] and fees["exposure_cap_ok"],
@@ -510,8 +503,9 @@ def prepare_from_state(fetched: dict) -> dict:
         "usd_spend_is_exact": False,
         "unsigned_tx_sha256": hashlib.sha256(entry_raw).hexdigest(),
         "message_sha256": hashlib.sha256(entry_message).hexdigest(),
-        "exit_tx_sha256": hashlib.sha256(exit_raw).hexdigest(),
-        "exit_message_sha256": hashlib.sha256(solana_tx.message_bytes(exit_tx)).hexdigest(),
+        "exit_tx_sha256": None,
+        "exit_executable": False,
+        "exit_preview_only": True,
         "byte_checks_passed": checked["byte_checks_passed"],
         "min_out": checked["min_out"],
         "fx_slot": slot,
@@ -519,8 +513,8 @@ def prepare_from_state(fetched: dict) -> dict:
         "fetched_at": fetched.get("fetched_at"),
         "state_age_s": round(time.time() - float(fetched["fetched_at"]), 6),
         "wallet_usdc_raw": fetched["usdc_raw"],
-        "exit_plan_raw": quote["token_est_out"],
-        "exit_quote_out": exit_quote["token_est_out"],
+        "exit_plan_raw": None,
+        "exit_quote_preview_out": None,
         "exit_close_raw": None,
         "exit_allowed": False,
         "exit_uses_wallet_balance": False,
@@ -534,7 +528,7 @@ def prepare_from_state(fetched: dict) -> dict:
     # Kept for the in-process simulate, then discarded by the caller. Not a response field.
     public["rent_lamports"] = fetched.get("rent_lamports")
     public["_entry_tx"] = tx
-    public["_exit_tx"] = exit_tx
+    public["_exit_tx"] = None
     return public
 
 
@@ -627,20 +621,31 @@ def quote_is_fresh(fetched_at, now: float, slot: int | None = None) -> bool:
     return 0 <= age <= 30
 
 
+def _ceil_micro(lamports: int, micro_per_sol: int) -> int:
+    """Ceiling conversion so a cap comparison does not understate the charge."""
+    if lamports <= 0:
+        return 0
+    scale = 10**SOL_DECIMALS
+    return (int(lamports) * int(micro_per_sol) + scale - 1) // scale
+
+
 def fee_report(dex_lamports: int, micro: int, wsol_exists: bool, spend: int, *, network_fee_lamports: int | None, rent_lamports: int | None) -> dict:
-    """DEX fee USD plus the getFeeForMessage lamports, once each. Rent is not a fee."""
+    """Pool-micro figures use ceilings. They are not an approved USD quote."""
     priced = (
         isinstance(network_fee_lamports, int) and not isinstance(network_fee_lamports, bool) and network_fee_lamports >= 0
         and isinstance(rent_lamports, int) and not isinstance(rent_lamports, bool) and rent_lamports > 0
     )
     network = 0 if not priced else network_fee_lamports
     rent = 0 if wsol_exists or not priced else rent_lamports
-    dex_micro = (int(dex_lamports) * micro) // 10**SOL_DECIMALS
-    network_micro = (int(network) * micro) // 10**SOL_DECIMALS
+    dex_micro = _ceil_micro(int(dex_lamports), micro)
+    network_micro = _ceil_micro(int(network), micro)
     fee_micro = dex_micro + network_micro
-    marginal = (int(spend) * micro) // 10**SOL_DECIMALS
-    rent_micro = (int(rent) * micro) // 10**SOL_DECIMALS
+    marginal = _ceil_micro(int(spend), micro)
+    rent_micro = _ceil_micro(int(rent), micro)
     exposure = marginal + network_micro + rent_micro
+    pool_fee_ok = priced and fee_micro <= MAX_FEE_USD_MICRO and dex_micro >= 0
+    pool_ticket_ok = 0 < marginal <= TICKET_USD_MICRO
+    pool_exposure_ok = priced and exposure <= ALLOCATION_USD_MICRO and pool_ticket_ok
     return {
         "dex_fee_lamports": int(dex_lamports),
         "network_fee_lamports": None if not priced else int(network_fee_lamports),
@@ -649,16 +654,21 @@ def fee_report(dex_lamports: int, micro: int, wsol_exists: bool, spend: int, *, 
         "dex_fee_micro_usdc": dex_micro,
         "network_fee_micro_usdc": network_micro,
         "fee_micro_usdc": fee_micro,
+        "fee_unit": "pool_micro_usdc",
         "fee_cap_micro": MAX_FEE_USD_MICRO,
-        "fee_cap_ok": priced and fee_micro <= MAX_FEE_USD_MICRO and dex_micro >= 0,
+        "pool_fee_within_micro_cap": pool_fee_ok,
+        "fee_cap_ok": False,
+        "usd_cap_ok": False,
+        "usd_source": "unapproved",
         "priority_only": False,
         "marginal_micro_usdc": marginal,
         "rent_lamports": None if not priced else int(rent_lamports),
         "rent_micro_usdc": rent_micro,
         "rent_is_fee": False,
         "exposure_micro_usdc": exposure,
-        "exposure_cap_ok": priced and exposure <= ALLOCATION_USD_MICRO and marginal <= TICKET_USD_MICRO,
-        "ticket_cap_ok": 0 < marginal <= TICKET_USD_MICRO,
+        "pool_exposure_within_micro_cap": pool_exposure_ok,
+        "exposure_cap_ok": False,
+        "ticket_cap_ok": pool_ticket_ok,
     }
 
 
@@ -680,19 +690,38 @@ def apply_read_tail(public: dict, tail: dict) -> dict:
         and isinstance(public.get("last_valid_block_height"), int)
         and public["block_height"] <= public["last_valid_block_height"]
     )
-    public["ok"] = bool(public.get("byte_checks_passed") and fees["fee_cap_ok"] and fees["exposure_cap_ok"] and height_ok)
+    pool_ok = bool(public.get("byte_checks_passed") and fees["pool_fee_within_micro_cap"] and fees["pool_exposure_within_micro_cap"] and height_ok)
+    public["technical_ok"] = pool_ok
+    public["usd_cap_ok"] = False
+    public["usd_source"] = "unapproved"
+    public["fee_cap_ok"] = False
+    public["exposure_cap_ok"] = False
+    public["ok"] = False
     if not height_ok:
         public["reason"] = "blockhash_expired"
+    elif not fees["pool_fee_within_micro_cap"] or not fees["pool_exposure_within_micro_cap"]:
+        public["reason"] = "cap"
+    elif pool_ok:
+        public["reason"] = "usd_source_unapproved"
     return public
 
 
-def exit_amount(acquired: int | None, wallet: int, *, confirmed: bool) -> dict:
-    """Close the confirmed fill only. The preexisting USDC balance is not a position."""
+def exit_amount(acquired: int | None, wallet: int, *, confirmed: bool, minimum: int | None = None, estimated: int | None = None, ata_balance: int | None = None) -> dict:
+    """Only a confirmed fill inside min and est, and not the preexisting balance."""
+    refused = {"exit_raw": None, "allowed": False, "executable": False}
     if confirmed is not True or isinstance(acquired, bool) or not isinstance(acquired, int) or acquired <= 0:
-        return {"exit_raw": None, "allowed": False, "reason": "unconfirmed"}
-    if acquired == wallet or acquired == KNOWN_PREEXISTING_USDC:
-        return {"exit_raw": None, "allowed": False, "reason": "wallet_balance"}
-    return {"exit_raw": acquired, "allowed": True, "reason": None}
+        return refused | {"reason": "unconfirmed"}
+    if isinstance(minimum, bool) or isinstance(estimated, bool) or not isinstance(minimum, int) or not isinstance(estimated, int):
+        return refused | {"reason": "bounds_missing"}
+    if not minimum <= acquired <= estimated:
+        return refused | {"reason": "outside_fill"}
+    if isinstance(wallet, int) and not isinstance(wallet, bool) and wallet >= 0 and acquired > wallet:
+        return refused | {"reason": "above_balance"}
+    if isinstance(ata_balance, int) and not isinstance(ata_balance, bool) and acquired > ata_balance:
+        return refused | {"reason": "above_balance"}
+    if acquired == wallet or acquired == KNOWN_PREEXISTING_USDC or acquired > KNOWN_PREEXISTING_USDC:
+        return refused | {"reason": "wallet_balance"}
+    return {"exit_raw": acquired, "allowed": True, "executable": True, "reason": None}
 
 
 def revalidate_blockhash(tx_blockhash, source, slot: int) -> dict:
@@ -757,6 +786,9 @@ def prove(tx_b64: str, accounts: dict, slot: int, wsol_exists: bool, *, network_
         if state is None:
             return body
         parsed = decode_swap_data(swap.data)
+        if pool != SOL_USDC_POOL or parsed is None or parsed["amount"] == INPUT_LAMPORTS:
+            body["error_category"] = "pool" if pool != SOL_USDC_POOL else "probe"
+            return body
         arrays = _quote_arrays(pool, record[1], accounts, True)
         quote = solana_whirlpool_quote.quote_exact_in(
             state, arrays, parsed["amount"], True, SOL_USDC_SNAPSHOT["specified_slippage_bps"],
@@ -772,11 +804,15 @@ def prove(tx_b64: str, accounts: dict, slot: int, wsol_exists: bool, *, network_
         network_fee_lamports=network_fee_lamports, rent_lamports=rent_lamports,
     )
     body.update(fees)
-    body["slippage_verified"] = True
-    body["spend_verified"] = checked.get("spend_verified") is True
-    body["byte_checks_passed"] = True
-    body["wallet_verified"] = checked.get("wallet_verified") is True
-    body["error_category"] = None
+    # Caller-supplied account bytes are not a signing proof.
+    body["pool_math_matches"] = True
+    body["slippage_verified"] = False
+    body["spend_verified"] = False
+    body["byte_checks_passed"] = False
+    body["fee_cap_ok"] = False
+    body["usd_cap_ok"] = False
+    body["wallet_verified"] = False
+    body["error_category"] = "caller_state"
     return body
 
 
@@ -791,9 +827,9 @@ def _covered_starts(state: dict) -> list[int]:
     return starts
 
 
-def _allowed_amounts(state: dict) -> set[int]:
-    """Probe or the round-down under $8. The amount is not taken from a caller flag."""
-    amounts = {INPUT_LAMPORTS}
+def _allowed_amounts(state: dict, *, allow_probe: bool = False) -> set[int]:
+    """The round-down under the ticket. The 0.01 SOL probe is diagnostic only."""
+    amounts = {INPUT_LAMPORTS} if allow_probe else set()
     micro = marginal_micro_usdc_per_sol(state["sqrt_price"])
     capped = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
     if capped > 0:
@@ -859,14 +895,14 @@ def decode_swap_data(data: bytes) -> dict | None:
     }
 
 
-def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int, amount: int | None = None) -> str:
+def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int, amount: int | None = None, *, allow_probe: bool = False) -> str:
     """Unsigned wrapped swap. The threshold is the quote of these account bytes."""
     direction = _direction(pool_data)
     state = solana_whirlpool.pool_state(pool_data)
     if state is None:
         raise ValueError("pool is not usable")
     spend = INPUT_LAMPORTS if amount is None else amount
-    if spend not in _allowed_amounts(state):
+    if spend not in _allowed_amounts(state, allow_probe=allow_probe):
         raise ValueError("spend is outside the probe and the $8 cap")
     _require_limit(direction, sqrt_price_limit, state["sqrt_price"])
     source = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
@@ -883,9 +919,9 @@ def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], s
     )
 
 
-def build_exit(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, blockhash: str, context_slot: int, usdc_raw: int, wallet_usdc_raw: int) -> tuple[str, dict]:
+def build_exit(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, blockhash: str, context_slot: int, usdc_raw: int, wallet_usdc_raw: int, *, minimum: int | None = None, estimated: int | None = None, ata_balance: int | None = None) -> tuple[str, dict]:
     """Unsigned USDC to SOL close of one acquired fill. The USDC account is not closed."""
-    choice = exit_amount(usdc_raw, wallet_usdc_raw, confirmed=True)
+    choice = exit_amount(usdc_raw, wallet_usdc_raw, confirmed=True, minimum=minimum, estimated=estimated, ata_balance=ata_balance)
     if choice["allowed"] is not True:
         raise ValueError(choice["reason"])
     state = solana_whirlpool.pool_state(pool_data)
@@ -1032,7 +1068,7 @@ def transaction_from_fields(pool: str, pool_data: bytes, source: str, dest: str,
     return solana_tx.encode_legacy(authority, keys, len(readonly), instructions, blockhash, required=len(signers))
 
 
-def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, context_slot: int, *, wsol_existed: bool = False) -> dict:
+def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, context_slot: int, *, wsol_existed: bool = False, allow_probe: bool = False) -> dict:
     """Read the wrapped swap. The minimum output is recomputed from the accounts."""
     body = {
         "enabled": False,
@@ -1091,7 +1127,7 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         body["error_category"] = tail
         return body
     body["min_out"] = parsed["other_amount_threshold"]
-    allowed = _allowed_amounts(state)
+    allowed = _allowed_amounts(state, allow_probe=allow_probe)
     if not parsed["amount_specified_is_input"] or parsed["amount"] not in allowed or plan["lamports"] != parsed["amount"]:
         body["error_category"] = "spend_unbound"
         return body

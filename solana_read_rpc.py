@@ -25,6 +25,7 @@ METHODS = frozenset({
     "getMultipleAccounts",
     "getMinimumBalanceForRentExemption",
     "getLatestBlockhash",
+    "getSlot",
     "getFeeForMessage",
     "isBlockhashValid",
     "getBlockHeight",
@@ -167,9 +168,16 @@ def load_bundle(rpc: ReadRpc, expected_slot: int | None = None) -> dict:
     if parsed is None or not isinstance(rent, int) or isinstance(rent, bool) or rent <= 0:
         return failed | {"reason": "blockhash" if parsed is None else "rent", "context_slot": slot}
     fetched.update(parsed)
+    try:
+        tip = rpc.call("getSlot", [{"commitment": "confirmed", "minContextSlot": slot}])
+    except RpcError as exc:
+        return failed | {"reason": exc.reason, "context_slot": slot}
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip != slot:
+        return failed | {"reason": "slot_lag", "context_slot": slot, "tip_slot": tip if isinstance(tip, int) else None, "fetched": True}
     fetched["rent_lamports"] = rent
     fetched["genesis"] = genesis
     fetched["fetched_at"] = fetched_at
+    fetched["tip_slot"] = tip
     fetched["slot_is_ttl"] = False
     return fetched
 
@@ -277,6 +285,7 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
         "wallet": decoded.fee_payer,
         "message_sha256": digest,
         "acquired_raw": delta,
+        "ata_balance": _token_amount(meta.get("postTokenBalances"), decoded, solana_tx.USDC_MINT),
         "network_fee_lamports": fee if isinstance(fee, int) and not isinstance(fee, bool) else None,
         "err": None,
         "confirmation_status": row.get("confirmationStatus"),
@@ -296,13 +305,19 @@ def _usdc_delta(meta: dict, decoded) -> int | None:
 
 
 def _token_amount(rows, decoded, mint: str) -> int | None:
+    """The wallet's own USDC ATA. A missing owner or a different account index is not the fill."""
     if not isinstance(rows, list):
         return None
+    import solana_tx
     owner = decoded.fee_payer
+    ata = solana_tx.associated_token_address(owner, mint, solana_tx.TOKEN_PROGRAM)
     for row in rows:
-        if not isinstance(row, dict) or row.get("mint") != mint:
+        if not isinstance(row, dict) or row.get("mint") != mint or row.get("owner") != owner:
             continue
-        if row.get("owner") not in (None, owner):
+        index = row.get("accountIndex")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(decoded.static_keys):
+            continue
+        if decoded.static_keys[index] != ata:
             continue
         amount = row.get("uiTokenAmount", {}).get("amount") if isinstance(row.get("uiTokenAmount"), dict) else None
         if isinstance(amount, str) and amount.isdigit():

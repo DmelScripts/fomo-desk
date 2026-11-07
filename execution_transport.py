@@ -192,6 +192,115 @@ def _claim(intent_id: str, digest: str) -> bool:
     return db.exclusive(work) is True
 
 
+def _stamp_changed(conn, stamp: dict) -> bool:
+    fee = conn.execute("SELECT updated_at FROM phantom_control WHERE key = 'fee_policy'").fetchone()
+    loss = conn.execute("SELECT updated_at FROM phantom_control WHERE key = 'aggregate_loss_policy'").fetchone()
+    halt = conn.execute("SELECT value, updated_at FROM phantom_control WHERE key = 'halt'").fetchone()
+    fee_at = None if fee is None else fee["updated_at"]
+    loss_at = None if loss is None else loss["updated_at"]
+    halt_value = None if halt is None else halt["value"]
+    halt_at = None if halt is None else halt["updated_at"]
+    return fee_at != stamp.get("fee") or loss_at != stamp.get("loss") or halt_value != stamp.get("halt") or halt_at != stamp.get("halt_at")
+
+
+def _halted_conn(conn) -> bool:
+    row = conn.execute("SELECT value FROM phantom_control WHERE key = 'halt'").fetchone()
+    if row is None:
+        return True
+    return row["value"] != "0"
+
+
+def _send_blocked(intent_id: str, raw: bytes) -> str | None:
+    """Gates that must hold before any signer process. Caller bytes are not a proof."""
+    if phantom_runner.halted():
+        return "kill_switch"
+    if db.get_setting("mode", "PAPER") != "PAPER":
+        return "live_locked"
+    if spend_policy.usd_source()["approved"] is not True:
+        return "usd_source_unapproved"
+    if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
+        return "policy_unrecorded"
+    reservation = _reservation(intent_id)
+    if reservation is None or reservation["status"] != "sim_open":
+        return "not_claimable"
+    stored = {}
+    if reservation["result_json"]:
+        try:
+            parsed = json.loads(reservation["result_json"])
+            stored = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            stored = {}
+    import solana_tx
+    try:
+        message = hashlib.sha256(solana_tx.message_bytes(base64.b64encode(raw).decode("ascii"))).hexdigest()
+    except ValueError:
+        return "bytes"
+    if stored.get("message_sha256") != message or stored.get("origin") != "direct_whirlpool":
+        return "message_unbound"
+    decoded = solana_tx.decode_transaction(raw)
+    if solana_direct_swap.SOL_USDC_POOL not in decoded.static_keys:
+        return "pool"
+    if solana_direct_swap.INPUT_LAMPORTS and _probe_spend(decoded):
+        return "probe"
+    review = _read(_REVIEW + intent_id)
+    digest = hashlib.sha256(raw).hexdigest()
+    if not isinstance(review, dict) or review.get("sha256") != digest or review.get("wallet") != phantom_transport.REQUIRED_WALLET or review.get("network") != NETWORK:
+        return "review_unbound"
+    if intent_id in _ledger():
+        return "not_claimable"
+    return None
+
+
+def _probe_spend(decoded) -> bool:
+    program_id = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    for instruction in decoded.instructions:
+        program = decoded.static_keys[instruction.program_index] if instruction.program_index < len(decoded.static_keys) else ""
+        if program != program_id:
+            continue
+        parsed = solana_direct_swap.decode_swap_data(instruction.data)
+        if parsed and parsed["amount"] == solana_direct_swap.INPUT_LAMPORTS:
+            return True
+    return False
+
+
+def _record_signature(intent_id: str, signature: str, digest: str) -> None:
+    """Keep the signature. The raw transaction is not written."""
+
+    def work(conn):
+        row = conn.execute("SELECT result_json FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
+        try:
+            body = json.loads(row["result_json"]) if row and row["result_json"] else {}
+        except json.JSONDecodeError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        body["signature"] = signature
+        body["message_sha256"] = body.get("message_sha256")
+        body["chain_submit"] = True
+        body.pop("transaction", None)
+        conn.execute(
+            "UPDATE phantom_reservations SET result_json = ?, updated_at = ? WHERE intent_id = ?",
+            (json.dumps(body, separators=(",", ":"), sort_keys=True), time.time(), intent_id),
+        )
+        current = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
+        try:
+            ledger = json.loads(current["value"]) if current else {}
+        except json.JSONDecodeError:
+            ledger = {}
+        if not isinstance(ledger, dict):
+            ledger = {}
+        ledger[intent_id] = {"sha256": digest, "signature": signature, "status": "submit_unknown"}
+        conn.execute(
+            """
+            INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (_LEDGER, json.dumps({key: {"sha256": value.get("sha256"), "signature": value.get("signature"), "status": value.get("status")} for key, value in ledger.items() if isinstance(value, dict)}, separators=(",", ":"), sort_keys=True), time.time()),
+        )
+
+    db.exclusive(work)
+
+
 def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "phantom", timeout: float = 30) -> dict:
     """Verify the current server wallet, then broadcast the reviewed bytes once.
 
@@ -206,6 +315,18 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     except Exception:
         return {"status": "refused", "reason": "bytes", "send": False, "resend": False, "subprocess": []}
     digest = hashlib.sha256(raw).hexdigest()
+    blocked = _send_blocked(intent_id, raw)
+    if blocked:
+        return {
+            "status": "refused",
+            "reason": blocked,
+            "send": False,
+            "resend": False,
+            "subprocess": [],
+            "cli_transport": "argv_only",
+            "stdin_transaction": False,
+            "signature": None,
+        }
     review = _read(_REVIEW + intent_id)
     reservation = _reservation(intent_id)
     if (
@@ -239,7 +360,8 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     signature = _signature(text) if code == 0 else None
     if signature is None:
         return {"status": "submit_unknown", "reason": "ambiguous", "send": False, "resend": False, "subprocess": seen}
-    return {"status": "submitted", "reason": None, "send": True, "signature": signature, "resend": False, "subprocess": seen}
+    _record_signature(intent_id, signature, digest)
+    return {"status": "submitted", "reason": None, "send": True, "signature": signature, "resend": False, "subprocess": seen, "cli_transport": "argv_only", "stdin_transaction": False}
 
 
 def status() -> dict:
@@ -279,10 +401,14 @@ def activation_status() -> dict:
         "exit_is_not_aggregate": policy["aggregate_loss_policy"] is False and policy["loss_policy"] == "not_approved",
         "live_request_recorded": consent is not None,
         "live_request_not_applied": consent is None or consent.get("applied") is False,
+        "kill_switch_open": phantom_runner.halted() is False,
         "fee_policy_approved": fee["approved"] is True,
         "aggregate_loss_policy_approved": aggregate["approved"] is True,
-        "swap_path_verified": route["swap_path_verified"] is True,
-        "signer_enabled": fee["approved"] is True and aggregate["approved"] is True and route["swap_path_verified"] is True,
+        "usd_source_approved": spend_policy.usd_source()["approved"] is True,
+        "swap_path_verified": False,
+        "snapshot_is_not_a_live_path": route["diagnostic"] is True and route["swap_path_verified"] is False,
+        "signer_enabled": False,
+        "unsigned_simulation_is_not_activation": True,
     }
     return {
         "ready": all(checks.values()),
@@ -320,34 +446,44 @@ def prepare_readonly(slot: int | None = None, rpc=None) -> dict:
 
 
 def reserve_from_reader(intent_id: str, rpc) -> dict:
-    """Caps run before simulation. The unsigned bytes stay in this call and are then dropped."""
-    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False, "runtime_ready": False}
+    """Simulate before any hold. A clean simulation is not a USD approval."""
+    import solana_read_rpc
+    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False, "runtime_ready": False, "created": False}
     if db.get_setting("mode", "PAPER") != "PAPER":
         return refused | {"reason": "live_locked", "rpc_methods": []}
     if phantom_runner.halted():
         return refused | {"reason": "kill_switch", "rpc_methods": []}
     if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
         return refused | {"reason": "policy_unrecorded", "rpc_methods": []}
+    stamp = spend_policy.policy_stamp()
     prepared, entry_tx, exit_tx, reader = _assemble_read(None, rpc)
     try:
-        if not prepared.get("ok"):
+        methods = list(getattr(reader, "methods", []))
+        if not prepared.get("technical_ok"):
             return refused | {
                 "reason": prepared.get("reason") or "cap",
-                "fee_cap_ok": prepared.get("fee_cap_ok"),
-                "exposure_cap_ok": prepared.get("exposure_cap_ok"),
-                "rpc_methods": list(getattr(reader, "methods", [])),
+                "fee_cap_ok": False,
+                "usd_cap_ok": False,
+                "rpc_methods": methods,
             }
-        saved = reserve_direct(intent_id, prepared=prepared)
-        saved["rpc_methods"] = list(getattr(reader, "methods", []))
-        if saved.get("created") and entry_tx:
-            import solana_read_rpc
-            saved["simulation"] = solana_read_rpc.simulate(reader, entry_tx, prepared["context_slot"])
-            saved["rpc_methods"] = list(reader.methods)
-        else:
-            saved["simulation"] = {"simulated": False, "sign": False, "broadcastable": False}
+        if not entry_tx:
+            return refused | {"reason": "quote", "rpc_methods": methods}
+        try:
+            simulation = solana_read_rpc.simulate(reader, entry_tx, prepared["context_slot"])
+        except solana_read_rpc.RpcError as exc:
+            return refused | {"reason": "simulation_ambiguous", "simulation_err": exc.reason, "rpc_methods": list(reader.methods)}
+        methods = list(reader.methods)
+        if simulation.get("simulated") is not True or simulation.get("err") is not None:
+            err = simulation.get("err")
+            reason = "simulation_ambiguous" if isinstance(err, str) and err in {"timeout", "transport", "rpc_result", "call_budget"} else "simulation_failed"
+            return refused | {"reason": reason, "simulation": simulation, "rpc_methods": methods}
+        saved = reserve_direct(intent_id, prepared=prepared, stamp=stamp, simulation_clean=True)
+        saved["simulation"] = simulation
+        saved["rpc_methods"] = methods
         saved["broadcastable"] = False
         saved["runtime_ready"] = False
         saved["sign"] = False
+        saved["live_ready"] = False
         return saved
     finally:
         del entry_tx, exit_tx
@@ -457,6 +593,9 @@ def decide(intent_id: str, tx_b64: str, rpc=None, *, direct_state=None, blockhas
         "slippage_verified": False,
         "fee_unbound_clear": False,
         "blockhash_checked": False,
+        "caller_state_refused": direct_state is None and blockhash_source is None,
+        "usd_source_approved": spend_policy.usd_source()["approved"] is True,
+        "reserved_message": False,
     }
     reservation = _reservation(intent_id) if checks["intent_id"] else None
     if reservation is not None and reservation["status"] == "sim_open":
@@ -483,19 +622,28 @@ def decide(intent_id: str, tx_b64: str, rpc=None, *, direct_state=None, blockhas
     except Exception:
         raw = b""
     digest = hashlib.sha256(raw).hexdigest() if raw else ""
-    if review and review.get("sha256") == digest and review.get("wallet") == phantom_transport.REQUIRED_WALLET and review.get("network") == "solana:mainnet":
+    stored_message = None
+    if reservation is not None and reservation["result_json"]:
+        try:
+            stored_body = json.loads(reservation["result_json"])
+            stored_message = stored_body.get("message_sha256") if isinstance(stored_body, dict) else None
+        except json.JSONDecodeError:
+            stored_message = None
+    if raw:
+        import solana_tx
+        try:
+            message_digest = hashlib.sha256(solana_tx.message_bytes(base64.b64encode(raw).decode("ascii"))).hexdigest()
+        except ValueError:
+            message_digest = ""
+        checks["reserved_message"] = bool(stored_message) and stored_message == message_digest
+    if review and review.get("sha256") == digest and review.get("wallet") == phantom_transport.REQUIRED_WALLET and review.get("network") == "solana:mainnet" and checks["reserved_message"]:
         checks["reviewed_binding"] = True
     inspected = None
     recognized = _direct_route(raw)
-    if recognized:
-        proved = _direct_proof(raw, direct_state, blockhash_source)
-        checks["inspection_chain_ok"] = proved.get("byte_checks_passed") is True
-        checks["spend_verified"] = proved.get("spend_verified") is True
-        checks["slippage_verified"] = proved.get("slippage_verified") is True
-        checks["fee_unbound_clear"] = proved.get("fee_cap_ok") is True and proved.get("exposure_cap_ok") is True
-        checks["blockhash_checked"] = proved.get("blockhash_checked") is True
-        checks["wallet_network"] = proved.get("wallet_verified") is True
-        inspected = proved
+    if recognized and (direct_state is not None or blockhash_source is not None):
+        inspected = {"error_category": "caller_state"}
+    elif recognized:
+        inspected = {"error_category": "trusted_read_required"}
     elif rpc is not None and raw:
         inspected = solana_inspect.inspect(base64.b64encode(raw).decode("ascii"), rpc)
         checks["inspection_chain_ok"] = inspected.get("chain_ok") is True
@@ -530,23 +678,25 @@ def reconcile(intent_id: str) -> dict:
     }
 
 
-def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict | None = None) -> dict:
+def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict | None = None, stamp: dict | None = None, simulation_clean: bool = False) -> dict:
     """Hold spend, fees, and rent inside one transaction. This does not sign."""
     if not isinstance(intent_id, str) or not intent_id or len(intent_id) > 80:
         raise ValueError("intent")
-    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False}
+    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False, "created": False}
     if db.get_setting("mode", "PAPER") != "PAPER":
         return refused | {"reason": "live_locked"}
     if phantom_runner.halted():
         return refused | {"reason": "kill_switch"}
     if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
         return refused | {"reason": "policy_unrecorded"}
+    if not simulation_clean:
+        return refused | {"reason": "simulation_failed"}
     if prepared is None:
         prepared = solana_direct_swap.prepare_from_state(fetched or {})
     prepared.pop("_entry_tx", None)
     prepared.pop("_exit_tx", None)
-    if not prepared.get("byte_checks_passed") or not prepared.get("fee_cap_ok") or not prepared.get("exposure_cap_ok") or not prepared.get("ticket_cap_ok"):
-        return refused | {"reason": prepared.get("reason") or "cap", "fee_cap_ok": prepared.get("fee_cap_ok"), "exposure_cap_ok": prepared.get("exposure_cap_ok")}
+    if not prepared.get("technical_ok"):
+        return refused | {"reason": prepared.get("reason") or "cap", "fee_cap_ok": False, "exposure_cap_ok": False}
     from decimal import Decimal, ROUND_CEILING
     reserved = (Decimal(prepared["exposure_micro_usdc"]) / Decimal(1_000_000)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
     fee_hold = (Decimal(prepared["fee_micro_usdc"]) / Decimal(1_000_000)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
@@ -581,6 +731,13 @@ def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict |
     }
 
     def work(conn):
+        if _halted_conn(conn):
+            return refused | {"reason": "kill_switch"}
+        changed = stamp is not None and _stamp_changed(conn, stamp)
+        if changed:
+            return refused | {"reason": "policy_changed"}
+        if spend_policy.usd_source()["approved"] is not True:
+            return refused | {"reason": "usd_source_unapproved", "usd_cap_ok": False, "fee_cap_ok": False}
         row = conn.execute("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
         if row is not None:
             return {

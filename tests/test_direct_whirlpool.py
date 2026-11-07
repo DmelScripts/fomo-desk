@@ -61,8 +61,8 @@ class DirectWhirlpoolTests(unittest.TestCase):
 
     def test_quote_comes_from_pool_bytes_and_wraps_the_wallet_atas(self):
         pool, data, accounts, _source, _dest = _pool()
-        tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT)
-        result = solana_direct_swap.inspect(tx, accounts, BPS, SLOT)
+        tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT, allow_probe=True)
+        result = solana_direct_swap.inspect(tx, accounts, BPS, SLOT, allow_probe=True)
         decoded = solana_tx.decode_transaction(base64.b64decode(tx))
         swap = next(item for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_whirlpool.PROGRAM_ID)
         parsed = solana_direct_swap.decode_swap_data(swap.data)
@@ -83,13 +83,13 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertEqual(result["fee_policy"], "not_approved")
         self.assertFalse(result["aggregate_loss_policy"])
         dear = _pool(fee_rate=10000)
-        other = solana_direct_swap.build(dear[0], dear[1], dear[2], BPS, LIMIT, BLOCK, SLOT)
-        self.assertNotEqual(solana_direct_swap.inspect(other, dear[2], BPS, SLOT)["min_out"], result["min_out"])
+        other = solana_direct_swap.build(dear[0], dear[1], dear[2], BPS, LIMIT, BLOCK, SLOT, allow_probe=True)
+        self.assertNotEqual(solana_direct_swap.inspect(other, dear[2], BPS, SLOT, allow_probe=True)["min_out"], result["min_out"])
 
     def test_threshold_spend_wrap_and_tail_are_not_caller_claims(self):
         pool, data, accounts, source, dest = _pool()
-        good = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT)
-        minimum = solana_direct_swap.inspect(good, accounts, BPS, SLOT)["min_out"]
+        good = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT, allow_probe=True)
+        minimum = solana_direct_swap.inspect(good, accounts, BPS, SLOT, allow_probe=True)["min_out"]
         lying = solana_direct_swap.transaction_from_fields(
             pool, data, source, dest, 10_000_000, 1, LIMIT, True, True, BLOCK, wrap=True,
         )
@@ -99,16 +99,16 @@ class DirectWhirlpoolTests(unittest.TestCase):
         classic_tail = solana_direct_swap.transaction_from_fields(
             pool, data, source, dest, 10_000_000, minimum, LIMIT, True, True, BLOCK, wrap=True, extra_account=True,
         )
-        self.assertEqual(solana_direct_swap.inspect(lying, accounts, BPS, SLOT)["error_category"], "slippage_unbound")
-        self.assertEqual(solana_direct_swap.inspect(over, accounts, BPS, SLOT)["error_category"], "spend_unbound")
-        self.assertEqual(solana_direct_swap.inspect(classic_tail, accounts, BPS, SLOT)["error_category"], "adaptive_tail")
-        self.assertEqual(solana_direct_swap.inspect(good, accounts, BPS, BLOCK)["error_category"], "quote_context_missing")
+        self.assertEqual(solana_direct_swap.inspect(lying, accounts, BPS, SLOT, allow_probe=True)["error_category"], "slippage_unbound")
+        self.assertEqual(solana_direct_swap.inspect(over, accounts, BPS, SLOT, allow_probe=True)["error_category"], "spend_unbound")
+        self.assertEqual(solana_direct_swap.inspect(classic_tail, accounts, BPS, SLOT, allow_probe=True)["error_category"], "adaptive_tail")
+        self.assertEqual(solana_direct_swap.inspect(good, accounts, BPS, BLOCK, allow_probe=True)["error_category"], "quote_context_missing")
         adaptive_pool, adaptive_data, adaptive_accounts, adaptive_source, adaptive_dest = _pool(seed=0)
         adaptive = solana_direct_swap.transaction_from_fields(
             adaptive_pool, adaptive_data, adaptive_source, adaptive_dest, 10_000_000, minimum, LIMIT, True, True, BLOCK,
             wrap=True, extra_account=True,
         )
-        checked = solana_direct_swap.inspect(adaptive, adaptive_accounts, BPS, SLOT)
+        checked = solana_direct_swap.inspect(adaptive, adaptive_accounts, BPS, SLOT, allow_probe=True)
         self.assertTrue(checked["byte_checks_passed"])
         stranger = solana_direct_swap._tail_ok(
             [solana_whirlpool.oracle_address(adaptive_pool), solana_tx.b58encode(b"\x99" * 32), adaptive_pool],
@@ -212,12 +212,12 @@ class DirectWhirlpoolTests(unittest.TestCase):
         raw = bytearray(accounts[source][1])
         raw[64:72] = (50_000).to_bytes(8, "little")
         accounts[source] = (solana_tx.TOKEN_PROGRAM, bytes(raw))
-        tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT)
-        self.assertTrue(solana_direct_swap.inspect(tx, accounts, BPS, SLOT)["byte_checks_passed"])
+        tx = solana_direct_swap.build(pool, data, accounts, BPS, LIMIT, BLOCK, SLOT, allow_probe=True)
+        self.assertTrue(solana_direct_swap.inspect(tx, accounts, BPS, SLOT, allow_probe=True)["byte_checks_passed"])
         foreign = solana_tx.b58encode(b"\x58" * 32)
         accounts[source] = (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(NATIVE, foreign))
-        owned = solana_direct_swap.inspect(tx, accounts, BPS, SLOT)
+        owned = solana_direct_swap.inspect(tx, accounts, BPS, SLOT, allow_probe=True)
         self.assertEqual(owned["error_category"], "whirlpool_owner_unbound")
         accounts[source] = (solana_tx.TOKEN_2022, solana_whirlpool.reference_token_account(NATIVE, WALLET))
-        self.assertEqual(solana_direct_swap.inspect(tx, accounts, BPS, SLOT)["error_category"], "token_2022_unsupported")
-        self.assertEqual(solana_direct_swap.inspect(tx, accounts, BPS, SLOT, wsol_existed=True)["error_category"], "preexisting_wsol")
+        self.assertEqual(solana_direct_swap.inspect(tx, accounts, BPS, SLOT, allow_probe=True)["error_category"], "token_2022_unsupported")
+        self.assertEqual(solana_direct_swap.inspect(tx, accounts, BPS, SLOT, wsol_existed=True, allow_probe=True)["error_category"], "preexisting_wsol")

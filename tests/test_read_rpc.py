@@ -84,14 +84,13 @@ class ReadRpcTests(unittest.TestCase):
         phantom_runner.set_halt({"halted": False})
         first = reader()
         saved = execution_transport.reserve_from_reader("stay", first)
-        self.assertTrue(saved["created"])
+        self.assertFalse(saved["created"])
+        self.assertEqual(saved["reason"], "usd_source_unapproved")
+        self.assertTrue(saved["simulation"]["simulated"])
         self.assertEqual(first.methods.count("simulateTransaction"), 1)
         self.assertEqual(first.methods.count("getMultipleAccounts"), 1)
-        held = saved["reserved_usd"]
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations WHERE intent_id = 'stay'"), [])
         db.init_db()
-        row = db.query("SELECT status, reserved_usd FROM phantom_reservations WHERE intent_id = 'stay'")[0]
-        self.assertEqual(row["status"], "sim_open")
-        self.assertEqual(row["reserved_usd"], held)
         results = []
 
         def work(name):
@@ -103,9 +102,9 @@ class ReadRpcTests(unittest.TestCase):
         for thread in threads:
             thread.join()
         created = [item for item in results if item.get("created")]
-        self.assertEqual(len(created), 1)
-        self.assertEqual(sum(item.get("simulation", {}).get("simulated") is True for item in results), 1)
-        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM phantom_reservations WHERE intent_id = 'race'")[0]["n"], 1)
+        self.assertEqual(created, [])
+        self.assertTrue(all(item.get("reason") == "usd_source_unapproved" for item in results))
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM phantom_reservations WHERE intent_id = 'race'")[0]["n"], 0)
 
     def test_a_finalized_flag_does_not_bind_a_mismatched_fill(self):
         prepared, entry, _exit, _rpc = execution_transport._assemble_read(466547240, reader())
@@ -116,15 +115,18 @@ class ReadRpcTests(unittest.TestCase):
         digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
         acquired = prepared["quote_token_est_out"]
         pre = 188718141
+        decoded = solana_tx.decode_transaction(signed)
+        ata = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
+        index = decoded.static_keys.index(ata)
         status = {"value": [{"slot": prepared["context_slot"], "err": None, "confirmationStatus": "finalized"}]}
-        def transaction(fee, post):
+        def transaction(fee, post, owner=phantom_transport.REQUIRED_WALLET, account_index=index):
             return {
                 "slot": prepared["context_slot"],
                 "meta": {
                     "err": None,
                     "fee": fee,
-                    "preTokenBalances": [{"mint": solana_tx.USDC_MINT, "owner": phantom_transport.REQUIRED_WALLET, "uiTokenAmount": {"amount": str(pre)}}],
-                    "postTokenBalances": [{"mint": solana_tx.USDC_MINT, "owner": phantom_transport.REQUIRED_WALLET, "uiTokenAmount": {"amount": str(post)}}],
+                    "preTokenBalances": [{"accountIndex": account_index, "mint": solana_tx.USDC_MINT, "owner": owner, "uiTokenAmount": {"amount": str(pre)}}],
+                    "postTokenBalances": [{"accountIndex": account_index, "mint": solana_tx.USDC_MINT, "owner": owner, "uiTokenAmount": {"amount": str(post)}}],
                 },
                 "transaction": [encoded, "base64"],
             }
@@ -137,3 +139,5 @@ class ReadRpcTests(unittest.TestCase):
         wrong = solana_read_rpc._bind_receipt(signature, status, transaction(1, pre + acquired))
         self.assertEqual(wrong["network_fee_lamports"], 1)
         self.assertNotEqual(wrong["network_fee_lamports"], prepared["network_fee_lamports"])
+        missing_owner = solana_read_rpc._bind_receipt(signature, status, transaction(6000, pre + acquired, owner=None))
+        self.assertIsNone(missing_owner["acquired_raw"])
