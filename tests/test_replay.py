@@ -150,3 +150,66 @@ class TestReplay(unittest.TestCase):
                     self.assertEqual(button["url"], links.coin_url(MINT, "solana"))
         beats = {row["agent"] for row in db.query("SELECT agent FROM heartbeats")}
         self.assertEqual(beats, {"scanner", "auditor", "analyst", "executor", "risk"})
+
+
+class TestReplayGuard(unittest.TestCase):
+    def test_guard_refuses_to_start_without_an_isolated_directory(self):
+        import replay
+        previous_replay = os.environ.get("DESK_REPLAY")
+        previous_dir = os.environ.get("DESK_DATA_DIR")
+        self.addCleanup(lambda: _put("DESK_REPLAY", previous_replay))
+        self.addCleanup(lambda: _put("DESK_DATA_DIR", previous_dir))
+        os.environ.pop("DESK_REPLAY", None)
+        with self.assertRaises(SystemExit):
+            replay.guard()
+        os.environ["DESK_REPLAY"] = "1"
+        os.environ["DESK_DATA_DIR"] = "/var/data"
+        with self.assertRaises(SystemExit):
+            replay.guard()
+        os.environ["DESK_DATA_DIR"] = "/tmp/production-data"
+        with self.assertRaises(SystemExit):
+            replay.guard()
+        os.environ["DESK_DATA_DIR"] = "/tmp/replay-step13"
+        self.assertEqual(replay.guard().name, "replay-step13")
+
+    def test_prepare_forces_paper_and_does_not_enable_agents(self):
+        import replay
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        db.set_setting("mode", "LIVE", "test")
+        db.set_setting("agents_enabled", "1", "test")
+        replay.prepare()
+        self.assertEqual(db.get_setting("mode"), "PAPER")
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
+
+    def test_notify_off_records_activity_without_calling_webpush(self):
+        from notifier import Notifier
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        previous = os.environ.get("DESK_NOTIFY")
+        os.environ["DESK_NOTIFY"] = "0"
+        self.addCleanup(lambda: _put("DESK_NOTIFY", previous))
+        called = {"n": 0}
+
+        def boom(*_args, **_kwargs):
+            called["n"] += 1
+
+        import webpush
+        original = webpush.deliver
+        webpush.deliver = boom
+        self.addCleanup(lambda: setattr(webpush, "deliver", original))
+        Notifier(mode="PAPER").push(
+            "Buy FIX", "body", links.coin_url(MINT, "solana"),
+            [{"label": "Buy on FOMO", "url": links.coin_url(MINT, "solana")}],
+        )
+        self.assertEqual(called["n"], 0)
+        self.assertTrue(db.query("SELECT id FROM activity"))
+
+
+def _put(key, value):
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value

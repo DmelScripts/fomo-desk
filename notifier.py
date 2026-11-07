@@ -73,7 +73,14 @@ class Notifier:
 
 
 def _fanout(line: str, url) -> None:
-    """Hand the already-built URL to web push. Failures stay out of the activity row."""
+    """Hand the already-built URL to web push. Failures stay out of the activity row.
+
+    DESK_NOTIFY=0 records the activity row and does not call the push service.
+    The production service does not set that variable.
+    """
+    import os
+    if os.environ.get("DESK_NOTIFY") == "0":
+        return
     try:
         import webpush
         webpush.deliver(line, None if url is None else str(url))

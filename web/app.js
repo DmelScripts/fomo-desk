@@ -1440,6 +1440,9 @@
     loadAll().then(function () {
       connectStream();
       readRoute();
+    }).catch(function (error) {
+      if (error && error.auth) return;
+      armRetry();
     });
   }
 
