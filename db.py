@@ -232,7 +232,11 @@ CREATE TABLE IF NOT EXISTS phantom_reservations (
     fx_at REAL,
     result_json TEXT,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    realized_pnl TEXT,
+    entry_price TEXT,
+    exit_price TEXT,
+    mark_price TEXT
 );
 
 CREATE TABLE IF NOT EXISTS phantom_alerts (
@@ -394,6 +398,17 @@ def init_db() -> None:
                 (now,),
             )
             conn.execute("PRAGMA user_version=10")
+        if version < 11:
+            have = {row[1] for row in conn.execute("PRAGMA table_info(phantom_reservations)")}
+            for column, ddl in (
+                ("realized_pnl", "ALTER TABLE phantom_reservations ADD COLUMN realized_pnl TEXT"),
+                ("entry_price", "ALTER TABLE phantom_reservations ADD COLUMN entry_price TEXT"),
+                ("exit_price", "ALTER TABLE phantom_reservations ADD COLUMN exit_price TEXT"),
+                ("mark_price", "ALTER TABLE phantom_reservations ADD COLUMN mark_price TEXT"),
+            ):
+                if column not in have:
+                    conn.execute(ddl)
+            conn.execute("PRAGMA user_version=11")
         conn.commit()
     finally:
         conn.close()

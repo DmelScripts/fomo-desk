@@ -60,6 +60,7 @@ TABLES = {
         "intent_id", "status", "wallet_id", "wallet", "chain", "pair_json",
         "amount_usd", "fee_usd", "reserved_usd", "slippage", "entry_quote_id",
         "exit_quote_id", "fx_sol_usd", "fx_at", "result_json", "created_at", "updated_at",
+        "realized_pnl", "entry_price", "exit_price", "mark_price",
     ),
     "phantom_alerts": ("id", "ts", "kind", "detail"),
 }
@@ -154,7 +155,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

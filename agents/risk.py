@@ -216,6 +216,12 @@ class Risk:
             "pnlUsd": pnl, "pct": pct, "feesUsd": fee, "stopPct": state["stop_pct"],
             "mode": mode, "status": status, "link": url,
         })
+        if mode == "PAPER" and status == "closed":
+            try:
+                import phantom_runner
+                phantom_runner.on_scheduled_exit(outcome)
+            except Exception:
+                log.warning("phantom paper exit did not run")
         return outcome
 
     def _remind(self, row, state, now, url, name) -> None:

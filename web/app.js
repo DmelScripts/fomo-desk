@@ -717,7 +717,7 @@
     node.appendChild(el("p", "Transport " + (row.transport || "BLOCKED") + " · " + (row.auth || "AWAITING_OWNER_AUTH_PROCEDURE")));
     node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
     node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
-    node.appendChild(el("p", "Scanner, auditor, and Jev signals do not start an order. Exits are not scheduled from here.", "muted"));
+    node.appendChild(el("p", "A qualified buy can open an $8 paper allocation. A risk exit closes it. Unrealized marks are not spendable. Available $" + (row.available_usd || "100.00") + " · realized $" + (row.realized_pnl || "0.00") + ".", "muted"));
   }
 
   function renderQuotes() {

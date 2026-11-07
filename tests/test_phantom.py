@@ -1,4 +1,6 @@
 """PAPER Phantom runner. No login, no send, no LIVE unlock."""
+import asyncio
+import json
 import os
 import threading
 import time
@@ -93,9 +95,10 @@ class TestPhantomRunner(unittest.TestCase):
         self.assertFalse(account["phantom"]["fomo_bump_applies"])
         self.assertFalse(account["phantom"]["live_ready"])
         self.assertEqual(account["phantom"]["transport"], "BLOCKED")
-        self.assertFalse(account["phantom"]["signals_connected"])
-        self.assertFalse(account["phantom"]["scheduled_exits_connected"])
-        self.assertEqual(account["phantom"]["intake"], "manual")
+        self.assertTrue(account["phantom"]["signals_connected"])
+        self.assertTrue(account["phantom"]["scheduled_exits_connected"])
+        self.assertEqual(account["phantom"]["intake"], "qualified_signal")
+        self.assertFalse(account["phantom"]["unrealized_spendable"])
         self.assertEqual(account["mode"], "PAPER")
         self.assertEqual(db.get_setting("paper_start_stack"), "200")
         self.assertEqual(db.get_setting("min_ticket_usd"), "47.50")
@@ -263,14 +266,28 @@ class TestPhantomRunner(unittest.TestCase):
     def test_agents_do_not_feed_the_phantom_runner(self):
         root = Path(__file__).resolve().parents[1]
         for name in (
-            "agents/scanner.py", "agents/auditor.py", "agents/executor.py", "agents/risk.py",
+            "agents/scanner.py", "agents/auditor.py", "agents/analyst.py",
             "main.py", "server.py", "report.py", "health.py", "notifier.py", "replay.py",
         ):
             text = (root / name).read_text(encoding="utf-8")
             self.assertNotIn("phantom_runner", text, name)
-            self.assertNotIn("run_intent", text, name)
-        self.assertFalse(phantom_runner.public_status()["signals_connected"])
-        self.assertFalse(phantom_runner.public_status()["scheduled_exits_connected"])
+        self.assertIn("on_qualified_signal", (root / "agents" / "executor.py").read_text(encoding="utf-8"))
+        self.assertIn("on_scheduled_exit", (root / "agents" / "risk.py").read_text(encoding="utf-8"))
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
+        self.assertTrue(phantom_runner.public_status()["signals_connected"])
+        skipped = self._intent("skip-me")
+        skipped["price"] = None
+        from agents.executor import Executor
+        from bus import Desk
+        from notifier import Notifier
+        executor = Executor(Desk(http=None, notifier=Notifier(mode="PAPER")))
+        result = asyncio.run(executor.handle({
+            "mint": "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn",
+            "symbol": "LABS",
+            "liquidity_usd": 50000,
+        }))
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations"), [])
 
     def test_same_intent_is_single_flight(self):
         results = []
@@ -302,6 +319,98 @@ class TestPhantomRunner(unittest.TestCase):
             "fee_usd": fee,
         }
 
+
+    def test_qualified_signal_and_risk_exit_use_the_separate_allocation(self):
+        from agents.executor import Executor
+        from agents.risk import Risk
+        from bus import Desk
+        from notifier import Notifier
+        mint = "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn"
+        desk = Desk(http=None, notifier=Notifier(mode="PAPER"))
+        entered = asyncio.run(Executor(desk).handle({
+            "mint": mint,
+            "symbol": "LABS",
+            "price": 1,
+            "liquidity_usd": 100000,
+            "sol_usd": "150.00",
+            "fx_at": time.time(),
+            "phantom_fee_usd": "0.20",
+        }))
+        self.assertEqual(entered["sizeUsd"], 47.50)
+        self.assertEqual(entered["status"], "bought")
+        phantom = db.query("SELECT * FROM phantom_reservations WHERE intent_id = ?", ("sig-" + mint,))[0]
+        self.assertEqual(phantom["status"], "sim_open")
+        self.assertEqual(phantom["amount_usd"], "8.00")
+        self.assertEqual(db.get_setting("paper_start_stack"), "200")
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
+        self.assertEqual(db.get_setting("min_ticket_usd"), "47.50")
+        books = phantom_runner.allocation()
+        self.assertEqual(books["open_hold_usd"], "8.20")
+        self.assertEqual(books["available_usd"], "91.80")
+        self.assertEqual(books["unrealized_pnl"], "0.00")
+        marked = phantom_runner.mark_open("sig-" + mint, "2")
+        self.assertEqual(marked["unrealized_pnl"], "8.00")
+        self.assertEqual(marked["available_usd"], "91.80")
+        row = db.query("SELECT * FROM positions WHERE mint = ?", (mint,))[0]
+        held = Risk(desk).poll_position(dict(row), time.time(), price=1)
+        self.assertEqual(held["action"], "hold")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = ?", ("sig-" + mint,))[0]["status"], "sim_open")
+        stopped = Risk(desk).poll_position(dict(db.query("SELECT * FROM positions WHERE mint = ?", (mint,))[0]), time.time(), price=0.5)
+        self.assertEqual(stopped["action"], "stop")
+        closed = db.query("SELECT * FROM phantom_reservations WHERE intent_id = ?", ("sig-" + mint,))[0]
+        self.assertEqual(closed["status"], "sim_closed")
+        self.assertEqual(closed["realized_pnl"], "-4.20")
+        saved = json.loads(closed["result_json"])
+        self.assertEqual(saved["entry_fee_usd"], "0.10")
+        self.assertEqual(saved["exit_fee_usd"], "0.10")
+        self.assertEqual(saved["provider"], "synthetic_paper")
+        self.assertFalse(saved["live_capable"])
+        self.assertEqual(saved["fill"], "simulated")
+        after = phantom_runner.allocation()
+        self.assertEqual(after["available_usd"], "95.80")
+        self.assertEqual(after["realized_pnl"], "-4.20")
+        self.assertEqual(db.get_setting("paper_start_stack"), "200")
+        fomo = db.query("SELECT size_usd, pnl_usd FROM positions WHERE mint = ?", (mint,))[0]
+        self.assertEqual(fomo["size_usd"], 47.50)
+        self.assertNotEqual(fomo["pnl_usd"], -4.20)
+        db.init_db()
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+        again = phantom_runner.on_qualified_signal({
+            "qualified": True, "mint": mint, "price": 1, "sol_usd": "150.00", "fx_at": time.time(),
+        })
+        self.assertEqual(again["status"], "sim_closed")
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+
+    def test_losing_round_trip_is_not_refilled_from_the_paper_wallet(self):
+        lost = phantom_runner.run_intent(self._intent("loss"), prices={"entry": "1", "exit": "0.5"})
+        self.assertEqual(lost["realized_pnl"], "-4.20")
+        self.assertEqual(lost["entry_fee_usd"], "0.10")
+        self.assertEqual(lost["exit_fee_usd"], "0.10")
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM positions")[0]["n"], 0)
+        self.assertEqual(db.get_setting("paper_start_stack"), "200")
+        db.init_db()
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+        phantom_runner.run_intent(self._intent("loss"), prices={"entry": "1", "exit": "2"})
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+        now = time.time()
+        db.execute(
+            """
+            INSERT INTO phantom_reservations (
+                intent_id, status, wallet_id, wallet, chain, pair_json, amount_usd, fee_usd,
+                reserved_usd, slippage, entry_quote_id, exit_quote_id, fx_sol_usd, fx_at,
+                result_json, created_at, updated_at
+            ) VALUES ('held-unknown', 'submit_unknown', ?, ?, 'solana:mainnet', '{}', '8.00', '0.20',
+                      '40.00', 1, NULL, NULL, '150.00', ?, NULL, ?, ?)
+            """,
+            (WALLET_ID, WALLET, now, now, now),
+        )
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "55.80")
+        blocked = phantom_runner.run_intent(self._intent("needs-room", fee="50.00"))
+        self.assertEqual(blocked["reason"], "bankroll")
+        phantom_runner.reconcile_unknown({"intent_id": "held-unknown"})
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'held-unknown'")[0]["status"], "released")
 
 class ExitBlocked(phantom_runner.PaperRuntime):
     def quote(self, spec):

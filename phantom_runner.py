@@ -50,10 +50,12 @@ def public_status() -> dict:
         "size_usd": "8.00",
         "fomo_bump_applies": False,
         "loss_policy": "not_approved",
-        "intake": "manual",
-        "signals_connected": False,
-        "scheduled_exits_connected": False,
+        "intake": "qualified_signal",
+        "signals_connected": True,
+        "scheduled_exits_connected": True,
+        "signals_follow_existing_filters": True,
         "halted": halted(),
+        **allocation(),
         "required_wallet_id": phantom_transport.REQUIRED_WALLET_ID,
         "required_wallet": phantom_transport.REQUIRED_WALLET,
         "alerts": _alerts(),
@@ -75,18 +77,22 @@ def set_halt(body: dict) -> dict:
     return public_status()
 
 
-def run_intent(body: dict, runtime=None) -> dict:
+def run_intent(body: dict, runtime=None, cycle: str = "round_trip", prices: dict | None = None) -> dict:
     _reject_tree(body)
     if not isinstance(body, dict) or set(body) != _KEYS:
         raise HTTPException(status_code=400, detail="unexpected field")
     if db.get_setting("mode", "PAPER") != "PAPER":
         raise HTTPException(status_code=409, detail="LIVE locked")
-    spec = _spec(body)
+    intent_id = body.get("intent_id")
     rows = db.query(
         "SELECT status FROM phantom_reservations WHERE intent_id = ?",
-        (spec["intent_id"],),
+        (intent_id,),
     )
     status = rows[0]["status"] if rows else None
+    spec = _spec(body, resume=status in {"sim_open", "submit_unknown", "reserved", "quoted"})
+    spec["cycle"] = cycle
+    spec["entry_price"] = str((prices or {}).get("entry") or "1")
+    spec["exit_price"] = str((prices or {}).get("exit") or spec["entry_price"])
     chosen = runtime or _runtime()
     paper = getattr(chosen, "name", "") == "paper_simulation"
     if status in _DONE or status == "submit_unknown":
@@ -157,6 +163,10 @@ class PaperRuntime:
             "amount_usd": spec["amount_usd"],
             "fee_usd": spec["fee_usd"],
             "slippage": spec["slippage"],
+            "entry_price": spec.get("entry_price") or "1",
+            "exit_price": spec.get("exit_price") or spec.get("entry_price") or "1",
+            "provider": "synthetic_paper",
+            "live_capable": False,
         }
 
 
@@ -175,7 +185,11 @@ def _drive(conn, spec: dict, runtime) -> dict:
                 "amount_usd": row["amount_usd"],
                 "fee_usd": row["fee_usd"],
                 "reserved": row["reserved_usd"],
+                "entry_price": row["entry_price"] or spec.get("entry_price") or "1",
             }
+            if spec.get("cycle") == "entry":
+                stored = json.loads(row["result_json"]) if row["result_json"] else _result(row, "sim_open", "entered")
+                return stored
             return _exit(conn, spec, runtime, row)
         if row["status"] == "reserved":
             return _enter(conn, spec, runtime)
@@ -197,8 +211,20 @@ def _enter(conn, spec: dict, runtime) -> dict:
         result["provider_expiry_unknown"] = bool(quote.get("provider_expiry_unknown"))
         _save(conn, spec["intent_id"], "released", "0.00", quote.get("quote_id"), None, result)
         return result
-    _save(conn, spec["intent_id"], "sim_open", spec["reserved"], quote["quote_id"], None, None)
+    _save(conn, spec["intent_id"], "sim_open", spec["reserved"], quote["quote_id"], None, None, entry_price=spec.get("entry_price") or "1", mark_price=spec.get("entry_price") or "1")
     row = _row(conn, spec["intent_id"])
+    if spec.get("cycle") == "entry":
+        entry_fee, exit_fee = _fee_split(spec["fee_usd"])
+        result = _result(row, "sim_open", "entered")
+        result["entry_quote_id"] = quote["quote_id"]
+        result["entry_fee_usd"] = _text(entry_fee)
+        result["exit_fee_usd"] = _text(exit_fee)
+        result["entry_price"] = spec.get("entry_price") or "1"
+        result["provider"] = "synthetic_paper"
+        result["live_capable"] = False
+        result["fill"] = None
+        _save(conn, spec["intent_id"], "sim_open", spec["reserved"], quote["quote_id"], None, result, entry_price=result["entry_price"], mark_price=result["entry_price"])
+        return result
     return _exit(conn, spec, runtime, row)
 
 
@@ -211,12 +237,29 @@ def _exit(conn, spec: dict, runtime, row) -> dict:
         result["resubmit"] = False
         _save(conn, spec["intent_id"], "sim_open", spec["reserved"], entry_id, None, result)
         return result
+    entry_price = Decimal(spec.get("entry_price") or "1")
+    exit_price = Decimal(str(quote.get("exit_price") or spec.get("exit_price") or entry_price))
+    entry_fee, exit_fee = _fee_split(spec["fee_usd"])
+    notional = Decimal(spec["amount_usd"])
+    proceeds = notional * exit_price / entry_price
+    realized = proceeds - notional - entry_fee - exit_fee
     result = _result_new(spec, "sim_closed", "simulated_fill")
     result["entry_quote_id"] = entry_id
     result["exit_quote_id"] = quote["quote_id"]
     result["reconciled"] = True
     result["fill"] = "simulated"
-    _save(conn, spec["intent_id"], "sim_closed", "0.00", entry_id, quote["quote_id"], result)
+    result["provider"] = "synthetic_paper"
+    result["live_capable"] = False
+    result["entry_price"] = _text(entry_price)
+    result["exit_price"] = _text(exit_price)
+    result["entry_fee_usd"] = _text(entry_fee)
+    result["exit_fee_usd"] = _text(exit_fee)
+    result["realized_pnl"] = _text(realized)
+    _save(
+        conn, spec["intent_id"], "sim_closed", "0.00", entry_id, quote["quote_id"], result,
+        realized=_text(realized), entry_price=_text(entry_price), exit_price=_text(exit_price),
+        mark_price=_text(exit_price),
+    )
     return result
 
 
@@ -249,9 +292,9 @@ def _gate(quote: dict, spec: dict) -> tuple[bool, str]:
     return True, "paper_sim"
 
 
-def _spec(body: dict) -> dict:
+def _spec(body: dict, resume: bool = False) -> dict:
     intent_id = body.get("intent_id")
-    if not isinstance(intent_id, str) or not intent_id or len(intent_id) > 40:
+    if not isinstance(intent_id, str) or not intent_id or len(intent_id) > 80:
         raise HTTPException(status_code=400, detail="intent id is not usable")
     if body.get("wallet_id") != phantom_transport.REQUIRED_WALLET_ID:
         raise HTTPException(status_code=400, detail="wallet id is not bound")
@@ -269,8 +312,11 @@ def _spec(body: dict) -> dict:
     sol_usd = _money(body.get("sol_usd"), "fx")
     fx_at = body.get("fx_at")
     now = time.time()
-    if isinstance(fx_at, bool) or not isinstance(fx_at, (int, float)) or not now - FX_MAX_AGE_S <= float(fx_at) <= now + 5:
+    fx_ok = not isinstance(fx_at, bool) and isinstance(fx_at, (int, float)) and now - FX_MAX_AGE_S <= float(fx_at) <= now + 5
+    if not resume and not fx_ok:
         raise HTTPException(status_code=400, detail="fx quote is missing or stale")
+    if resume and (isinstance(fx_at, bool) or not isinstance(fx_at, (int, float))):
+        fx_at = now
     fee = _money(body.get("fee_usd"), "fee")
     reserved = SIZE + fee
     return {
@@ -303,18 +349,126 @@ def _money(value, label: str) -> Decimal:
 
 
 def _over(conn, reserved: str) -> bool:
-    return _used(conn) + Decimal(reserved) > BANKROLL
+    return _charges(conn) + Decimal(reserved) > BANKROLL
 
 
-def _used(conn) -> Decimal:
-    rows = conn.execute("SELECT status, reserved_usd, fee_usd FROM phantom_reservations").fetchall()
+def _charges(conn) -> Decimal:
+    rows = conn.execute(
+        "SELECT status, reserved_usd, realized_pnl FROM phantom_reservations"
+    ).fetchall()
     total = Decimal("0")
     for row in rows:
         if row["status"] in _OPEN:
             total += Decimal(row["reserved_usd"] or "0")
-        elif row["status"] == "sim_closed":
-            total += Decimal(row["fee_usd"] or "0")
+        elif row["status"] == "sim_closed" and row["realized_pnl"] is not None:
+            total -= Decimal(row["realized_pnl"])
     return total
+
+
+def allocation() -> dict:
+    rows = db.query("SELECT status, reserved_usd, realized_pnl, amount_usd, entry_price, mark_price FROM phantom_reservations")
+    realized = Decimal("0")
+    open_hold = Decimal("0")
+    unrealized = Decimal("0")
+    for row in rows:
+        if row["status"] in _OPEN:
+            open_hold += Decimal(row["reserved_usd"] or "0")
+            if row["entry_price"] and row["mark_price"]:
+                unrealized += Decimal(row["amount_usd"] or "0") * (Decimal(row["mark_price"]) / Decimal(row["entry_price"]) - 1)
+        elif row["status"] == "sim_closed" and row["realized_pnl"] is not None:
+            realized += Decimal(row["realized_pnl"])
+    available = BANKROLL + realized - open_hold
+    return {
+        "available_usd": _text(available),
+        "realized_pnl": _text(realized),
+        "open_hold_usd": _text(open_hold),
+        "unrealized_pnl": _text(unrealized),
+        "unrealized_spendable": False,
+    }
+
+
+def mark_open(intent_id: str, mark_price: str) -> dict:
+    price = _money(mark_price, "mark")
+    db.execute(
+        "UPDATE phantom_reservations SET mark_price = ? WHERE intent_id = ? AND status = 'sim_open'",
+        (_text(price), intent_id),
+    )
+    return allocation()
+
+
+def on_qualified_signal(payload: dict) -> dict:
+    """A buy the existing executor already qualified. This does not loosen filters."""
+    try:
+        if not isinstance(payload, dict) or payload.get("qualified") is not True:
+            return _stopped("skipped", "not_qualified")
+        if db.get_setting("mode", "PAPER") != "PAPER":
+            return _stopped("skipped", "not_paper")
+        mint = payload.get("mint")
+        price = payload.get("price")
+        if not isinstance(mint, str) or not mint:
+            return _stopped("rejected", "not_qualified")
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or float(price) <= 0:
+            return _stopped("rejected", "not_qualified")
+        if not isinstance(payload.get("sol_usd"), str) or isinstance(payload.get("fx_at"), bool) or not isinstance(payload.get("fx_at"), (int, float)):
+            return _stopped("rejected", "fx quote is missing or stale")
+        fee = payload.get("phantom_fee_usd") if isinstance(payload.get("phantom_fee_usd"), str) else "0.20"
+        body = {
+            "intent_id": "sig-" + mint,
+            "wallet_id": phantom_transport.REQUIRED_WALLET_ID,
+            "wallet": phantom_transport.REQUIRED_WALLET,
+            "chain": "solana:mainnet",
+            "sell_native": True,
+            "buy_mint": USDC,
+            "slippage": 1,
+            "sol_usd": payload["sol_usd"],
+            "fx_at": payload["fx_at"],
+            "quote_source": "paper",
+            "fee_usd": fee,
+        }
+        text = _text(Decimal(str(price)))
+        return run_intent(body, cycle="entry", prices={"entry": text, "exit": text})
+    except HTTPException as exc:
+        return _stopped("rejected", str(exc.detail))
+    except Exception:
+        return _stopped("rejected", "phantom_entry_failed")
+
+
+def on_scheduled_exit(outcome: dict) -> dict:
+    """A PAPER exit the risk agent already decided. This does not invent a stop."""
+    try:
+        if not isinstance(outcome, dict) or str(outcome.get("mode") or "").upper() != "PAPER":
+            return _stopped("skipped", "not_paper")
+        if outcome.get("status") != "closed":
+            return _stopped("skipped", "not_an_exit")
+        mint = outcome.get("mint")
+        if not isinstance(mint, str) or not mint:
+            return _stopped("skipped", "not_an_exit")
+        intent_id = "sig-" + mint
+        rows = db.query("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,))
+        if not rows or rows[0]["status"] != "sim_open":
+            return _stopped("no_phantom_position", "no open allocation")
+        row = rows[0]
+        exit_price = outcome.get("exitPrice", outcome.get("exit_price"))
+        if isinstance(exit_price, bool) or not isinstance(exit_price, (int, float, str)) or Decimal(str(exit_price)) <= 0:
+            return _stopped("sim_open", "exit price missing")
+        body = {
+            "intent_id": intent_id,
+            "wallet_id": row["wallet_id"],
+            "wallet": row["wallet"],
+            "chain": row["chain"],
+            "sell_native": True,
+            "buy_mint": USDC,
+            "slippage": row["slippage"],
+            "sol_usd": row["fx_sol_usd"],
+            "fx_at": time.time(),
+            "quote_source": "paper",
+            "fee_usd": row["fee_usd"],
+        }
+        return run_intent(body, cycle="exit", prices={"entry": row["entry_price"] or "1", "exit": str(exit_price)})
+    except HTTPException as exc:
+        return _stopped("sim_open", str(exc.detail))
+    except Exception:
+        return _stopped("sim_open", "phantom_exit_failed")
 
 
 def _observed_quote() -> dict:
@@ -350,19 +504,32 @@ def _insert(conn, spec: dict, status: str, reserved: str, result) -> None:
     )
 
 
-def _save(conn, intent_id: str, status: str, reserved: str, entry, exit_id, result) -> None:
+def _save(conn, intent_id: str, status: str, reserved: str, entry, exit_id, result, realized=None, entry_price=None, exit_price=None, mark_price=None) -> None:
     conn.execute(
         """
         UPDATE phantom_reservations
         SET status = ?, reserved_usd = ?, entry_quote_id = ?, exit_quote_id = ?,
-            result_json = ?, updated_at = ?
+            result_json = ?, realized_pnl = COALESCE(?, realized_pnl),
+            entry_price = COALESCE(?, entry_price), exit_price = COALESCE(?, exit_price),
+            mark_price = COALESCE(?, mark_price), updated_at = ?
         WHERE intent_id = ?
         """,
         (
             status, reserved, entry, exit_id,
-            json.dumps(result) if result is not None else None, time.time(), intent_id,
+            json.dumps(result) if result is not None else None, realized,
+            entry_price, exit_price, mark_price, time.time(), intent_id,
         ),
     )
+
+
+def _fee_split(total: str) -> tuple[Decimal, Decimal]:
+    fee = Decimal(total)
+    entry_fee = (fee / 2).quantize(Decimal("0.01"))
+    return entry_fee, fee - entry_fee
+
+
+def _text(number: Decimal) -> str:
+    return format(number.quantize(Decimal("0.01")), "f")
 
 
 def _row(conn, intent_id: str):

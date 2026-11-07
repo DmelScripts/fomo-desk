@@ -344,6 +344,19 @@ class Executor:
         else:
             self.pending[mint] = {"at": now, "price": float(fresh_price), "size": size, "name": name, "pct": pct}
             status = "sent"
+        if mode == "PAPER" and status == "bought":
+            try:
+                import phantom_runner
+                phantom_runner.on_qualified_signal({
+                    "qualified": True,
+                    "mint": mint,
+                    "price": float(fresh_price),
+                    "sol_usd": payload.get("sol_usd"),
+                    "fx_at": payload.get("fx_at"),
+                    "phantom_fee_usd": payload.get("phantom_fee_usd"),
+                })
+            except Exception:
+                log.warning("phantom paper entry did not run")
         log.info("mint=%s stack=%s raw=%s final=%s mode=%s status=%s link=%s", mint, stack, stack * db.get_float("stack_pct") / 100, size, mode, status, url)
         result = {
             "agent": "executor",
