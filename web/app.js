@@ -718,6 +718,10 @@
     node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
     node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
     node.appendChild(el("p", "A read-only quote is not execution. Execution transport is not implemented.", "muted"));
+    var exitPolicy = row.exit_policy || {};
+    node.appendChild(el("p", exitPolicy.effective
+      ? "Exit rules for the $100 allocation are approved. They are not a loss limit and LIVE stays off."
+      : "Exit rules are not in force. LIVE stays off.", "muted"));
     node.appendChild(el("p", "A qualified buy can open an $8 paper allocation. A risk exit closes it. Unrealized marks are not spendable. Available $" + (row.available_usd || "100.00") + " · realized $" + (row.realized_pnl || "0.00") + ".", "muted"));
     var login = state.phantomLogin || {};
     if (login.approval_url) {

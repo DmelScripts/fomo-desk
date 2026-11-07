@@ -1043,6 +1043,28 @@ def phantom_balance(request: Request, body: dict | None = None) -> JSONResponse:
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/phantom/exit-policy")
+def phantom_exit_policy_view(request: Request) -> JSONResponse:
+    """Read the exact exit-rule approval. It does not enable LIVE."""
+    require_app_token(request)
+    from exit_policy import view
+    return JSONResponse(view(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/exit-policy")
+def phantom_exit_policy_set(request: Request, body: dict | None = None) -> JSONResponse:
+    """Approve or revoke only the stated exit rules. Thresholds are not editable here."""
+    require_app_token(request)
+    if not isinstance(body, dict) or set(body) != {"approved"} or not isinstance(body.get("approved"), bool):
+        raise HTTPException(status_code=400, detail="approved must be a boolean")
+    from exit_policy import set_approval
+    try:
+        result = set_approval(body["approved"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/phantom/quote")
 def phantom_quote_check(request: Request, body: dict | None = None) -> JSONResponse:
     """Request one execute:false quote. The result cannot be sent."""

@@ -37,6 +37,8 @@ _BLOCKED = {
 
 def public_status() -> dict:
     auth = _auth_view()
+    from exit_policy import view as exit_view
+    from execution_stage import status as execution_status
     return {
         "authority": "PAPER",
         "live_ready": False,
@@ -55,6 +57,8 @@ def public_status() -> dict:
         "size_usd": "8.00",
         "fomo_bump_applies": False,
         "loss_policy": "not_approved",
+        "exit_policy": exit_view(),
+        "execution_stage": execution_status(),
         "intake": "qualified_signal",
         "signals_connected": True,
         "scheduled_exits_connected": True,
