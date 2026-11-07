@@ -30,6 +30,8 @@ MAINNET_RPC = "https://api.mainnet-beta.solana.com"
 MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 _COMMITMENTS = {"confirmed", "finalized"}
 _MAX_LAMPORTS = 10_000_000
+_MAX_RENT_ACCOUNTS = 2
+_MAX_RENT = solana_tx.TOKEN_ACCOUNT_RENT * _MAX_RENT_ACCOUNTS
 # https://web3.okx.com/onchainos/dev-docs/trade/dex-smart-contract
 OKX_DEX_ROUTER = "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u"
 _MIN_HEAP = 32 * 1024
@@ -84,7 +86,7 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         decoded = solana_tx.decode_transaction(raw)
         keys = _resolve(decoded, rpc, commitment)
         program_ids, findings = _programs(decoded, keys, rpc, commitment)
-        debited = None if findings else _debits(decoded, keys)
+        debited, rent = _debits(decoded, keys)
     except GateError as exc:
         return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag, exc.observed_mint, exc.observed_owner)
     except (ValueError, RpcError) as exc:
@@ -93,7 +95,9 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         findings.append(GateError("an extra signer is required", "extra_signer", program_ids))
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
         findings.append(GateError("fee payer is not the allowlisted wallet", "wallet_unbound", program_ids))
-    if not findings and (debited is None or debited > max_lamports):
+    if rent > _MAX_RENT:
+        findings.append(GateError("rent is outside the documented token-account bound", "rent_unbound", program_ids))
+    if debited is None or debited > max_lamports:
         findings.append(GateError("debit is not bound", "amount_unbound", program_ids))
     if findings:
         return _aggregate(findings, program_ids)
@@ -143,6 +147,8 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "blockhash_status": "checked",
         "simulation_status": "checked",
         "debited_lamports": debited,
+        "swap_lamports": debited,
+        "rent_lamports": rent,
         "program_ids": sorted({item.program_id for item in decoded.instructions}),
         "quoted_out_amount": quoted_out,
         "slippage_bps": slippage_bps,
@@ -426,7 +432,7 @@ def _check_system(index: int, instruction: solana_tx.Instruction, keys: list[str
         return
     created = solana_tx.system_create(instruction.data)
     if created is not None:
-        _lamports, owner = created
+        _lamports, _space, owner = created
         if owner not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
             raise GateError(
                 f"system instruction {index} tag 0 owner is not the token program",
@@ -550,8 +556,16 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
     )
 
 
-def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
-    total = 0
+def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> tuple[int | None, int]:
+    """Split the wallet's SOL into the swap principal and recognized token-account rent.
+
+    A 165-byte token-program create contributes at most one default rent-exempt
+    balance to rent. Lamports above that, transfers, and native TransferChecked
+    amounts stay in the swap principal. Rent is not added to the 0.01 SOL cap.
+    """
+    swap = 0
+    rent = 0
+    rent_accounts = 0
     found = False
     for instruction in decoded.instructions:
         if instruction.program_id == solana_tx.SYSTEM_PROGRAM:
@@ -561,11 +575,24 @@ def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
             if source != phantom_transport.REQUIRED_WALLET:
                 continue
             if lamports is not None:
-                total += lamports
+                swap += lamports
                 found = True
             elif created is not None:
-                total += created[0]
-                found = True
+                created_lamports, space, owner = created
+                recognized = (
+                    owner in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}
+                    and space == solana_tx.TOKEN_ACCOUNT_SPACE
+                )
+                if recognized:
+                    rent_accounts += 1
+                    rent_part = min(created_lamports, solana_tx.TOKEN_ACCOUNT_RENT)
+                    rent += rent_part
+                    if created_lamports > rent_part:
+                        swap += created_lamports - rent_part
+                        found = True
+                else:
+                    swap += created_lamports
+                    found = True
         if instruction.program_id in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
             parsed = solana_tx.transfer_checked(instruction.data)
             if parsed is None or len(instruction.account_indexes) < 4:
@@ -573,11 +600,13 @@ def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
             mint = keys[instruction.account_indexes[1]]
             owner = keys[instruction.account_indexes[3]]
             if owner == phantom_transport.REQUIRED_WALLET and mint == solana_tx.NATIVE_MINT:
-                total += parsed[0]
+                swap += parsed[0]
                 found = True
+    if rent_accounts > _MAX_RENT_ACCOUNTS:
+        rent = _MAX_RENT + 1
     if not found:
-        return None
-    return total
+        return None, rent
+    return swap, rent
 
 
 def _slot(result: dict) -> int:

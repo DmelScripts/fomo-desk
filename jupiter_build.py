@@ -1,0 +1,357 @@
+"""Optional read-only parser for Jupiter's documented Metis /build response.
+
+This is not the production quote path. Phantom buy stays the default and this
+module is not mounted on a route. It does not call Jupiter, an RPC, or a signer.
+A transport can be injected by a test. The pinned request is keyless.
+
+lastValidBlockHeight is chain metadata from blockhashWithMetadata. It is not a
+provider expiry and it is not a freshness guarantee. Dynamic DEX accounts on
+the swap instruction stay unverified.
+"""
+
+from __future__ import annotations
+
+import base64
+from dataclasses import dataclass
+
+import phantom_transport
+import solana_inspect
+import solana_jupiter
+import solana_tx
+
+ENDPOINT = "https://api.jup.ag/swap/v2/build"
+_AMOUNT = "10000000"
+_SLIPPAGE_BPS = 100
+_REQUIRED = {
+    "inputMint", "outputMint", "inAmount", "outAmount", "otherAmountThreshold",
+    "swapMode", "slippageBps", "routePlan", "computeBudgetInstructions",
+    "setupInstructions", "swapInstruction", "cleanupInstruction",
+    "otherInstructions", "tipInstruction", "addressesByLookupTableAddress",
+    "blockhashWithMetadata",
+}
+_OPTIONAL = {"transactionVersion", "computeUnitPrice"}
+_KNOWN_PROGRAMS = solana_tx.ALLOWED_PROGRAMS | {solana_jupiter.PROGRAM_ID}
+
+
+class BuildError(Exception):
+    def __init__(self, reason: str, category: str):
+        self.reason = reason
+        self.category = category
+
+
+@dataclass
+class _Ix:
+    program_id: str
+    accounts: list[tuple[str, bool, bool]]
+    data: bytes
+
+
+def pinned_request() -> dict:
+    """The only request this adapter is allowed to describe. Nothing is sent."""
+    query = (
+        f"inputMint={solana_tx.NATIVE_MINT}"
+        f"&outputMint={solana_tx.USDC_MINT}"
+        f"&amount={_AMOUNT}"
+        f"&taker={phantom_transport.REQUIRED_WALLET}"
+        f"&slippageBps={_SLIPPAGE_BPS}"
+    )
+    return {
+        "method": "GET",
+        "url": f"{ENDPOINT}?{query}",
+        "headers": {"accept": "application/json"},
+        "api_key": None,
+        "network": "not_called",
+    }
+
+
+def exchange(transport) -> dict:
+    """Parse one injected response. A missing transport cannot open the network."""
+    if transport is None:
+        raise BuildError("jupiter build network is not enabled", "network_disabled")
+    request = pinned_request()
+    response = transport(request)
+    status = getattr(response, "status", None)
+    final_url = getattr(response, "url", None)
+    if status in {301, 302, 303, 307, 308} or final_url != request["url"]:
+        raise BuildError("jupiter build response redirected", "redirect")
+    if status != 200 or not isinstance(getattr(response, "body", None), dict):
+        raise BuildError("jupiter build response is not usable", "malformed")
+    return evaluate(response.body, getattr(response, "rpc", None))
+
+
+def evaluate(body: dict, rpc) -> dict:
+    parsed = parse_build(body)
+    transaction = assemble(parsed)
+    if rpc is None:
+        inspected = {
+            "stage": "assembled",
+            "chain_ok": False,
+            "blockhash_status": "not_run",
+            "simulation_status": "not_run",
+            "program_ids": sorted({item.program_id for item in parsed["instructions"]}),
+            "debited_lamports": None,
+            "rent_lamports": None,
+            "slippage_verified": False,
+            "spend_verified": False,
+            "intent_verified": False,
+        }
+    else:
+        inspected = solana_inspect.inspect(transaction, rpc)
+    quoted = inspected.get("quoted_out_amount")
+    if inspected.get("chain_ok") is True and (
+        str(quoted) != parsed["out_amount"] or inspected.get("slippage_bps") != parsed["slippage_bps"]
+    ):
+        inspected = solana_inspect._rejected(
+            "jupiter build amounts do not match the swap instruction",
+            "route_mismatch",
+            inspected.get("program_ids"),
+        )
+    inspected["provider"] = "jupiter_metis_build"
+    inspected["production_provider"] = "phantom"
+    inspected["route_wired"] = False
+    inspected["last_valid_block_height"] = parsed["last_valid_block_height"]
+    inspected["last_valid_block_height_is_provider_expiry"] = False
+    inspected["provider_expiry"] = None
+    inspected["freshness_guarantee"] = False
+    inspected["other_amount_threshold"] = parsed["other_amount_threshold"]
+    inspected["min_output_formula_ok"] = True
+    inspected["min_output_verified"] = False
+    inspected["dex_accounts_verified"] = False
+    inspected["slippage_verified"] = False
+    inspected["spend_verified"] = False
+    inspected["intent_verified"] = False
+    inspected["execution_allowed"] = False
+    inspected["send"] = False
+    inspected["executable"] = False
+    inspected["live_ready"] = False
+    inspected["transaction_returned"] = False
+    return inspected
+
+
+def parse_build(body: dict) -> dict:
+    if not isinstance(body, dict) or set(body) - _OPTIONAL != _REQUIRED:
+        raise BuildError("jupiter build fields are not the documented set", "malformed")
+    version = body.get("transactionVersion", 0)
+    if version not in {0, "0"}:
+        raise BuildError("jupiter build transaction version is not v0", "transaction_version_unsupported")
+    if body.get("inputMint") != solana_tx.NATIVE_MINT or body.get("outputMint") != solana_tx.USDC_MINT:
+        raise BuildError("jupiter build mints are not native SOL to USDC", "route_mismatch")
+    if body.get("inAmount") != _AMOUNT or body.get("swapMode") != "ExactIn":
+        raise BuildError("jupiter build amount is not 0.01 SOL exact in", "amount_mismatch")
+    out_amount = _positive_integer(body.get("outAmount"), "outAmount")
+    threshold = _positive_integer(body.get("otherAmountThreshold"), "otherAmountThreshold")
+    slippage = body.get("slippageBps")
+    if isinstance(slippage, bool) or not isinstance(slippage, int) or not 0 <= slippage <= _SLIPPAGE_BPS:
+        raise BuildError("jupiter build slippage is outside the 1 percent field", "slippage_mismatch")
+    floor = out_amount * (10_000 - slippage) // 10_000
+    if threshold > out_amount or threshold < floor:
+        raise BuildError("jupiter build minimum output does not match the slippage field", "slippage_mismatch")
+    if body.get("tipInstruction") is not None:
+        raise BuildError("jupiter build included a tip", "tip_unbound")
+    _route(body.get("routePlan"))
+    instructions = []
+    for group in (
+        body.get("computeBudgetInstructions"),
+        body.get("setupInstructions"),
+        [body.get("swapInstruction")],
+        [] if body.get("cleanupInstruction") is None else [body.get("cleanupInstruction")],
+        body.get("otherInstructions"),
+    ):
+        if not isinstance(group, list):
+            raise BuildError("jupiter build instructions are malformed", "malformed")
+        instructions.extend(_instruction(item) for item in group)
+    if not any(item.program_id == solana_jupiter.PROGRAM_ID for item in instructions):
+        raise BuildError("jupiter build swap program is not JUP6", "route_mismatch")
+    tables = _tables(body.get("addressesByLookupTableAddress"))
+    blockhash, height = _blockhash(body.get("blockhashWithMetadata"))
+    return {
+        "instructions": instructions,
+        "tables": tables,
+        "blockhash": blockhash,
+        "last_valid_block_height": height,
+        "out_amount": str(out_amount),
+        "other_amount_threshold": str(threshold),
+        "slippage_bps": slippage,
+    }
+
+
+def assemble(parsed: dict) -> str:
+    """Unsigned v0 message. Account order follows web3.js CompiledKeys."""
+    meta: dict[str, dict] = {}
+
+    def touch(key: str) -> dict:
+        item = meta.get(key)
+        if item is None:
+            item = {"signer": False, "writable": False, "invoked": False}
+            meta[key] = item
+        return item
+
+    payer = touch(phantom_transport.REQUIRED_WALLET)
+    payer["signer"] = True
+    payer["writable"] = True
+    for instruction in parsed["instructions"]:
+        touch(instruction.program_id)["invoked"] = True
+        for pubkey, signer, writable in instruction.accounts:
+            if signer and pubkey != phantom_transport.REQUIRED_WALLET:
+                raise BuildError("jupiter build asks for another signer", "wallet_mismatch")
+            item = touch(pubkey)
+            item["signer"] = item["signer"] or signer
+            item["writable"] = item["writable"] or writable
+    lookups = []
+    drained_writable: list[str] = []
+    drained_readonly: list[str] = []
+    for table, addresses in parsed["tables"]:
+        writable = _drain(meta, addresses, lambda item: not item["signer"] and not item["invoked"] and item["writable"])
+        readonly = _drain(meta, addresses, lambda item: not item["signer"] and not item["invoked"] and not item["writable"])
+        if writable[0] or readonly[0]:
+            lookups.append((table, writable[0], readonly[0]))
+            drained_writable.extend(writable[1])
+            drained_readonly.extend(readonly[1])
+    ordered_meta = list(meta.items())
+    writable_signers = [key for key, item in ordered_meta if item["signer"] and item["writable"]]
+    readonly_signers = [key for key, item in ordered_meta if item["signer"] and not item["writable"]]
+    writable_rest = [key for key, item in ordered_meta if not item["signer"] and item["writable"]]
+    readonly_rest = [key for key, item in ordered_meta if not item["signer"] and not item["writable"]]
+    if writable_signers != [phantom_transport.REQUIRED_WALLET] or readonly_signers:
+        raise BuildError("jupiter build fee payer is not the allowlisted wallet", "wallet_mismatch")
+    static = writable_signers + readonly_signers + writable_rest + readonly_rest
+    ordered = static + drained_writable + drained_readonly
+    header = bytes([
+        len(writable_signers) + len(readonly_signers),
+        len(readonly_signers),
+        len(readonly_rest),
+    ])
+    message = bytes([0x80]) + header + _compact(len(static))
+    message += b"".join(solana_tx.b58decode(key) for key in static)
+    message += solana_tx.b58decode(parsed["blockhash"])
+    message += _compact(len(parsed["instructions"]))
+    for instruction in parsed["instructions"]:
+        try:
+            program_index = ordered.index(instruction.program_id)
+            accounts = [ordered.index(pubkey) for pubkey, _signer, _writable in instruction.accounts]
+        except ValueError:
+            raise BuildError("jupiter build account was not compiled", "malformed")
+        message += bytes([program_index]) + _compact(len(accounts)) + bytes(accounts)
+        message += _compact(len(instruction.data)) + instruction.data
+    message += _compact(len(lookups))
+    for table, writable, readonly in lookups:
+        message += solana_tx.b58decode(table) + _compact(len(writable)) + bytes(writable)
+        message += _compact(len(readonly)) + bytes(readonly)
+    raw = bytes([1]) + (b"\x00" * 64) + message
+    if len(raw) > 1232:
+        raise BuildError("jupiter build transaction is too large", "malformed")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _drain(meta: dict, addresses: list[str], predicate) -> tuple[list[int], list[str]]:
+    indexes = []
+    keys = []
+    for key, item in list(meta.items()):
+        if predicate(item) and key in addresses:
+            indexes.append(addresses.index(key))
+            keys.append(key)
+            del meta[key]
+    return indexes, keys
+
+
+def _route(plan) -> None:
+    if not isinstance(plan, list) or not 1 <= len(plan) <= 16:
+        raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+    mints = []
+    for step in plan:
+        if not isinstance(step, dict):
+            raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+        info = step.get("swapInfo")
+        percent = step.get("percent")
+        if not isinstance(info, dict) or isinstance(percent, bool) or not isinstance(percent, int) or not 1 <= percent <= 100:
+            raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+        mints.append((info.get("inputMint"), info.get("outputMint")))
+    if mints[0][0] != solana_tx.NATIVE_MINT or mints[-1][1] != solana_tx.USDC_MINT:
+        raise BuildError("jupiter build route does not sell native SOL for USDC", "route_mismatch")
+
+
+def _instruction(value) -> _Ix:
+    if not isinstance(value, dict):
+        raise BuildError("jupiter build instruction is malformed", "malformed")
+    program_id = value.get("programId")
+    accounts = value.get("accounts")
+    data = value.get("data")
+    if program_id not in _KNOWN_PROGRAMS:
+        raise BuildError("jupiter build program is not a documented route", "unknown_router")
+    if not isinstance(accounts, list) or not isinstance(data, str):
+        raise BuildError("jupiter build instruction is malformed", "malformed")
+    parsed_accounts = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            raise BuildError("jupiter build instruction is malformed", "malformed")
+        pubkey = account.get("pubkey")
+        signer = account.get("isSigner")
+        writable = account.get("isWritable")
+        if not isinstance(pubkey, str) or not isinstance(signer, bool) or not isinstance(writable, bool):
+            raise BuildError("jupiter build instruction is malformed", "malformed")
+        try:
+            solana_tx.b58decode(pubkey)
+        except ValueError:
+            raise BuildError("jupiter build instruction is malformed", "malformed")
+        if signer and pubkey != phantom_transport.REQUIRED_WALLET:
+            raise BuildError("jupiter build asks for another signer", "wallet_mismatch")
+        parsed_accounts.append((pubkey, signer, writable))
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except Exception:
+        raise BuildError("jupiter build instruction is malformed", "malformed")
+    return _Ix(program_id, parsed_accounts, raw)
+
+
+def _tables(value) -> list[tuple[str, list[str]]]:
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        raise BuildError("jupiter build lookup tables are malformed", "malformed")
+    tables = []
+    for table, addresses in value.items():
+        if not isinstance(addresses, list) or len(addresses) > 256:
+            raise BuildError("jupiter build lookup tables are malformed", "malformed")
+        try:
+            solana_tx.b58decode(table)
+            for address in addresses:
+                solana_tx.b58decode(address)
+        except ValueError:
+            raise BuildError("jupiter build lookup tables are malformed", "malformed")
+        tables.append((table, list(addresses)))
+    return tables
+
+
+def _blockhash(value) -> tuple[str, int]:
+    if not isinstance(value, dict):
+        raise BuildError("jupiter build blockhash is malformed", "malformed")
+    raw = value.get("blockhash")
+    height = value.get("lastValidBlockHeight")
+    if not isinstance(raw, list) or len(raw) != 32 or any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 255 for item in raw):
+        raise BuildError("jupiter build blockhash is malformed", "malformed")
+    if isinstance(height, bool) or not isinstance(height, int) or height < 1:
+        raise BuildError("jupiter build blockhash height is malformed", "malformed")
+    return solana_tx.b58encode(bytes(raw)), height
+
+
+def _positive_integer(value, name: str) -> int:
+    if not isinstance(value, str) or not value.isdigit() or value.startswith("0"):
+        raise BuildError(f"jupiter build {name} is malformed", "malformed")
+    number = int(value)
+    if number < 1 or number >= 1 << 64:
+        raise BuildError(f"jupiter build {name} is malformed", "malformed")
+    return number
+
+
+def _compact(value: int) -> bytes:
+    if value < 0 or value > 0xFFFF:
+        raise BuildError("jupiter build transaction is malformed", "malformed")
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)

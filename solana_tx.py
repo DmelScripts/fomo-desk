@@ -168,14 +168,21 @@ def system_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[4:12], "little")
 
 
-def system_create(data: bytes) -> tuple[int, str] | None:
+# Default rent-exempt lamports for one 165-byte token account:
+# (128 + space) * DEFAULT_LAMPORTS_PER_BYTE_YEAR * 2.
+TOKEN_ACCOUNT_SPACE = 165
+TOKEN_ACCOUNT_RENT = (128 + TOKEN_ACCOUNT_SPACE) * (1_000_000_000 // 100 * 365 // (1024 * 1024)) * 2
+
+
+def system_create(data: bytes) -> tuple[int, int, str] | None:
     """System CreateAccount: u32 tag 0, lamports, space, owner pubkey."""
     if len(data) != 52 or int.from_bytes(data[:4], "little") != 0:
         return None
     lamports = int.from_bytes(data[4:12], "little")
+    space = int.from_bytes(data[12:20], "little")
     if lamports >= 1 << 63:
         return None
-    return lamports, b58encode(data[20:52])
+    return lamports, space, b58encode(data[20:52])
 
 
 def transfer_checked(data: bytes) -> tuple[int, int] | None:
