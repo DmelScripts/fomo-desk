@@ -236,6 +236,8 @@ def _preflight(text: str, code: int) -> dict:
     base.update({
         "status": "preflight",
         "slippage_verified": False,
+        "spend_verified": False,
+        "intent_verified": False,
         "provider_expiry": None,
         "freshness_guarantee": False,
         "execution_allowed": False,

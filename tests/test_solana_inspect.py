@@ -8,6 +8,13 @@ import phantom_transport
 import solana_inspect
 import solana_tx
 
+def _native_account() -> bytes:
+    raw = bytearray(165)
+    raw[0:32] = solana_tx.b58decode(solana_tx.NATIVE_MINT)
+    raw[32:64] = solana_tx.b58decode(phantom_transport.REQUIRED_WALLET)
+    return bytes(raw)
+
+
 WALLET = phantom_transport.REQUIRED_WALLET
 BLOCK = solana_tx.b58encode(b"\x11" * 32)
 DEST = solana_tx.b58encode(b"\x22" * 32)
@@ -35,7 +42,9 @@ class FakeRpc:
                 raise AssertionError("simulation replaced the blockhash or asked for a signature")
             return {"result": {"context": {"slot": 11}, "value": {"err": self.sim_err}}}
         if method == "getAccountInfo":
-            body = self.tables[payload["params"][0]]
+            body = self.tables.get(payload["params"][0])
+            if body is None:
+                return {"result": {"context": {"slot": 9}, "value": None}}
             encoded = base64.b64encode(body).decode("ascii")
             return {"result": {"context": {"slot": 9}, "value": {"data": [encoded, "base64"]}}}
         if method == "getSignatureStatuses":
@@ -45,7 +54,7 @@ class FakeRpc:
 
 class TestSolanaInspect(unittest.TestCase):
     def test_bounded_transfer_checks_the_blockhash_and_cannot_send(self):
-        tx = solana_tx.encode_legacy_transfer(WALLET, DEST, 10_000_000, BLOCK)
+        tx = solana_tx.encode_legacy_transfer(WALLET, WALLET, 10_000_000, BLOCK)
         fake = FakeRpc()
         shown = solana_inspect.inspect(tx, solana_inspect.RpcClient(fake))
         self.assertEqual(shown["stage"], "chain_checked")
@@ -56,6 +65,8 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertEqual(shown["blockhash_slot"], 10)
         self.assertEqual(shown["debited_lamports"], 10_000_000)
         self.assertFalse(shown["slippage_verified"])
+        self.assertFalse(shown["spend_verified"])
+        self.assertFalse(shown["intent_verified"])
         self.assertIsNone(shown["provider_expiry"])
         self.assertFalse(shown["freshness_guarantee"])
         self.assertFalse(shown["execution_allowed"])
@@ -78,7 +89,9 @@ class TestSolanaInspect(unittest.TestCase):
         tx = solana_tx.encode_v0_transfer_lookup(WALLET, TABLE, 10_000_000, BLOCK)
         fake = FakeRpc()
         fake.tables[TABLE] = table
+        fake.tables[DEST] = _native_account()
         shown = solana_inspect.inspect(tx, solana_inspect.RpcClient(fake))
+        self.assertFalse(shown["spend_verified"])
         self.assertEqual(shown["stage"], "chain_checked")
         self.assertEqual(fake.methods[0], "getAccountInfo")
         raw = base64.b64decode(solana_tx.encode_legacy_transfer(WALLET, DEST, 10_000_000, BLOCK))
@@ -90,14 +103,16 @@ class TestSolanaInspect(unittest.TestCase):
         stale = FakeRpc()
         stale.block_ok = False
         stale.tables[TABLE] = table
+        stale.tables[DEST] = _native_account()
         self.assertEqual(solana_inspect.inspect(tx, solana_inspect.RpcClient(stale))["reason"], "blockhash is not valid")
-        over = solana_tx.encode_legacy_transfer(WALLET, DEST, 10_000_001, BLOCK)
+        over = solana_tx.encode_legacy_transfer(WALLET, WALLET, 10_000_001, BLOCK)
         self.assertEqual(solana_inspect.inspect(over, solana_inspect.RpcClient(FakeRpc()))["reason"], "debit is not bound")
         other = solana_tx.encode_legacy_transfer(DEST, WALLET, 1, BLOCK)
-        self.assertEqual(solana_inspect.inspect(other, solana_inspect.RpcClient(FakeRpc()))["reason"], "fee payer is not the allowlisted wallet")
+        self.assertEqual(solana_inspect.inspect(other, solana_inspect.RpcClient(FakeRpc()))["error_category"], "wallet_unbound")
         failed = FakeRpc()
         failed.sim_err = {"InstructionError": [0, "Custom"]}
         failed.tables[TABLE] = table
+        failed.tables[DEST] = _native_account()
         self.assertEqual(solana_inspect.inspect(tx, solana_inspect.RpcClient(failed))["reason"], "simulation failed")
         status_rpc = FakeRpc()
         signature = solana_tx.b58encode(b"\x44" * 64)
@@ -124,16 +139,41 @@ class TestSolanaInspect(unittest.TestCase):
         token = solana_tx.TOKEN_PROGRAM
         system = solana_tx.SYSTEM_PROGRAM
         native = solana_tx.NATIVE_MINT
-        keys = [WALLET, native, token, system]
+        account = solana_tx.b58encode(b"\x66" * 32)
+        keys = [WALLET, account, token, system]
+        sync_rpc = FakeRpc()
+        sync_rpc.tables[account] = _native_account()
         sync = solana_tx.encode_legacy(WALLET, keys, 2, [
             (3, [0, 1], (2).to_bytes(4, "little") + (10_000_000).to_bytes(8, "little")),
             (2, [1], bytes([17])),
         ], BLOCK)
-        shown = solana_inspect.inspect(sync, solana_inspect.RpcClient(FakeRpc()))
+        shown = solana_inspect.inspect(sync, solana_inspect.RpcClient(sync_rpc))
         self.assertEqual(shown["stage"], "chain_checked")
         self.assertIn(token, shown["program_ids"])
         self.assertFalse(shown["slippage_verified"])
+        self.assertFalse(shown["spend_verified"])
+        self.assertFalse(shown["intent_verified"])
         self.assertFalse(shown["execution_allowed"])
+        unread = solana_inspect.inspect(sync, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(unread["error_category"], "account_unread")
+        usdc = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.USDC_MINT, account, token], 1, [
+            (3, [0, 1, 2, 0], bytes([12]) + (1).to_bytes(8, "little") + bytes([6])),
+        ], BLOCK)
+        self.assertEqual(solana_inspect.inspect(usdc, solana_inspect.RpcClient(FakeRpc()))["error_category"], "usdc_debit_not_buy")
+        third = solana_tx.b58encode(b"\x77" * 32)
+        close = solana_tx.encode_legacy(WALLET, [WALLET, account, third, token], 1, [
+            (3, [1, 2, 0], bytes([9])),
+        ], BLOCK)
+        self.assertEqual(solana_inspect.inspect(close, solana_inspect.RpcClient(FakeRpc()))["error_category"], "close_destination_unbound")
+        priced = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.COMPUTE_BUDGET], 1, [
+            (1, [], bytes([3]) + (1).to_bytes(8, "little")),
+            (1, [], bytes([2]) + (200_000).to_bytes(4, "little")),
+        ], BLOCK)
+        self.assertEqual(solana_inspect.inspect(priced, solana_inspect.RpcClient(FakeRpc()))["error_category"], "fee_unbound")
+        extra = solana_tx.encode_legacy(WALLET, [WALLET, third, system], 1, [
+            (2, [0, 0], (2).to_bytes(4, "little") + (1).to_bytes(8, "little")),
+        ], BLOCK, required=2)
+        self.assertEqual(solana_inspect.inspect(extra, solana_inspect.RpcClient(FakeRpc()))["error_category"], "extra_signer")
         unknown = solana_tx.b58encode(b"\x03" * 32)
         hidden = solana_tx.encode_legacy(WALLET, [WALLET, native, token, unknown], 2, [
             (2, [1], bytes([7]) + (1).to_bytes(8, "little")),

@@ -183,6 +183,13 @@ def transfer_checked(data: bytes) -> tuple[int, int] | None:
     return int.from_bytes(data[1:9], "little"), data[9]
 
 
+def token_account_fields(data: bytes) -> tuple[str, str] | None:
+    """SPL token account: mint at byte 0, owner at byte 32. Shorter data is not an account."""
+    if len(data) < 165:
+        return None
+    return b58encode(data[0:32]), b58encode(data[32:64])
+
+
 def token_transfer(data: bytes) -> int | None:
     """SPL Transfer names an amount and no mint. Tag 3, then a u64."""
     if len(data) != 9 or data[0] != 3:
@@ -229,18 +236,18 @@ def encode_v0_transfer_lookup(fee_payer: str, table: str, lamports: int, blockha
     return base64.b64encode(raw).decode("ascii")
 
 
-def encode_legacy(fee_payer: str, keys: list[str], readonly_unsigned: int, instructions: list[tuple[int, list[int], bytes]], blockhash: str) -> str:
-    """Unsigned legacy transaction. keys[0] is the fee payer."""
-    if not keys or keys[0] != fee_payer or len(keys) > 64 or len(instructions) > 16:
+def encode_legacy(fee_payer: str, keys: list[str], readonly_unsigned: int, instructions: list[tuple[int, list[int], bytes]], blockhash: str, required: int = 1) -> str:
+    """Unsigned legacy transaction. The first required keys are the signers."""
+    if not keys or keys[0] != fee_payer or not 1 <= required <= len(keys) or len(keys) > 64 or len(instructions) > 16:
         raise ValueError("transaction is not usable")
     raw_keys = b"".join(b58decode(key) for key in keys)
-    body = bytes([1, 0, readonly_unsigned, len(keys)]) + raw_keys + b58decode(blockhash)
+    body = bytes([required, 0, readonly_unsigned, len(keys)]) + raw_keys + b58decode(blockhash)
     encoded = bytes([len(instructions)])
     for program_index, accounts, data in instructions:
         if len(accounts) > 64 or len(data) > 255:
             raise ValueError("transaction is not usable")
         encoded += bytes([program_index, len(accounts), *accounts, len(data)]) + data
-    raw = bytes([1]) + (b"\x00" * 64) + body + encoded
+    raw = bytes([required]) + (b"\x00" * (64 * required)) + body + encoded
     return base64.b64encode(raw).decode("ascii")
 
 
