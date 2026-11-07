@@ -120,6 +120,8 @@ class DirectWhirlpoolTests(unittest.TestCase):
         state = solana_direct_swap.status()
         self.assertFalse(state["enabled"])
         self.assertFalse(state["mounted"])
+        self.assertTrue(state["readonly_prepare_mounted"])
+        self.assertEqual(state["strategies_enabled"], [])
         self.assertEqual(state["production_path"], "phantom_cli_unchanged")
         self.assertEqual(state["live_quote"], "computed")
         self.assertEqual(state["specified_slippage_bps"], 100)

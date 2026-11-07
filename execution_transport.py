@@ -35,6 +35,7 @@ SWAP_BLOCKERS = (
 
 
 NETWORK = "solana:mainnet"
+STATE_RPC = None
 _SIGNATURE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,88}$")
 _BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
@@ -137,7 +138,7 @@ def _claim(intent_id: str, digest: str) -> bool:
 
     def work(conn):
         row = conn.execute(
-            "SELECT status, wallet, wallet_id, amount_usd FROM phantom_reservations WHERE intent_id = ?",
+            "SELECT status, wallet, wallet_id, amount_usd, result_json, reserved_usd FROM phantom_reservations WHERE intent_id = ?",
             (intent_id,),
         ).fetchone()
         if row is None or row["status"] != "sim_open":
@@ -158,9 +159,23 @@ def _claim(intent_id: str, digest: str) -> bool:
         if not isinstance(ledger, dict) or intent_id in ledger:
             return False
         now = time.time()
+        current_result = row["result_json"] if "result_json" in row.keys() else None
+        try:
+            payload = json.loads(current_result) if current_result else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["chain_submit"] = True
+        payload["resubmit"] = False
+        payload["confirmed"] = False
         updated = conn.execute(
-            "UPDATE phantom_reservations SET status = 'submit_unknown', updated_at = ? WHERE intent_id = ? AND status = 'sim_open'",
-            (now, intent_id),
+            """
+            UPDATE phantom_reservations
+            SET status = 'submit_unknown', result_json = ?, updated_at = ?
+            WHERE intent_id = ? AND status = 'sim_open'
+            """,
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True), now, intent_id),
         )
         if updated.rowcount != 1:
             return False
@@ -297,26 +312,61 @@ def remember_review(intent_id: str, tx_b64: str) -> dict:
     return payload
 
 
-def prepare_readonly(slot: int) -> dict:
-    """Inspect the diagnostic direct route. This does not sign or call the CLI."""
-    prepared = solana_direct_swap.prepare_diagnostic(slot)
+def prepare_readonly(slot: int | None = None, rpc=None) -> dict:
+    """Inspect one injected RPC snapshot. A missing RPC does not open a socket."""
+    chosen = rpc if rpc is not None else STATE_RPC
+    fetched = solana_direct_swap.fetch_state(chosen)
+    if not fetched.get("ok"):
+        prepared = {
+            "stale": True,
+            "fetched": False,
+            "sign": False,
+            "cli": False,
+            "diagnostic": True,
+            "broadcastable": False,
+            "runtime_ready": False,
+            "unsigned_tx_sha256": None,
+            "context_slot": slot,
+            "reason": fetched.get("reason"),
+        }
+    elif slot is not None and fetched["context_slot"] != slot:
+        prepared = {
+            "stale": True,
+            "fetched": True,
+            "sign": False,
+            "cli": False,
+            "diagnostic": True,
+            "broadcastable": False,
+            "runtime_ready": False,
+            "unsigned_tx_sha256": None,
+            "context_slot": fetched["context_slot"],
+            "reason": "slot_mismatch",
+        }
+    else:
+        prepared = solana_direct_swap.prepare_from_state(fetched)
     prepared["send"] = False
     prepared["cli"] = False
+    prepared["broadcastable"] = False
+    prepared["runtime_ready"] = False
+    prepared["sign"] = False
     prepared["fee_policy"] = "approved" if spend_policy.fee_view()["approved"] else "not_approved"
     prepared["aggregate_loss_policy"] = spend_policy.aggregate_view()["approved"]
+    prepared["strategies_enabled"] = []
     return prepared
 
 
-def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
+def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None, direct_state=None, blockhash_source=None) -> dict:
     """Start the CLI bridge only when decide() has no unmet check. It never does."""
     if not isinstance(intent_id, str) or not isinstance(tx_b64, str):
         raise TypeError("string inputs required")
-    decision = decide(intent_id, tx_b64, rpc)
+    decision = decide(intent_id, tx_b64, rpc, direct_state=direct_state, blockhash_source=blockhash_source)
     decision["signature"] = None
     decision["signer_called"] = False
     decision["send"] = False
     decision["executable"] = False
     decision["live_ready"] = False
+    decision["broadcastable"] = False
+    decision["runtime_ready"] = False
     decision["subprocess"] = []
     if decision["unmet"]:
         return decision
@@ -329,7 +379,7 @@ def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
     return decision
 
 
-def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
+def decide(intent_id: str, tx_b64: str, rpc=None, *, direct_state=None, blockhash_source=None) -> dict:
     checks = {
         "intent_id": isinstance(intent_id, str) and bool(intent_id),
         "mode_paper_until_activation": db.get_setting("mode", "PAPER") == "PAPER",
@@ -377,7 +427,17 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
     if review and review.get("sha256") == digest and review.get("wallet") == phantom_transport.REQUIRED_WALLET and review.get("network") == "solana:mainnet":
         checks["reviewed_binding"] = True
     inspected = None
-    if rpc is not None and raw:
+    recognized = _direct_route(raw)
+    if recognized:
+        proved = _direct_proof(raw, direct_state, blockhash_source)
+        checks["inspection_chain_ok"] = proved.get("byte_checks_passed") is True
+        checks["spend_verified"] = proved.get("spend_verified") is True
+        checks["slippage_verified"] = proved.get("slippage_verified") is True
+        checks["fee_unbound_clear"] = proved.get("fee_cap_ok") is True and proved.get("exposure_cap_ok") is True
+        checks["blockhash_checked"] = proved.get("blockhash_checked") is True
+        checks["wallet_network"] = proved.get("wallet_verified") is True
+        inspected = proved
+    elif rpc is not None and raw:
         inspected = solana_inspect.inspect(base64.b64encode(raw).decode("ascii"), rpc)
         checks["inspection_chain_ok"] = inspected.get("chain_ok") is True
         checks["spend_verified"] = inspected.get("spend_verified") is True
@@ -409,6 +469,229 @@ def reconcile(intent_id: str) -> dict:
         "confirmation": None,
         "executable": False,
     }
+
+
+def reserve_direct(intent_id: str, fetched: dict) -> dict:
+    """Hold spend, fees, and rent inside one transaction. This does not sign."""
+    if not isinstance(intent_id, str) or not intent_id or len(intent_id) > 80:
+        raise ValueError("intent")
+    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False}
+    if db.get_setting("mode", "PAPER") != "PAPER":
+        return refused | {"reason": "live_locked"}
+    if phantom_runner.halted():
+        return refused | {"reason": "kill_switch"}
+    if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
+        return refused | {"reason": "policy_unrecorded"}
+    prepared = solana_direct_swap.prepare_from_state(fetched)
+    if not prepared.get("byte_checks_passed") or not prepared.get("fee_cap_ok") or not prepared.get("exposure_cap_ok") or not prepared.get("ticket_cap_ok"):
+        return refused | {"reason": prepared.get("reason") or "cap", "fee_cap_ok": prepared.get("fee_cap_ok"), "exposure_cap_ok": prepared.get("exposure_cap_ok")}
+    from decimal import Decimal, ROUND_CEILING
+    reserved = (Decimal(prepared["exposure_micro_usdc"]) / Decimal(1_000_000)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    fee_hold = (Decimal(prepared["fee_micro_usdc"]) / Decimal(1_000_000)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    if reserved <= 0 or reserved > phantom_runner.BANKROLL or fee_hold > spend_policy.MAX_FEE_USD:
+        return refused | {"reason": "cap"}
+    payload = {
+        "origin": "direct_whirlpool",
+        "chain_submit": False,
+        "provider": "direct_state",
+        "context_slot": prepared["context_slot"],
+        "network": NETWORK,
+        "wallet": phantom_transport.REQUIRED_WALLET,
+        "entry_token_est_out": prepared["quote_token_est_out"],
+        "entry_token_min_out": prepared["quote_token_min_out"],
+        "wallet_usdc_raw": prepared["wallet_usdc_raw"],
+        "acquired_raw": None,
+        "exit_raw": None,
+        "fee_micro_usdc": prepared["fee_micro_usdc"],
+        "exposure_micro_usdc": prepared["exposure_micro_usdc"],
+        "dex_fee_lamports": prepared["dex_fee_lamports"],
+        "base_fee_lamports": prepared["base_fee_lamports"],
+        "priority_fee_lamports": prepared["priority_fee_lamports"],
+        "rent_micro_usdc": prepared["rent_micro_usdc"],
+        "unsigned_tx_sha256": prepared["unsigned_tx_sha256"],
+        "confirmed": False,
+        "live_ready": False,
+        "sign": False,
+        "resubmit": False,
+    }
+
+    def work(conn):
+        row = conn.execute("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
+        if row is not None:
+            return {
+                "ok": row["status"] == "sim_open",
+                "created": False,
+                "reason": "existing",
+                "status": row["status"],
+                "reserved_usd": row["reserved_usd"],
+                "resubmit": False,
+                "sign": False,
+                "send": False,
+                "live_ready": False,
+            }
+        loss = phantom_runner.cumulative_realized_loss(conn)
+        if loss >= spend_policy.MAX_CUMULATIVE_LOSS_USD:
+            _insert_direct(conn, intent_id, "rejected", "0.00", fee_hold, prepared, payload | {"reason": "stop_new_entries"})
+            return refused | {"reason": "stop_new_entries", "status": "rejected", "loss_usd": format(loss, "f")}
+        held = Decimal("0")
+        open_rows = conn.execute(
+            "SELECT reserved_usd FROM phantom_reservations WHERE status IN ('reserved', 'quoted', 'sim_open', 'submit_unknown', 'confirmed')"
+        ).fetchall()
+        for open_row in open_rows:
+            held += Decimal(open_row["reserved_usd"] or "0")
+        if held + reserved > phantom_runner.BANKROLL:
+            _insert_direct(conn, intent_id, "rejected", "0.00", fee_hold, prepared, payload | {"reason": "allocation"})
+            return refused | {"reason": "allocation", "status": "rejected"}
+        _insert_direct(conn, intent_id, "sim_open", format(reserved, "f"), fee_hold, prepared, payload)
+        return {
+            "ok": True,
+            "created": True,
+            "status": "sim_open",
+            "reason": "reserved",
+            "reserved_usd": format(reserved, "f"),
+            "fee_usd": format(fee_hold, "f"),
+            "fee_micro_usdc": prepared["fee_micro_usdc"],
+            "exposure_micro_usdc": prepared["exposure_micro_usdc"],
+            "marginal_micro_usdc": prepared["marginal_micro_usdc"],
+            "entry_lamports": prepared["entry_lamports"],
+            "quote_token_est_out": prepared["quote_token_est_out"],
+            "wallet_usdc_raw": prepared["wallet_usdc_raw"],
+            "exit_close_raw": None,
+            "context_slot": prepared["context_slot"],
+            "sign": False,
+            "send": False,
+            "resubmit": False,
+            "live_ready": False,
+            "broadcastable": False,
+        }
+
+    return db.exclusive(work)
+
+
+def direct_status(intent_id: str | None = None) -> dict:
+    """Read slot, network, and wallet from the row. This does not fetch or sign."""
+    body = {
+        "mode": db.get_setting("mode", "PAPER"),
+        "agents_enabled": db.get_setting("agents_enabled", "0") == "1",
+        "kill_switch": phantom_runner.halted(),
+        "network": NETWORK,
+        "wallet": phantom_transport.REQUIRED_WALLET,
+        "live_ready": False,
+        "sign": False,
+        "send": False,
+        "broadcastable": False,
+        "strategies_enabled": [],
+        "diagnostic_market": "SOL->USDC",
+        "fee_policy_approved": spend_policy.fee_view()["approved"],
+        "aggregate_loss_policy_approved": spend_policy.aggregate_view()["approved"],
+        "exit": exit_policy.view(),
+    }
+    if not intent_id:
+        body["intent"] = None
+        return body
+    rows = db.query("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,))
+    if not rows:
+        body["intent"] = None
+        return body
+    row = rows[0]
+    stored = {}
+    if row["result_json"]:
+        try:
+            parsed = json.loads(row["result_json"])
+            stored = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            stored = {}
+    acquired = stored.get("acquired_raw")
+    wallet_raw = stored.get("wallet_usdc_raw")
+    choice = solana_direct_swap.exit_amount(
+        acquired if isinstance(acquired, int) else None,
+        wallet_raw if isinstance(wallet_raw, int) else -1,
+        confirmed=row["status"] == "confirmed",
+    )
+    body["intent"] = {
+        "intent_id": row["intent_id"],
+        "status": row["status"],
+        "reserved_usd": row["reserved_usd"],
+        "context_slot": stored.get("context_slot"),
+        "network": stored.get("network") or row["chain"],
+        "wallet": row["wallet"],
+        "confirmed": stored.get("confirmed") is True and row["status"] == "confirmed",
+        "acquired_raw": acquired if choice["allowed"] else None,
+        "exit_close_raw": choice["exit_raw"],
+        "wallet_usdc_raw": wallet_raw,
+        "exit_uses_wallet_balance": False,
+        "realized_pnl": row["realized_pnl"],
+        "sign": False,
+        "resubmit": False,
+    }
+    return body
+
+
+def _insert_direct(conn, intent_id: str, status: str, reserved: str, fee_hold, prepared: dict, payload: dict) -> None:
+    from decimal import Decimal
+    now = time.time()
+    micro = int(prepared.get("marginal_micro_usdc") or 0)
+    sol_usd = format(Decimal(micro) / Decimal(1_000_000), "f")
+    pair = json.dumps({
+        "origin": "direct_whirlpool",
+        "sell_native": True,
+        "buy_mint": phantom_runner.USDC,
+        "chain": NETWORK,
+    }, sort_keys=True, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO phantom_reservations (
+            intent_id, status, wallet_id, wallet, chain, pair_json, amount_usd, fee_usd,
+            reserved_usd, slippage, entry_quote_id, exit_quote_id, fx_sol_usd, fx_at,
+            result_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, '8.00', ?, ?, 1, NULL, NULL, ?, ?, ?, ?, ?)
+        """,
+        (
+            intent_id, status, phantom_transport.REQUIRED_WALLET_ID, phantom_transport.REQUIRED_WALLET,
+            NETWORK, pair, format(fee_hold, "f"), reserved, sol_usd, now,
+            json.dumps(payload, separators=(",", ":"), sort_keys=True), now, now,
+        ),
+    )
+
+
+def _direct_route(raw: bytes) -> bool:
+    if not raw:
+        return False
+    import solana_tx
+    import solana_whirlpool
+    try:
+        decoded = solana_tx.decode_transaction(raw)
+    except ValueError:
+        return False
+    return solana_whirlpool.PROGRAM_ID in decoded.static_keys
+
+
+def _direct_proof(raw: bytes, direct_state, blockhash_source) -> dict:
+    """Recompute the swap from account bytes. A slippage flag on the dict is ignored."""
+    empty = {
+        "byte_checks_passed": False,
+        "spend_verified": False,
+        "slippage_verified": False,
+        "fee_cap_ok": False,
+        "exposure_cap_ok": False,
+        "wallet_verified": False,
+        "blockhash_checked": False,
+        "error_category": "direct_state_missing",
+    }
+    if not isinstance(direct_state, dict):
+        return empty
+    accounts = direct_state.get("accounts")
+    slot = direct_state.get("context_slot")
+    if not isinstance(accounts, dict) or isinstance(slot, bool) or not isinstance(slot, int):
+        return empty
+    proved = solana_direct_swap.prove(
+        base64.b64encode(raw).decode("ascii"), accounts, slot, bool(direct_state.get("wsol_exists")),
+    )
+    hook = solana_direct_swap.revalidate_blockhash(proved.get("blockhash"), blockhash_source, slot)
+    proved["blockhash_checked"] = hook.get("checked") is True
+    proved["broadcastable"] = False
+    proved["runtime_ready"] = False
+    return proved
 
 
 def _consent():

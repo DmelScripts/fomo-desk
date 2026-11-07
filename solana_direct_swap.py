@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
-from pathlib import Path
 
 import phantom_transport
 import solana_tx
@@ -123,20 +121,27 @@ DIAGNOSTIC = True
 SOL_DECIMALS = 9
 USDC_DECIMALS = 6
 TICKET_USD_MICRO = 8_000_000
-_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sol_usdc_ts8_ticks.json"
+ALLOCATION_USD_MICRO = 100_000_000
+MAX_FEE_USD_MICRO = 50_000
+BASE_FEE_LAMPORTS = 5_000
+KNOWN_PREEXISTING_USDC = 188_718_141
 DISC = hashlib.sha256(b"global:swap").digest()[:8]
 PUBLISHED_DISC = bytes([248, 198, 158, 145, 225, 117, 135, 200])
 MIN_SQRT_PRICE = 4295048016
 MAX_SQRT_PRICE = 79226673515401279992447579055
 _DATA_LEN = 42
 _TICK_ZERO_SQRT = 18446744073709551616
+PLACEHOLDER_BLOCKHASH = solana_tx.b58encode(b"\x22" * 32)
 
 
 def status() -> dict:
     return {
         "route": "direct_whirlpool_swap",
         "mounted": False,
+        "readonly_prepare_mounted": True,
         "enabled": ENABLED,
+        "strategies_enabled": [],
+        "diagnostic_market": MARKET,
         "production_path": "phantom_cli_unchanged",
         "market": MARKET,
         "input_lamports": INPUT_LAMPORTS,
@@ -280,10 +285,10 @@ def route_guard() -> dict:
         "exit_starts_missing": (),
         "sign": False,
         "blockers": (
-            "the $0.05 fee cap and the $20 loss stop are specified and not persisted",
-            "realized DEX and network fees are not accounted in USD on the runner",
+            "policy rows stay unapproved until the protected route records them",
+            "a placeholder blockhash is not broadcastable",
             "this snapshot does not guarantee later exit liquidity",
-            "no blockhash has been fetched, so nothing here is broadcastable",
+            "the signer stays off",
         ),
     }
 
@@ -298,36 +303,412 @@ def quote_exit_exact_in(pool: dict, arrays: list[dict], usdc_raw: int, slippage_
     return quoted
 
 
-def prepare_diagnostic(slot: int) -> dict:
-    """Unsigned diagnostic transaction. The bytes are not returned or stored."""
-    snap = SOL_USDC_SNAPSHOT
-    if slot != snap["context_slot"]:
-        return {"stale": True, "sign": False, "cli": False, "diagnostic": True, "unsigned_tx_sha256": None, "context_slot": slot}
-    pool, data, accounts = _snapshot_accounts()
-    state = solana_whirlpool.pool_state(data)
-    spend = lamports_within_usd_cap(TICKET_USD_MICRO, marginal_micro_usdc_per_sol(state["sqrt_price"]))
-    limit = MIN_SQRT_PRICE + 1
-    blockhash = solana_tx.b58encode(b"\x22" * 32)
-    tx = build(pool, data, accounts, snap["specified_slippage_bps"], limit, blockhash, slot, amount=spend)
-    raw = base64.b64decode(tx)
-    checked = inspect(tx, accounts, snap["specified_slippage_bps"], slot)
+def batch_addresses() -> tuple[str, ...]:
+    """One getMultipleAccounts list. A moved tick is a miss, not a second call."""
+    pool = SOL_USDC_POOL
+    wsol = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    usdc = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
+    return (
+        pool,
+        *SOL_USDC_SNAPSHOT["tick_array_addresses"],
+        SOL_USDC_OBSERVATION["vault_a"],
+        SOL_USDC_OBSERVATION["vault_b"],
+        solana_tx.NATIVE_MINT,
+        solana_tx.USDC_MINT,
+        wsol,
+        usdc,
+    )
+
+
+def fetch_state(rpc) -> dict:
+    """Parse one public getMultipleAccounts result. This does not open a socket itself."""
+    failed = {"ok": False, "fetched": False, "retry": False, "sign": False, "broadcastable": False, "runtime_ready": False}
+    if rpc is None or not hasattr(rpc, "call"):
+        return failed | {"reason": "rpc_not_configured"}
+    addresses = list(batch_addresses())
+    try:
+        result = rpc.call("getMultipleAccounts", [addresses, {"encoding": "base64", "commitment": "confirmed"}])
+    except Exception:
+        return failed | {"reason": "rpc_failed"}
+    if not isinstance(result, dict):
+        return failed | {"reason": "rpc_shape"}
+    context = result.get("context")
+    values = result.get("value")
+    slot = context.get("slot") if isinstance(context, dict) else None
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < MIN_CONTEXT_SLOT:
+        return failed | {"reason": "slot_unusable"}
+    if not isinstance(values, list) or len(values) != len(addresses):
+        return failed | {"reason": "batch_shape"}
+    decoded: list[tuple[str, bytes] | None] = []
+    for item in values:
+        if item is None:
+            decoded.append(None)
+            continue
+        if not isinstance(item, dict) or not isinstance(item.get("owner"), str):
+            return failed | {"reason": "account_shape"}
+        data = item.get("data")
+        if not isinstance(data, list) or not data or not isinstance(data[0], str):
+            return failed | {"reason": "account_shape"}
+        try:
+            raw = base64.b64decode(data[0], validate=True)
+        except Exception:
+            return failed | {"reason": "account_shape"}
+        decoded.append((item["owner"], raw))
+    by_addr = dict(zip(addresses, decoded))
+    pool_rec = by_addr.get(SOL_USDC_POOL)
+    if pool_rec is None or pool_rec[0] != solana_whirlpool.PROGRAM_ID:
+        return failed | {"reason": "pool_unread"}
+    state = solana_whirlpool.pool_state(pool_rec[1])
+    if state is None:
+        return failed | {"reason": "pool_unreadable"}
+    if state["adaptive_fee"] or state["tick_spacing"] != 8:
+        return failed | {"reason": "pool_unsupported"}
+    for start in _covered_starts(state):
+        address = solana_whirlpool.tick_array_address(SOL_USDC_POOL, start)
+        record = by_addr.get(address)
+        parsed = None if record is None else solana_whirlpool.tick_array_state(record[1])
+        if record is None or record[0] != solana_whirlpool.PROGRAM_ID or parsed is None:
+            return failed | {"reason": "tick_array_missing"}
+        if parsed["pool"] != SOL_USDC_POOL or parsed["start_tick_index"] != start:
+            return failed | {"reason": "tick_array_unbound"}
+    wsol_mint = by_addr.get(solana_tx.NATIVE_MINT)
+    usdc_mint = by_addr.get(solana_tx.USDC_MINT)
+    if wsol_mint is None or usdc_mint is None or len(wsol_mint[1]) < 45 or len(usdc_mint[1]) < 45:
+        return failed | {"reason": "mint_unread"}
+    if wsol_mint[1][44] != SOL_DECIMALS or usdc_mint[1][44] != USDC_DECIMALS:
+        return failed | {"reason": "decimals"}
+    wsol_ata = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    usdc_ata = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
+    usdc_rec = by_addr.get(usdc_ata)
+    if usdc_rec is None or usdc_rec[0] != solana_tx.TOKEN_PROGRAM or len(usdc_rec[1]) < 72:
+        return failed | {"reason": "usdc_ata_unread"}
+    wsol_exists = by_addr.get(wsol_ata) is not None
+    accounts: dict[str, tuple[str, bytes]] = {}
+    for address, record in by_addr.items():
+        if record is not None and address not in {solana_tx.NATIVE_MINT, solana_tx.USDC_MINT}:
+            accounts[address] = record
+    if not wsol_exists:
+        accounts[wsol_ata] = (
+            solana_tx.TOKEN_PROGRAM,
+            solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, phantom_transport.REQUIRED_WALLET),
+        )
     return {
+        "ok": True,
+        "fetched": True,
+        "retry": False,
+        "reason": None,
+        "context_slot": slot,
+        "accounts": accounts,
+        "pool": SOL_USDC_POOL,
+        "pool_data": pool_rec[1],
+        "state": state,
+        "wsol_exists": wsol_exists,
+        "usdc_raw": int.from_bytes(usdc_rec[1][64:72], "little"),
+        "wsol_decimals": SOL_DECIMALS,
+        "usdc_decimals": USDC_DECIMALS,
+        "sqrt_price": state["sqrt_price"],
+        "sign": False,
+        "broadcastable": False,
+        "runtime_ready": False,
+    }
+
+
+def prepare_from_state(fetched: dict) -> dict:
+    """Quote and hash one fetched state. The unsigned transaction is not returned."""
+    empty = {
+        "ok": False,
+        "fetched": bool(fetched.get("fetched")) if isinstance(fetched, dict) else False,
+        "stale": True,
+        "sign": False,
+        "cli": False,
+        "diagnostic": True,
+        "broadcastable": False,
+        "runtime_ready": False,
+        "unsigned_tx_sha256": None,
+        "strategies_enabled": [],
+    }
+    if not isinstance(fetched, dict) or fetched.get("ok") is not True:
+        empty["reason"] = None if not isinstance(fetched, dict) else fetched.get("reason")
+        return empty
+    try:
+        fx = fx_from_pool(fetched["sqrt_price"], fetched["wsol_decimals"], fetched["usdc_decimals"], fetched["context_slot"])
+    except (KeyError, TypeError, ValueError):
+        empty["reason"] = "fx"
+        return empty
+    if fx is None:
+        empty["reason"] = "fx"
+        return empty
+    micro = fx["micro_usdc_per_sol"]
+    slot = fetched["context_slot"]
+    pool = fetched["pool"]
+    data = fetched["pool_data"]
+    accounts = fetched["accounts"]
+    spend = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
+    try:
+        tx = build(
+            pool, data, accounts, SOL_USDC_SNAPSHOT["specified_slippage_bps"],
+            MIN_SQRT_PRICE + 1, PLACEHOLDER_BLOCKHASH, slot, amount=spend,
+        )
+        checked = inspect(
+            tx, accounts, SOL_USDC_SNAPSHOT["specified_slippage_bps"], slot,
+            wsol_existed=bool(fetched["wsol_exists"]),
+        )
+        state = solana_whirlpool.pool_state(data)
+        arrays = _quote_arrays(pool, data, accounts, True)
+        quote = solana_whirlpool_quote.quote_exact_in(
+            state, arrays, spend, True, SOL_USDC_SNAPSHOT["specified_slippage_bps"], MIN_SQRT_PRICE + 1, slot,
+        )
+    except (ValueError, solana_whirlpool.WhirlpoolError, solana_whirlpool_quote.QuoteError):
+        empty["reason"] = "quote"
+        empty["stale"] = False
+        return empty
+    fees = fee_report(quote["trade_fee"], tx, micro, bool(fetched["wsol_exists"]), spend)
+    exit_choice = exit_amount(quote["token_est_out"], fetched["usdc_raw"], confirmed=False)
+    raw = base64.b64decode(tx)
+    return {
+        "ok": checked["byte_checks_passed"] is True and fees["fee_cap_ok"] and fees["exposure_cap_ok"],
+        "fetched": True,
         "stale": False,
         "sign": False,
         "cli": False,
         "diagnostic": True,
         "probe_is_ticket": False,
+        "broadcastable": False,
+        "runtime_ready": False,
         "context_slot": slot,
-        "account_addresses": tuple(sorted(accounts)),
+        "network": "solana:mainnet",
+        "wallet": phantom_transport.REQUIRED_WALLET,
         "entry_lamports": spend,
-        "quote_token_est_out": snap["entry_token_est_out"],
-        "quote_token_min_out": snap["entry_token_min_out"],
-        "quote_trade_fee": snap["entry_trade_fee_lamports"],
+        "quote_token_est_out": quote["token_est_out"],
+        "quote_token_min_out": quote["token_min_out"],
+        "quote_trade_fee": quote["trade_fee"],
         "usd_spend_is_exact": False,
         "unsigned_tx_sha256": hashlib.sha256(raw).hexdigest(),
         "byte_checks_passed": checked["byte_checks_passed"],
         "min_out": checked["min_out"],
+        "fx_slot": slot,
+        "fx_bound_to_policy": False,
+        "wallet_usdc_raw": fetched["usdc_raw"],
+        "exit_close_raw": exit_choice["exit_raw"],
+        "exit_allowed": exit_choice["allowed"],
+        "exit_uses_wallet_balance": False,
+        "strategies_enabled": [],
+        "blockhash": PLACEHOLDER_BLOCKHASH,
+        **fees,
     }
+
+
+def prepare_diagnostic(slot: int, rpc=None) -> dict:
+    """Fetch through the adapter when an RPC is injected. No fixture and no socket here."""
+    fetched = fetch_state(rpc)
+    if not fetched.get("ok"):
+        return {
+            "stale": True,
+            "fetched": False,
+            "sign": False,
+            "cli": False,
+            "diagnostic": True,
+            "broadcastable": False,
+            "runtime_ready": False,
+            "unsigned_tx_sha256": None,
+            "context_slot": slot,
+            "reason": fetched.get("reason"),
+        }
+    if slot != fetched["context_slot"]:
+        return {
+            "stale": True,
+            "fetched": True,
+            "sign": False,
+            "cli": False,
+            "diagnostic": True,
+            "broadcastable": False,
+            "runtime_ready": False,
+            "unsigned_tx_sha256": None,
+            "context_slot": fetched["context_slot"],
+            "reason": "slot_mismatch",
+        }
+    return prepare_from_state(fetched)
+
+
+def fx_from_pool(sqrt_price: int, wsol_decimals: int, usdc_decimals: int, slot: int) -> dict | None:
+    """Recompute the pool price. The policy row does not carry this slot."""
+    if wsol_decimals != SOL_DECIMALS or usdc_decimals != USDC_DECIMALS:
+        return None
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < MIN_CONTEXT_SLOT:
+        return None
+    return {
+        "micro_usdc_per_sol": marginal_micro_usdc_per_sol(sqrt_price),
+        "slot": slot,
+        "wsol_decimals": SOL_DECIMALS,
+        "usdc_decimals": USDC_DECIMALS,
+        "bound_to_policy": False,
+    }
+
+
+def priority_lamports(price: int | None, limit: int | None) -> int:
+    """Lamports from a compute-unit price. A missing price is zero, not an omission."""
+    if price is None or isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+        return 0
+    used = 200_000 if limit is None else limit
+    if isinstance(used, bool) or not isinstance(used, int) or used < 0:
+        return 0
+    return (price * used + 999_999) // 1_000_000
+
+
+def network_fee_lamports(raw: bytes) -> tuple[int, int]:
+    """Base signature fee plus priority fee. Priority alone is not the network fee."""
+    decoded = solana_tx.decode_transaction(raw)
+    base = BASE_FEE_LAMPORTS * max(1, len(decoded.signers))
+    price = None
+    limit = None
+    for instruction in decoded.instructions:
+        program = decoded.static_keys[instruction.program_index] if instruction.program_index < len(decoded.static_keys) else ""
+        if program != solana_tx.COMPUTE_BUDGET:
+            continue
+        parsed = solana_tx.compute_budget_payload(instruction.data)
+        if not parsed:
+            continue
+        tag, payload, _length = parsed
+        if tag == 3:
+            price = int.from_bytes(payload, "little")
+        elif tag == 2:
+            limit = int.from_bytes(payload, "little")
+    return base, priority_lamports(price, limit)
+
+
+def fee_report(dex_lamports: int, tx_b64: str, micro: int, wsol_exists: bool, spend: int) -> dict:
+    """USD fee is the DEX fee plus base plus priority. Rent is exposure, not a fee."""
+    raw = base64.b64decode(tx_b64)
+    base, priority = network_fee_lamports(raw)
+    dex_micro = (int(dex_lamports) * micro) // 10**SOL_DECIMALS
+    base_micro = (base * micro) // 10**SOL_DECIMALS
+    priority_micro = (priority * micro) // 10**SOL_DECIMALS
+    fee_micro = dex_micro + base_micro + priority_micro
+    marginal = (int(spend) * micro) // 10**SOL_DECIMALS
+    rent_lamports = 0 if wsol_exists else RENT_EXEMPTION_165
+    rent_micro = (rent_lamports * micro) // 10**SOL_DECIMALS
+    network_micro = base_micro + priority_micro
+    exposure = marginal + network_micro + rent_micro
+    return {
+        "dex_fee_lamports": int(dex_lamports),
+        "base_fee_lamports": base,
+        "priority_fee_lamports": priority,
+        "dex_fee_micro_usdc": dex_micro,
+        "base_fee_micro_usdc": base_micro,
+        "priority_fee_micro_usdc": priority_micro,
+        "fee_micro_usdc": fee_micro,
+        "fee_cap_micro": MAX_FEE_USD_MICRO,
+        "fee_cap_ok": fee_micro <= MAX_FEE_USD_MICRO and dex_micro >= 0 and base_micro >= 0,
+        "priority_only": False,
+        "marginal_micro_usdc": marginal,
+        "rent_micro_usdc": rent_micro,
+        "rent_is_fee": False,
+        "exposure_micro_usdc": exposure,
+        "exposure_cap_ok": exposure <= ALLOCATION_USD_MICRO and marginal <= TICKET_USD_MICRO,
+        "ticket_cap_ok": 0 < marginal <= TICKET_USD_MICRO,
+    }
+
+
+def exit_amount(acquired: int | None, wallet: int, *, confirmed: bool) -> dict:
+    """Close the confirmed fill only. The preexisting USDC balance is not a position."""
+    if confirmed is not True or isinstance(acquired, bool) or not isinstance(acquired, int) or acquired <= 0:
+        return {"exit_raw": None, "allowed": False, "reason": "unconfirmed"}
+    if acquired == wallet or acquired == KNOWN_PREEXISTING_USDC:
+        return {"exit_raw": None, "allowed": False, "reason": "wallet_balance"}
+    return {"exit_raw": acquired, "allowed": True, "reason": None}
+
+
+def revalidate_blockhash(tx_blockhash, source, slot: int) -> dict:
+    """Read an injected blockhash source. Nothing here rewrites a transaction."""
+    report = {
+        "applied": False,
+        "broadcastable": False,
+        "runtime_ready": False,
+        "sign": False,
+        "checked": False,
+        "simulated": False,
+        "source_ok": False,
+        "placeholder": tx_blockhash == PLACEHOLDER_BLOCKHASH or source is None,
+        "reason": "not_fetched",
+    }
+    if source is None:
+        return report
+    try:
+        got = source()
+    except Exception:
+        report["reason"] = "source_failed"
+        return report
+    if not isinstance(got, dict):
+        report["reason"] = "source_shape"
+        return report
+    fresh = got.get("blockhash")
+    simulation = got.get("simulation") if isinstance(got.get("simulation"), dict) else None
+    simulated = simulation is not None and simulation.get("err") is None and got.get("simulated") is True
+    slot_ok = got.get("slot") == slot and isinstance(got.get("last_valid_block_height"), int) and not isinstance(got.get("last_valid_block_height"), bool) and got["last_valid_block_height"] > 0
+    fresh_ok = isinstance(fresh, str) and fresh != PLACEHOLDER_BLOCKHASH and got.get("placeholder") is not True
+    report["simulated"] = simulated
+    report["source_ok"] = bool(fresh_ok and simulated and slot_ok)
+    report["placeholder"] = tx_blockhash == PLACEHOLDER_BLOCKHASH or not fresh_ok
+    report["checked"] = bool(report["source_ok"] and tx_blockhash == fresh and tx_blockhash != PLACEHOLDER_BLOCKHASH)
+    report["reason"] = None if report["checked"] else "not_applied"
+    return report
+
+
+def prove(tx_b64: str, accounts: dict, slot: int, wsol_exists: bool) -> dict:
+    """Byte proof for one recognized swap. Caller flags are not read."""
+    checked = inspect(tx_b64, accounts, SOL_USDC_SNAPSHOT["specified_slippage_bps"], slot, wsol_existed=wsol_exists)
+    body = {
+        "slippage_verified": False,
+        "spend_verified": False,
+        "byte_checks_passed": False,
+        "fee_cap_ok": False,
+        "exposure_cap_ok": False,
+        "wallet_verified": False,
+        "blockhash": checked.get("blockhash"),
+        "error_category": checked.get("error_category"),
+    }
+    if checked.get("byte_checks_passed") is not True:
+        return body
+    pool = None
+    try:
+        raw = base64.b64decode(tx_b64, validate=True)
+        decoded = solana_tx.decode_transaction(raw)
+        swap = _wrap_plan(decoded)["swap"]
+        pool = decoded.static_keys[swap.account_indexes[2]]
+        record = accounts.get(pool)
+        state = None if record is None else solana_whirlpool.pool_state(record[1])
+        if state is None:
+            return body
+        parsed = decode_swap_data(swap.data)
+        arrays = _quote_arrays(pool, record[1], accounts, True)
+        quote = solana_whirlpool_quote.quote_exact_in(
+            state, arrays, parsed["amount"], True, SOL_USDC_SNAPSHOT["specified_slippage_bps"],
+            parsed["sqrt_price_limit"], slot,
+        )
+        fx = fx_from_pool(state["sqrt_price"], SOL_DECIMALS, USDC_DECIMALS, slot)
+    except (ValueError, KeyError, TypeError, solana_whirlpool_quote.QuoteError, solana_whirlpool.WhirlpoolError):
+        return body
+    if fx is None or quote["token_min_out"] != parsed["other_amount_threshold"]:
+        return body
+    fees = fee_report(quote["trade_fee"], tx_b64, fx["micro_usdc_per_sol"], wsol_exists, parsed["amount"])
+    body.update(fees)
+    body["slippage_verified"] = True
+    body["spend_verified"] = checked.get("spend_verified") is True
+    body["byte_checks_passed"] = True
+    body["wallet_verified"] = checked.get("wallet_verified") is True
+    body["error_category"] = None
+    return body
+
+
+def _covered_starts(state: dict) -> list[int]:
+    base = solana_whirlpool.start_tick_index(state["tick_current_index"], state["tick_spacing"])
+    step = solana_whirlpool.TICK_ARRAY_SIZE * state["tick_spacing"]
+    starts = []
+    for index in range(-2, 3):
+        start = base + index * step
+        if start not in starts:
+            starts.append(start)
+    return starts
 
 
 def _allowed_amounts(state: dict) -> set[int]:
@@ -338,35 +719,6 @@ def _allowed_amounts(state: dict) -> set[int]:
     if capped > 0:
         amounts.add(capped)
     return amounts
-
-
-def _snapshot_accounts():
-    body = json.loads(_FIXTURE.read_text(encoding="utf-8"))
-    pool = SOL_USDC_POOL
-    vault_a = SOL_USDC_OBSERVATION["vault_a"]
-    vault_b = SOL_USDC_OBSERVATION["vault_b"]
-    data = solana_whirlpool.reference_pool(
-        solana_tx.NATIVE_MINT, vault_a, solana_tx.USDC_MINT, vault_b,
-        body["tickSpacing"], body["tickCurrentIndex"], int(body["sqrtPrice"]),
-        fee_rate=body["feeRate"], liquidity=int(body["liquidity"]),
-    )
-    source = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
-    dest = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
-    accounts = {
-        pool: (solana_whirlpool.PROGRAM_ID, data),
-        source: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, phantom_transport.REQUIRED_WALLET)),
-        dest: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.USDC_MINT, phantom_transport.REQUIRED_WALLET)),
-        vault_a: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, pool)),
-        vault_b: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.USDC_MINT, pool)),
-    }
-    for arr in body["arrays"]:
-        raw = bytearray(solana_whirlpool.reference_tick_array(pool, arr["start"]))
-        for tick, net in arr["initialized"]:
-            offset = 12 + ((tick - arr["start"]) // body["tickSpacing"]) * 113
-            raw[offset] = 1
-            raw[offset + 1:offset + 17] = int(net).to_bytes(16, "little", signed=True)
-        accounts[solana_whirlpool.tick_array_address(pool, arr["start"])] = (solana_whirlpool.PROGRAM_ID, bytes(raw))
-    return pool, data, accounts
 
 
 def paper_lifecycle() -> dict:
@@ -447,7 +799,7 @@ def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], s
         raise ValueError("quoted output is outside the cap")
     return transaction_from_fields(
         pool, pool_data, source, dest, spend, quote["token_min_out"], sqrt_price_limit,
-        True, direction, blockhash, wrap=True,
+        True, direction, blockhash, wrap=True, transfer_lamports=spend,
     )
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from decimal import Decimal
 
@@ -22,7 +23,9 @@ SIZE = Decimal("8.00")
 FX_MAX_AGE_S = 120
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 OBSERVED_QUOTE_ID = "e09cf162-9f00-40fa-9c36-0714a7c5fa94"
-_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown"}
+_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown", "confirmed"}
+MANUAL_STATEMENT = "Manually reconcile this unknown chain submit without resubmitting."
+CHAIN_STATUS = None
 _DONE = {"sim_closed", "released", "rejected", "halted"}
 _KEYS = {
     "intent_id", "wallet_id", "wallet", "chain", "sell_native", "buy_mint",
@@ -128,7 +131,9 @@ def run_intent(body: dict, runtime=None, cycle: str = "round_trip", prices: dict
 
 def reconcile_unknown(body: dict) -> dict:
     _reject_tree(body)
-    if not isinstance(body, dict) or set(body) != {"intent_id"}:
+    if not isinstance(body, dict) or "intent_id" not in body:
+        raise HTTPException(status_code=400, detail="unexpected field")
+    if not set(body) <= {"intent_id", "manual", "statement", "proof"}:
         raise HTTPException(status_code=400, detail="unexpected field")
     intent_id = body.get("intent_id")
     if not isinstance(intent_id, str) or not intent_id:
@@ -140,12 +145,177 @@ def reconcile_unknown(body: dict) -> dict:
             return _stopped("missing", "unknown intent")
         if row["status"] != "submit_unknown":
             return _stopped(row["status"], "not_unknown")
+        if _chain_unknown(row):
+            return _reconcile_chain(conn, row, body)
+        if set(body) != {"intent_id"}:
+            raise HTTPException(status_code=400, detail="unexpected field")
         result = _result(row, "released", "reconciled_without_resubmit")
         result["resubmit"] = False
+        result["paper"] = True
         _save(conn, intent_id, "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
         return result
 
     return db.exclusive(work)
+
+
+def cumulative_realized_loss(conn) -> Decimal:
+    """Negative realized results only. Fees already sit inside realized_pnl."""
+    rows = conn.execute(
+        "SELECT realized_pnl FROM phantom_reservations WHERE status = 'sim_closed'"
+    ).fetchall()
+    loss = Decimal("0")
+    for row in rows:
+        if row["realized_pnl"] is None:
+            continue
+        pnl = Decimal(row["realized_pnl"])
+        if pnl < 0:
+            loss -= pnl
+    return loss
+
+
+def apply_chain_proof(intent_id: str, signature: str, block_height: int) -> dict:
+    """Confirm a real unknown only when the injected status reader agrees."""
+    if not isinstance(intent_id, str) or not intent_id:
+        raise HTTPException(status_code=400, detail="unknown intent")
+    if not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature):
+        raise HTTPException(status_code=400, detail="signature is not usable")
+    if isinstance(block_height, bool) or not isinstance(block_height, int) or block_height <= 0:
+        raise HTTPException(status_code=400, detail="block height is not usable")
+    proof = _read_chain_status(signature)
+    if proof is None:
+        reason = "status_unavailable" if CHAIN_STATUS is None else "status_rejected"
+        return _stopped("submit_unknown", reason) | {
+            "intent_id": intent_id, "confirmed": False, "resubmit": False, "acquired_raw": None,
+        }
+    if not _proof_matches(proof, block_height):
+        return _stopped("submit_unknown", "status_rejected") | {
+            "intent_id": intent_id, "confirmed": False, "resubmit": False, "acquired_raw": None,
+        }
+    return db.exclusive(lambda conn: _confirm_in(conn, intent_id, signature, block_height, proof))
+
+
+_SIGNATURE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,88}$")
+
+
+def _chain_unknown(row) -> bool:
+    """A claimed chain submit. A null result is the synthetic PAPER unknown."""
+    body = _json_object(row["result_json"])
+    if body.get("provider") == "synthetic_paper" or body.get("origin") == "paper_simulation":
+        return body.get("chain_submit") is True
+    return body.get("chain_submit") is True or body.get("origin") == "direct_whirlpool"
+
+
+def _json_object(raw) -> dict:
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"chain_submit": True}
+    return body if isinstance(body, dict) else {"chain_submit": True}
+
+
+def _reconcile_chain(conn, row, body: dict) -> dict:
+    keys = set(body)
+    if keys == {"intent_id"}:
+        return _held(row, "held_pending_proof")
+    manual = (
+        keys == {"intent_id", "manual", "statement"}
+        and body.get("manual") is True
+        and body.get("statement") == MANUAL_STATEMENT
+    )
+    if manual:
+        result = _result(row, "released", "manual_reconciliation")
+        result["resubmit"] = False
+        result["paper"] = False
+        _save(conn, row["intent_id"], "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
+        return result
+    if keys == {"intent_id", "proof"}:
+        supplied = body.get("proof")
+        if not isinstance(supplied, dict) or set(supplied) != {"signature", "block_height"}:
+            raise HTTPException(status_code=400, detail="unexpected field")
+        signature = supplied.get("signature")
+        block_height = supplied.get("block_height")
+        if not isinstance(signature, str) or not _SIGNATURE.fullmatch(signature):
+            raise HTTPException(status_code=400, detail="signature is not usable")
+        if isinstance(block_height, bool) or not isinstance(block_height, int) or block_height <= 0:
+            raise HTTPException(status_code=400, detail="block height is not usable")
+        proof = _read_chain_status(signature)
+        if proof is None or not _proof_matches(proof, block_height):
+            reason = "status_unavailable" if CHAIN_STATUS is None else "status_rejected"
+            return _held(row, reason)
+        return _confirm_in(conn, row["intent_id"], signature, block_height, proof)
+    raise HTTPException(status_code=400, detail="unexpected field")
+
+
+def _read_chain_status(signature: str):
+    reader = CHAIN_STATUS
+    if reader is None:
+        return None
+    try:
+        proof = reader(signature)
+    except Exception:
+        return None
+    return proof if isinstance(proof, dict) else None
+
+
+def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: dict) -> dict:
+    row = _row(conn, intent_id)
+    if row is None or row["status"] != "submit_unknown" or not _chain_unknown(row):
+        status = None if row is None else row["status"]
+        return _stopped(status or "missing", "not_unknown") | {"confirmed": False, "resubmit": False}
+    if row["wallet"] != phantom_transport.REQUIRED_WALLET or row["chain"] != "solana:mainnet":
+        return _stopped(row["status"], "wallet_network") | {"confirmed": False, "resubmit": False}
+    stored = _json_object(row["result_json"])
+    acquired = stored.get("entry_token_est_out")
+    wallet_raw = stored.get("wallet_usdc_raw")
+    quote_slot = stored.get("context_slot")
+    if not isinstance(quote_slot, int) or proof["slot"] < quote_slot:
+        return _held(row, "slot_unverified")
+    from solana_direct_swap import exit_amount
+    choice = exit_amount(acquired, wallet_raw if isinstance(wallet_raw, int) else -1, confirmed=True)
+    if choice["allowed"] is not True:
+        return _held(row, choice["reason"])
+    stored["chain_submit"] = True
+    stored["confirmed"] = True
+    stored["acquired_raw"] = choice["exit_raw"]
+    stored["exit_raw"] = choice["exit_raw"]
+    stored["signature"] = signature
+    stored["block_height"] = block_height
+    stored["fill"] = "chain_status"
+    stored["live_ready"] = False
+    stored["sign"] = False
+    stored["resubmit"] = False
+    _save(conn, intent_id, "confirmed", row["reserved_usd"], row["entry_quote_id"], row["exit_quote_id"], stored)
+    result = _result(row, "confirmed", "signature_status")
+    result["confirmed"] = True
+    result["resubmit"] = False
+    result["acquired_raw"] = choice["exit_raw"]
+    result["exit_raw"] = choice["exit_raw"]
+    result["reserved_usd"] = row["reserved_usd"]
+    result["realized_pnl"] = None
+    return result
+
+
+def _held(row, reason: str) -> dict:
+    result = _result(row, "submit_unknown", reason)
+    result["resubmit"] = False
+    result["confirmed"] = False
+    result["reserved_usd"] = row["reserved_usd"]
+    return result
+
+
+def _proof_matches(proof, block_height: int) -> bool:
+    if not isinstance(proof, dict):
+        return False
+    if proof.get("err") is not None or proof.get("confirmation_status") != "finalized":
+        return False
+    if proof.get("block_height") != block_height:
+        return False
+    if proof.get("network") != "solana:mainnet":
+        return False
+    slot = proof.get("slot")
+    return isinstance(slot, int) and not isinstance(slot, bool) and slot > 0
 
 
 def _runtime():
@@ -627,9 +797,10 @@ def _reject_tree(value) -> None:
     if isinstance(value, dict):
         for key, item in value.items():
             normalized = str(key).lower().replace("-", "").replace("_", "")
-            if normalized in _BLOCKED:
+            if normalized in _BLOCKED and not (normalized == "signature" and isinstance(item, str)):
                 raise HTTPException(status_code=400, detail="execution fields are refused")
-            _reject_tree(item)
+            if not (normalized == "signature" and isinstance(item, str)):
+                _reject_tree(item)
     elif isinstance(value, list):
         for item in value:
             _reject_tree(item)

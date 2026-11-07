@@ -1116,10 +1116,99 @@ def phantom_halt(request: Request, body: dict) -> dict:
 
 @router.post("/api/phantom/reconcile")
 def phantom_reconcile(request: Request, body: dict) -> dict:
-    """Close an unknown submit without quoting or sending again."""
+    """Release a synthetic PAPER unknown, or hold a real chain unknown."""
     require_app_token(request)
     from phantom_runner import reconcile_unknown
     return reconcile_unknown(body)
+
+
+@router.post("/api/phantom/financial-policy")
+def phantom_financial_policy(request: Request, body: dict | None = None) -> JSONResponse:
+    """Record the server-side limits. Amounts and owner_approved are not accepted."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree
+    from spend_policy import clear_owner_approval, persist_owner_approval, target
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != {"approved"} or not isinstance(body.get("approved"), bool):
+        raise HTTPException(status_code=400, detail="approved must be a boolean")
+    recorded = persist_owner_approval() if body["approved"] else clear_owner_approval()
+    return JSONResponse({
+        "spec": target(),
+        "fee_approved": recorded["fee"]["approved"],
+        "aggregate_approved": recorded["aggregate"]["approved"],
+        "live_ready": False,
+        "sign": False,
+        "send": False,
+        "strategies_enabled": [],
+    }, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/direct-prepare")
+def phantom_direct_prepare(request: Request, body: dict | None = None) -> JSONResponse:
+    """Read-only hash of one injected snapshot. The default adapter is not called."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree
+    _reject_tree(body)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import execution_transport
+    result = execution_transport.prepare_readonly(None, execution_transport.STATE_RPC)
+    result["send"] = False
+    result["sign"] = False
+    result["cli"] = False
+    result["broadcastable"] = False
+    result["runtime_ready"] = False
+    result.pop("accounts", None)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/direct-reserve")
+def phantom_direct_reserve(request: Request, body: dict | None = None) -> JSONResponse:
+    """Reserve the sized entry. The caller does not supply the amount or the fee."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != {"intent_id"} or not isinstance(body.get("intent_id"), str):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import execution_transport
+    import solana_direct_swap
+    rpc = execution_transport.STATE_RPC
+    if rpc is None:
+        raise HTTPException(status_code=409, detail="state_not_fetched")
+    fetched = solana_direct_swap.fetch_state(rpc)
+    if not fetched.get("ok"):
+        raise HTTPException(status_code=409, detail=fetched.get("reason") or "state_not_fetched")
+    try:
+        result = execution_transport.reserve_direct(body["intent_id"], fetched)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="unexpected field")
+    code = 200 if result.get("ok") else 409
+    return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/phantom/direct-status")
+def phantom_direct_status(request: Request, intent_id: str | None = None) -> JSONResponse:
+    """Lifecycle of one direct reservation. No RPC, no signer, no broadcast."""
+    require_app_token(request)
+    if intent_id is not None and (not isinstance(intent_id, str) or len(intent_id) > 80):
+        raise HTTPException(status_code=400, detail="unknown intent")
+    import execution_transport
+    return JSONResponse(execution_transport.direct_status(intent_id), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/direct-confirm")
+def phantom_direct_confirm(request: Request, body: dict | None = None) -> JSONResponse:
+    """A posted signature confirms nothing until the status reader agrees."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree, apply_chain_proof
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != {"intent_id", "signature", "block_height"}:
+        raise HTTPException(status_code=400, detail="unexpected field")
+    result = apply_chain_proof(body.get("intent_id"), body.get("signature"), body.get("block_height"))
+    result["send"] = False
+    result["sign"] = False
+    result["live_ready"] = False
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/push")

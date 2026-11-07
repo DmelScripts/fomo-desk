@@ -62,7 +62,7 @@ class SpendPolicyTests(unittest.TestCase):
         self.assertFalse(spend_policy.fee_view()["approved"])
         self.assertFalse(spend_policy.aggregate_view()["approved"])
 
-    def test_exact_target_row_matches_and_is_not_written_by_the_module(self):
+    def test_exact_target_row_matches_and_a_slot_does_not_bind_it(self):
         self.assertIsNone(spend_policy._read(spend_policy._FEE))
         self._put(spend_policy._FEE, {
             "owner_approved": True,
@@ -75,20 +75,20 @@ class SpendPolicyTests(unittest.TestCase):
             "deposits_count_as_exposure": True,
             "fx_slot": 466547240,
         })
-        self._put(spend_policy._AGGREGATE, {
-            "owner_approved": True,
-            "kind": "aggregate_loss_policy",
-            "source": spend_policy._SOURCE,
-            "max_loss_usd": "20.00",
-            "includes_fees": True,
-            "daily_reset": False,
-            "refill": False,
-            "guaranteed_loss_limit": False,
-            "stops_new_entries": True,
-        })
+        self.assertFalse(spend_policy.fee_view()["approved"])
+        recorded = spend_policy.persist_owner_approval()
+        self.assertTrue(recorded["fee"]["approved"])
+        self.assertTrue(recorded["aggregate"]["approved"])
+        stored = spend_policy._read(spend_policy._FEE)
+        self.assertNotIn("fx_slot", stored)
+        self.assertEqual(stored["max_fee_usd"], "0.05")
         self.assertTrue(spend_policy.fee_view()["approved"])
         self.assertTrue(spend_policy.aggregate_view()["approved"])
         self.assertFalse(spend_policy.target()["recorded"])
+        self.assertFalse(spend_policy.target()["approved"])
+        spend_policy.clear_owner_approval()
+        self.assertFalse(spend_policy.fee_view()["approved"])
+        self.assertEqual(spend_policy._read(spend_policy._FEE)["max_fee_usd"], "0.05")
 
     def _put(self, key, body):
         db.execute(

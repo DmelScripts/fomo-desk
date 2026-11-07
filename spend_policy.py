@@ -1,11 +1,13 @@
-"""Owner financial targets from the 21:37 widget. Nothing here writes them.
+"""Owner financial targets from the 21:37 widget.
 
 Stop new entries at $20 cumulative loss, including fees, inside the $100
 allocation. No daily reset and no refill. This is not a guaranteed loss limit.
 Each transaction may spend at most $0.05 on the DEX swap fee plus the network
 fee. Refundable account deposits are excluded from that fee and still count
-as exposure. A matching database row is not created by import or by the draft
-writers below. A later protected persist, after review, is what would record it.
+as exposure. Import does not write a row. persist_owner_approval() writes the
+exact server-side values and does not accept a caller-supplied amount or slot.
+The owner approves those limits. A fresh FX slot is checked when an order is
+built, and it is not stored on the policy row.
 """
 
 from __future__ import annotations
@@ -109,11 +111,50 @@ def store_aggregate_loss(max_loss_usd: str) -> dict:
     return aggregate_view()
 
 
+def persist_owner_approval() -> dict:
+    """Record the widget. The numbers are the constants above, not a request body."""
+    _write(_FEE, {
+        "approved": True,
+        "owner_approved": True,
+        "kind": "fee_policy",
+        "source": _SOURCE,
+        "max_fee_usd": format(MAX_FEE_USD, "f"),
+        "includes_dex_fee": True,
+        "includes_network_fee": True,
+        "excludes_refundable_deposits": True,
+        "deposits_count_as_exposure": True,
+    })
+    _write(_AGGREGATE, {
+        "approved": True,
+        "owner_approved": True,
+        "kind": "aggregate_loss_policy",
+        "source": _SOURCE,
+        "max_loss_usd": format(MAX_CUMULATIVE_LOSS_USD, "f"),
+        "includes_fees": True,
+        "daily_reset": False,
+        "refill": False,
+        "guaranteed_loss_limit": False,
+        "stops_new_entries": True,
+    })
+    return {"fee": fee_view(), "aggregate": aggregate_view()}
+
+
+def clear_owner_approval() -> dict:
+    """Drop approval. Amounts already stored are not replaced by a caller."""
+    for key in (_FEE, _AGGREGATE):
+        row = _read(key)
+        if isinstance(row, dict):
+            row["approved"] = False
+            row["owner_approved"] = False
+            _write(key, row)
+    return {"fee": fee_view(), "aggregate": aggregate_view()}
+
+
 def _fee_approved(row) -> bool:
-    """True only for the $0.05 target plus a fresh FX slot. Draft writers never set this."""
+    """True only for the $0.05 limit. A slot on the row is not an approval."""
     if not isinstance(row, dict) or row.get("owner_approved") is not True or row.get("kind") != "fee_policy":
         return False
-    if row.get("source") != _SOURCE:
+    if row.get("source") != _SOURCE or "fx_slot" in row:
         return False
     amount = _money(row.get("max_fee_usd"))
     return (
@@ -122,9 +163,6 @@ def _fee_approved(row) -> bool:
         and row.get("includes_network_fee") is True
         and row.get("excludes_refundable_deposits") is True
         and row.get("deposits_count_as_exposure") is True
-        and isinstance(row.get("fx_slot"), int)
-        and not isinstance(row.get("fx_slot"), bool)
-        and row["fx_slot"] > 0
     )
 
 
