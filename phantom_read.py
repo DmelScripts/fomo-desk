@@ -7,8 +7,8 @@ Neither call is made unless an authenticated route asks for it.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import subprocess
 
 import phantom_auth
@@ -57,6 +57,7 @@ def _run(args: list[str]) -> tuple[str, int]:
     binary = phantom_auth._binary()
     home = phantom_auth._home()
     home.mkdir(parents=True, exist_ok=True)
+    os.chmod(home, 0o700)
     try:
         done = subprocess.run(
         [binary, *args],
