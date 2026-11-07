@@ -181,6 +181,47 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertEqual(resolved, expected)
         self.assertEqual(decoded.instructions[0].program_id, expected[1])
 
+    def test_compute_budget_bounds_and_aggregate_findings_skip_simulation(self):
+        heap = bytes([1]) + (32 * 1024).to_bytes(4, "little")
+        ok = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.COMPUTE_BUDGET], 1, [
+            (1, [], heap),
+            (1, [], bytes([2]) + (200_000).to_bytes(4, "little")),
+        ], BLOCK)
+        # No native debit, so the bound fails after the layout is accepted, and simulation is not run.
+        shown = solana_inspect.inspect(ok, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(shown["error_category"], "amount_unbound")
+        self.assertEqual(shown["simulation_status"], "not_run")
+        bad_heap = bytes([1]) + (40 * 1024 + 1).to_bytes(4, "little")
+        bincode_heap = (1).to_bytes(4, "little") + (32 * 1024).to_bytes(4, "little")
+        self.assertEqual(len(bincode_heap), 8)
+        odd = bytes([1, 0, 0])
+        okx = "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u"
+        combined = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.COMPUTE_BUDGET, okx], 2, [
+            (1, [], bad_heap),
+            (2, [0], bytes([7])),
+        ], BLOCK)
+        fake = FakeRpc()
+        rejected = solana_inspect.inspect(combined, solana_inspect.RpcClient(fake))
+        self.assertEqual(rejected["findings"][0]["error_category"], "compute_budget_out_of_bounds")
+        self.assertEqual(rejected["findings"][1]["error_category"], "okx_route_unsupported")
+        self.assertEqual(rejected["blockhash_status"], "not_run")
+        self.assertEqual(rejected["simulation_status"], "not_run")
+        self.assertNotIn("simulateTransaction", fake.methods)
+        self.assertIn(okx, rejected["program_ids"])
+        short = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.COMPUTE_BUDGET], 1, [
+            (1, [], odd),
+        ], BLOCK)
+        malformed = solana_inspect.inspect(short, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(malformed["error_category"], "compute_budget_unverified")
+        self.assertIn("length 3", malformed["reason"])
+        accepted = solana_tx.encode_legacy(WALLET, [WALLET, solana_tx.COMPUTE_BUDGET], 1, [
+            (1, [], bincode_heap),
+        ], BLOCK)
+        self.assertEqual(
+            solana_inspect.inspect(accepted, solana_inspect.RpcClient(FakeRpc()))["error_category"],
+            "amount_unbound",
+        )
+
     def test_token_layouts_are_narrow_and_later_programs_are_kept(self):
         token = solana_tx.TOKEN_PROGRAM
         system = solana_tx.SYSTEM_PROGRAM

@@ -198,14 +198,23 @@ def token_transfer(data: bytes) -> int | None:
     return int.from_bytes(data[1:9], "little")
 
 
-def compute_budget_tag(data: bytes) -> int | None:
-    if not data:
-        return None
-    tag = data[0]
-    expected = {0: 9, 1: 5, 2: 5, 3: 9}
-    if tag not in expected or len(data) != expected[tag]:
-        return None
-    return tag
+def compute_budget_payload(data: bytes) -> tuple[int, bytes, int] | None:
+    """Return tag, payload, and total length for a documented compute-budget encoding.
+
+    web3.js writes a u8 discriminant. The Rust bincode encoding writes a u32
+    discriminant. Payload widths are the same: deprecated request-units is two
+    u32s, heap and compute limit and loaded-account limit are one u32, and the
+    price is one u64.
+    """
+    short = {0: 8, 1: 4, 2: 4, 3: 8, 4: 4}
+    if data and data[0] in short and len(data) == 1 + short[data[0]]:
+        return data[0], data[1:], len(data)
+    if len(data) >= 4:
+        tag = int.from_bytes(data[:4], "little")
+        payload = data[4:]
+        if tag in short and len(payload) == short[tag]:
+            return tag, payload, len(data)
+    return None
 
 
 def _compact(data: bytes, index: int) -> tuple[int, int]:
