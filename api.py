@@ -1029,6 +1029,34 @@ def phantom_login_check(request: Request, body: dict | None = None) -> JSONRespo
     return JSONResponse(check(), headers={"Cache-Control": "no-store"})
 
 
+@router.post("/api/phantom/balance")
+def phantom_balance(request: Request, body: dict | None = None) -> JSONResponse:
+    """Read Solana balances for the allowlisted wallet. This does not send."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_read import balance
+    try:
+        result = balance()
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="phantom package is not available")
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/quote")
+def phantom_quote_check(request: Request, body: dict | None = None) -> JSONResponse:
+    """Request one execute:false quote. The result cannot be sent."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_read import quote
+    try:
+        result = quote()
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="phantom package is not available")
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/phantom/run")
 def phantom_run(request: Request, body: dict) -> dict:
     """PAPER runner only. It cannot send or switch the desk to LIVE."""
