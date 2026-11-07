@@ -989,6 +989,46 @@ def quote_result(request: Request, body: dict) -> dict:
     return record_result(body)
 
 
+@router.post("/api/phantom/login")
+def phantom_login_start(request: Request, body: dict | None = None) -> JSONResponse:
+    """Start one device login. The body cannot choose a command."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_auth import public_login, start
+    try:
+        start()
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="phantom package is not available")
+    return JSONResponse(public_login(), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/phantom/login")
+def phantom_login_view(request: Request) -> JSONResponse:
+    require_app_token(request)
+    from phantom_auth import public_login
+    return JSONResponse(public_login(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/login/cancel")
+def phantom_login_cancel(request: Request, body: dict | None = None) -> JSONResponse:
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_auth import cancel
+    return JSONResponse(cancel(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/login/check")
+def phantom_login_check(request: Request, body: dict | None = None) -> JSONResponse:
+    """Read wallet_addresses after approval. A 401 does not start login."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_auth import check
+    return JSONResponse(check(), headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/phantom/run")
 def phantom_run(request: Request, body: dict) -> dict:
     """PAPER runner only. It cannot send or switch the desk to LIVE."""

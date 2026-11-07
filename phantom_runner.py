@@ -42,7 +42,7 @@ def public_status() -> dict:
         "send": False,
         "executable": False,
         "transport": phantom_transport.TRANSPORT,
-        "auth": phantom_transport.AUTH,
+        "auth": _auth_label(),
         "package": phantom_transport.PINNED_PACKAGE,
         "cli": phantom_transport.PINNED_CLI,
         "bankroll_usd": "100.00",
@@ -60,6 +60,11 @@ def public_status() -> dict:
         "required_wallet": phantom_transport.REQUIRED_WALLET,
         "alerts": _alerts(),
     }
+
+
+def _auth_label() -> str:
+    import phantom_auth
+    return phantom_auth.account_view()["auth_flow"]
 
 
 def halted() -> bool:

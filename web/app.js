@@ -718,6 +718,27 @@
     node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
     node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
     node.appendChild(el("p", "A qualified buy can open an $8 paper allocation. A risk exit closes it. Unrealized marks are not spendable. Available $" + (row.available_usd || "100.00") + " · realized $" + (row.realized_pnl || "0.00") + ".", "muted"));
+    var login = state.phantomLogin || {};
+    if (login.approval_url) {
+      var link = el("a", "Open Phantom device approval");
+      link.href = login.approval_url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      node.appendChild(link);
+      if (login.user_code) node.appendChild(el("p", "Code " + login.user_code));
+      node.appendChild(el("p", "Approving this login does not enable LIVE or sending.", "muted"));
+    }
+    var start = el("button", "Start device login");
+    start.type = "button";
+    start.addEventListener("click", function () {
+      call("/api/phantom/login", { method: "POST", body: {} }).then(function (body) {
+        state.phantomLogin = body;
+        renderPhantom();
+      }).catch(function (error) {
+        if (!(error && error.auth)) noteError(error);
+      });
+    });
+    node.appendChild(start);
   }
 
   function renderQuotes() {
