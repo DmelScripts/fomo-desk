@@ -313,46 +313,105 @@ def remember_review(intent_id: str, tx_b64: str) -> dict:
 
 
 def prepare_readonly(slot: int | None = None, rpc=None) -> dict:
-    """Inspect one injected RPC snapshot. A missing RPC does not open a socket."""
-    chosen = rpc if rpc is not None else STATE_RPC
-    fetched = solana_direct_swap.fetch_state(chosen)
-    if not fetched.get("ok"):
-        prepared = {
-            "stale": True,
-            "fetched": False,
-            "sign": False,
-            "cli": False,
-            "diagnostic": True,
-            "broadcastable": False,
-            "runtime_ready": False,
-            "unsigned_tx_sha256": None,
-            "context_slot": slot,
-            "reason": fetched.get("reason"),
-        }
-    elif slot is not None and fetched["context_slot"] != slot:
-        prepared = {
-            "stale": True,
-            "fetched": True,
-            "sign": False,
-            "cli": False,
-            "diagnostic": True,
-            "broadcastable": False,
-            "runtime_ready": False,
-            "unsigned_tx_sha256": None,
-            "context_slot": fetched["context_slot"],
-            "reason": "slot_mismatch",
-        }
-    else:
-        prepared = solana_direct_swap.prepare_from_state(fetched)
+    """Read, quote, and hash. This does not simulate and does not return transaction bytes."""
+    prepared, _entry, _exit, reader = _assemble_read(slot, rpc)
+    del _entry, _exit
+    return _public_read(prepared, reader)
+
+
+def reserve_from_reader(intent_id: str, rpc) -> dict:
+    """Caps run before simulation. The unsigned bytes stay in this call and are then dropped."""
+    refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False, "runtime_ready": False}
+    if db.get_setting("mode", "PAPER") != "PAPER":
+        return refused | {"reason": "live_locked", "rpc_methods": []}
+    if phantom_runner.halted():
+        return refused | {"reason": "kill_switch", "rpc_methods": []}
+    if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
+        return refused | {"reason": "policy_unrecorded", "rpc_methods": []}
+    prepared, entry_tx, exit_tx, reader = _assemble_read(None, rpc)
+    try:
+        if not prepared.get("ok"):
+            return refused | {
+                "reason": prepared.get("reason") or "cap",
+                "fee_cap_ok": prepared.get("fee_cap_ok"),
+                "exposure_cap_ok": prepared.get("exposure_cap_ok"),
+                "rpc_methods": list(getattr(reader, "methods", [])),
+            }
+        saved = reserve_direct(intent_id, prepared=prepared)
+        saved["rpc_methods"] = list(getattr(reader, "methods", []))
+        if saved.get("created") and entry_tx:
+            import solana_read_rpc
+            saved["simulation"] = solana_read_rpc.simulate(reader, entry_tx, prepared["context_slot"])
+            saved["rpc_methods"] = list(reader.methods)
+        else:
+            saved["simulation"] = {"simulated": False, "sign": False, "broadcastable": False}
+        saved["broadcastable"] = False
+        saved["runtime_ready"] = False
+        saved["sign"] = False
+        return saved
+    finally:
+        del entry_tx, exit_tx
+
+
+def _assemble_read(slot, rpc):
+    import solana_read_rpc
+    chosen = rpc if rpc is not None else solana_read_rpc.configured_reader()
+    if chosen is None:
+        return _not_ready(slot, "reads_disabled"), None, None, None
+    bundle = solana_read_rpc.load_bundle(chosen, slot)
+    if not bundle.get("ok"):
+        prepared = _not_ready(bundle.get("context_slot", slot), bundle.get("reason") or "read_failed")
+        prepared["stale"] = bundle.get("reason") == "slot_mismatch" or bundle.get("stale") is True
+        prepared["fetched"] = bundle.get("fetched") is True
+        return prepared, None, None, chosen
+    prepared = solana_direct_swap.prepare_from_state(bundle)
+    entry_tx = prepared.pop("_entry_tx", None)
+    exit_tx = prepared.pop("_exit_tx", None)
+    if entry_tx and prepared.get("message_sha256"):
+        tail = solana_read_rpc.finish_read(
+            chosen, solana_tx_message(entry_tx), prepared["blockhash"], prepared["context_slot"],
+        )
+        prepared = solana_direct_swap.apply_read_tail(prepared, tail)
+    return prepared, entry_tx, exit_tx, chosen
+
+
+def _public_read(prepared: dict, reader) -> dict:
     prepared["send"] = False
     prepared["cli"] = False
     prepared["broadcastable"] = False
     prepared["runtime_ready"] = False
     prepared["sign"] = False
+    prepared["simulation"] = {"simulated": False, "sign": False, "broadcastable": False}
+    prepared["rpc_methods"] = list(getattr(reader, "methods", []))
     prepared["fee_policy"] = "approved" if spend_policy.fee_view()["approved"] else "not_approved"
     prepared["aggregate_loss_policy"] = spend_policy.aggregate_view()["approved"]
     prepared["strategies_enabled"] = []
+    prepared.pop("_entry_tx", None)
+    prepared.pop("_exit_tx", None)
     return prepared
+
+
+def _not_ready(slot, reason: str) -> dict:
+    return {
+        "ok": False,
+        "stale": True,
+        "fetched": False,
+        "sign": False,
+        "cli": False,
+        "diagnostic": True,
+        "broadcastable": False,
+        "runtime_ready": False,
+        "placeholder": False,
+        "unsigned_tx_sha256": None,
+        "context_slot": slot,
+        "reason": reason,
+        "strategies_enabled": [],
+    }
+
+
+def solana_tx_message(tx_b64: str) -> bytes:
+    import solana_tx
+    return solana_tx.message_bytes(tx_b64)
 
 
 def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None, direct_state=None, blockhash_source=None) -> dict:
@@ -471,7 +530,7 @@ def reconcile(intent_id: str) -> dict:
     }
 
 
-def reserve_direct(intent_id: str, fetched: dict) -> dict:
+def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict | None = None) -> dict:
     """Hold spend, fees, and rent inside one transaction. This does not sign."""
     if not isinstance(intent_id, str) or not intent_id or len(intent_id) > 80:
         raise ValueError("intent")
@@ -482,7 +541,10 @@ def reserve_direct(intent_id: str, fetched: dict) -> dict:
         return refused | {"reason": "kill_switch"}
     if not spend_policy.fee_view()["approved"] or not spend_policy.aggregate_view()["approved"]:
         return refused | {"reason": "policy_unrecorded"}
-    prepared = solana_direct_swap.prepare_from_state(fetched)
+    if prepared is None:
+        prepared = solana_direct_swap.prepare_from_state(fetched or {})
+    prepared.pop("_entry_tx", None)
+    prepared.pop("_exit_tx", None)
     if not prepared.get("byte_checks_passed") or not prepared.get("fee_cap_ok") or not prepared.get("exposure_cap_ok") or not prepared.get("ticket_cap_ok"):
         return refused | {"reason": prepared.get("reason") or "cap", "fee_cap_ok": prepared.get("fee_cap_ok"), "exposure_cap_ok": prepared.get("exposure_cap_ok")}
     from decimal import Decimal, ROUND_CEILING
@@ -504,11 +566,14 @@ def reserve_direct(intent_id: str, fetched: dict) -> dict:
         "exit_raw": None,
         "fee_micro_usdc": prepared["fee_micro_usdc"],
         "exposure_micro_usdc": prepared["exposure_micro_usdc"],
-        "dex_fee_lamports": prepared["dex_fee_lamports"],
-        "base_fee_lamports": prepared["base_fee_lamports"],
-        "priority_fee_lamports": prepared["priority_fee_lamports"],
-        "rent_micro_usdc": prepared["rent_micro_usdc"],
-        "unsigned_tx_sha256": prepared["unsigned_tx_sha256"],
+        "dex_fee_lamports": prepared.get("dex_fee_lamports"),
+        "network_fee_lamports": prepared.get("network_fee_lamports"),
+        "message_sha256": prepared.get("message_sha256"),
+        "exit_tx_sha256": prepared.get("exit_tx_sha256"),
+        "exit_plan_raw": prepared.get("exit_plan_raw"),
+        "blockhash": prepared.get("blockhash"),
+        "rent_micro_usdc": prepared.get("rent_micro_usdc"),
+        "unsigned_tx_sha256": prepared.get("unsigned_tx_sha256"),
         "confirmed": False,
         "live_ready": False,
         "sign": False,
@@ -555,9 +620,25 @@ def reserve_direct(intent_id: str, fetched: dict) -> dict:
             "marginal_micro_usdc": prepared["marginal_micro_usdc"],
             "entry_lamports": prepared["entry_lamports"],
             "quote_token_est_out": prepared["quote_token_est_out"],
+            "min_out": prepared.get("min_out"),
             "wallet_usdc_raw": prepared["wallet_usdc_raw"],
+            "exit_plan_raw": prepared.get("exit_plan_raw"),
+            "exit_quote_out": prepared.get("exit_quote_out"),
+            "exit_closes_usdc": prepared.get("exit_closes_usdc"),
             "exit_close_raw": None,
+            "exit_tx_sha256": prepared.get("exit_tx_sha256"),
+            "network_fee_lamports": prepared.get("network_fee_lamports"),
+            "dex_fee_lamports": prepared.get("dex_fee_lamports"),
+            "unsigned_tx_sha256": prepared.get("unsigned_tx_sha256"),
+            "message_sha256": prepared.get("message_sha256"),
             "context_slot": prepared["context_slot"],
+            "blockhash": prepared.get("blockhash"),
+            "block_height": prepared.get("block_height"),
+            "last_valid_block_height": prepared.get("last_valid_block_height"),
+            "placeholder": False,
+            "slot_is_ttl": False,
+            "fee_cap_ok": prepared.get("fee_cap_ok"),
+            "exposure_cap_ok": prepared.get("exposure_cap_ok"),
             "sign": False,
             "send": False,
             "resubmit": False,
@@ -686,6 +767,8 @@ def _direct_proof(raw: bytes, direct_state, blockhash_source) -> dict:
         return empty
     proved = solana_direct_swap.prove(
         base64.b64encode(raw).decode("ascii"), accounts, slot, bool(direct_state.get("wsol_exists")),
+        network_fee_lamports=direct_state.get("network_fee_lamports"),
+        rent_lamports=direct_state.get("rent_lamports"),
     )
     hook = solana_direct_swap.revalidate_blockhash(proved.get("blockhash"), blockhash_source, slot)
     proved["blockhash_checked"] = hook.get("checked") is True

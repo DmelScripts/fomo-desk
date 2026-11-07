@@ -294,6 +294,35 @@ def encode_v0_transfer_lookup(fee_payer: str, table: str, lamports: int, blockha
     return base64.b64encode(raw).decode("ascii")
 
 
+def message_bytes(tx_b64: str) -> bytes:
+    """The message after the signature block. This is what getFeeForMessage prices."""
+    _count, index, raw = _signed(tx_b64)
+    return raw[index:]
+
+
+def first_signature(tx_b64: str) -> str:
+    """The fee payer signature. An unsigned transaction does not have one."""
+    count, index, raw = _signed(tx_b64)
+    if count < 1 or index < 64:
+        raise ValueError("transaction is not usable")
+    signature = raw[index - 64 * count:index - 64 * count + 64]
+    if signature == b"\x00" * 64:
+        raise ValueError("transaction is unsigned")
+    return b58encode(signature)
+
+
+def _signed(tx_b64: str) -> tuple[int, int, bytes]:
+    raw = base64.b64decode(tx_b64, validate=True)
+    count, index = _compact(raw, 0)
+    if count < 1 or count > 8:
+        raise ValueError("transaction is not usable")
+    start = index
+    index += 64 * count
+    if index >= len(raw) or start != index - 64 * count:
+        raise ValueError("transaction is not usable")
+    return count, index, raw
+
+
 def encode_legacy(fee_payer: str, keys: list[str], readonly_unsigned: int, instructions: list[tuple[int, list[int], bytes]], blockhash: str, required: int = 1) -> str:
     """Unsigned legacy transaction. The first required keys are the signers."""
     if not keys or keys[0] != fee_payer or not 1 <= required <= len(keys) or len(keys) > 64 or len(instructions) > 16:

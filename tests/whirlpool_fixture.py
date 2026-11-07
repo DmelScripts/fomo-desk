@@ -1,4 +1,4 @@
-"""Fake getMultipleAccounts built from the saved tick fixture. Tests only."""
+"""Fake read RPC built from the saved tick fixture. Tests only."""
 import base64
 import json
 from pathlib import Path
@@ -80,3 +80,53 @@ def _accounts() -> dict:
         encoded[address] = item
     encoded[wsol] = None
     return encoded
+
+
+class FakeTransport:
+    """JSON-RPC envelopes for the read methods. This does not open a socket."""
+
+    def __init__(self, slot: int = 466547240, fee: int = 6000, height: int = 900, last_valid: int = 5000, valid: bool = True, sim_err=None, drop: str | None = None):
+        import solana_tx
+        self.slot = slot
+        self.fee = fee
+        self.height = height
+        self.last_valid = last_valid
+        self.valid = valid
+        self.sim_err = sim_err
+        self.drop = drop
+        self.payloads = []
+        self.blockhash = solana_tx.b58encode(b"\x44" * 32)
+
+    def __call__(self, payload):
+        self.payloads.append(payload)
+        method = payload["method"]
+        if method == "getGenesisHash":
+            import solana_read_rpc
+            return {"jsonrpc": "2.0", "id": 1, "result": solana_read_rpc.MAINNET_GENESIS}
+        if method == "getMultipleAccounts":
+            encoded = _accounts()
+            values = []
+            for address in payload["params"][0]:
+                if address == self.drop:
+                    values.append(None)
+                    continue
+                values.append(encoded.get(address))
+            return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": values}}
+        if method == "getMinimumBalanceForRentExemption":
+            return {"jsonrpc": "2.0", "id": 1, "result": 1488440}
+        if method == "getLatestBlockhash":
+            return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"blockhash": self.blockhash, "lastValidBlockHeight": self.last_valid}}}
+        if method == "getFeeForMessage":
+            return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": self.fee}}
+        if method == "isBlockhashValid":
+            return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": self.valid}}
+        if method == "getBlockHeight":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.height}
+        if method == "simulateTransaction":
+            return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"err": self.sim_err, "unitsConsumed": 12000}}}
+        return {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": method}}
+
+
+def reader(slot: int = 466547240, **kwargs):
+    import solana_read_rpc
+    return solana_read_rpc.ReadRpc(FakeTransport(slot=slot, **kwargs))

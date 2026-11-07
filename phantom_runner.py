@@ -215,21 +215,34 @@ def _json_object(raw) -> dict:
     return body if isinstance(body, dict) else {"chain_submit": True}
 
 
-def _reconcile_chain(conn, row, body: dict) -> dict:
-    keys = set(body)
-    if keys == {"intent_id"}:
-        return _held(row, "held_pending_proof")
-    manual = (
-        keys == {"intent_id", "manual", "statement"}
-        and body.get("manual") is True
-        and body.get("statement") == MANUAL_STATEMENT
-    )
-    if manual:
-        result = _result(row, "released", "manual_reconciliation")
+def owner_release(body: dict) -> dict:
+    """An explicit owner release. A statement does not prove the ledger and does not release."""
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != {"intent_id", "release"} or body.get("release") is not True:
+        raise HTTPException(status_code=400, detail="unexpected field")
+    intent_id = body.get("intent_id")
+    if not isinstance(intent_id, str) or not intent_id:
+        raise HTTPException(status_code=400, detail="unknown intent")
+
+    def work(conn):
+        row = _row(conn, intent_id)
+        if row is None or row["status"] != "submit_unknown" or not _chain_unknown(row):
+            status = None if row is None else row["status"]
+            return _stopped(status or "missing", "not_unknown") | {"resubmit": False, "ledger_proven": False}
+        result = _result(row, "released", "owner_release")
         result["resubmit"] = False
         result["paper"] = False
-        _save(conn, row["intent_id"], "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
+        result["ledger_proven"] = False
+        _save(conn, intent_id, "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
         return result
+
+    return db.exclusive(work)
+
+
+def _reconcile_chain(conn, row, body: dict) -> dict:
+    keys = set(body)
+    if keys == {"intent_id"} or "statement" in keys or "manual" in keys:
+        return _held(row, "held_pending_proof")
     if keys == {"intent_id", "proof"}:
         supplied = body.get("proof")
         if not isinstance(supplied, dict) or set(supplied) != {"signature", "block_height"}:
@@ -270,8 +283,20 @@ def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: 
     acquired = stored.get("entry_token_est_out")
     wallet_raw = stored.get("wallet_usdc_raw")
     quote_slot = stored.get("context_slot")
-    if not isinstance(quote_slot, int) or proof["slot"] < quote_slot:
+    if not isinstance(quote_slot, int) or not isinstance(proof.get("slot"), int) or proof["slot"] < quote_slot:
         return _held(row, "slot_unverified")
+    if proof.get("signature") != signature or proof.get("network") != "solana:mainnet" or proof.get("wallet") != row["wallet"]:
+        return _held(row, "receipt_mismatch")
+    if proof.get("message_sha256") != stored.get("message_sha256"):
+        return _held(row, "message_mismatch")
+    if proof.get("network_fee_lamports") != stored.get("network_fee_lamports"):
+        return _held(row, "fee_mismatch")
+    if proof.get("acquired_raw") != stored.get("entry_token_est_out"):
+        return _held(row, "delta_mismatch")
+    if proof.get("confirmation_status") != "finalized" or proof.get("err") is not None:
+        return _held(row, "status_rejected")
+    if proof.get("block_height") is not None and proof.get("block_height") != block_height:
+        return _held(row, "block_height")
     from solana_direct_swap import exit_amount
     choice = exit_amount(acquired, wallet_raw if isinstance(wallet_raw, int) else -1, confirmed=True)
     if choice["allowed"] is not True:

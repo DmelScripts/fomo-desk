@@ -1152,7 +1152,8 @@ def phantom_direct_prepare(request: Request, body: dict | None = None) -> JSONRe
     if body not in (None, {}):
         raise HTTPException(status_code=400, detail="unexpected field")
     import execution_transport
-    result = execution_transport.prepare_readonly(None, execution_transport.STATE_RPC)
+    import solana_read_rpc
+    result = execution_transport.prepare_readonly(None, solana_read_rpc.configured_reader())
     result["send"] = False
     result["sign"] = False
     result["cli"] = False
@@ -1171,17 +1172,16 @@ def phantom_direct_reserve(request: Request, body: dict | None = None) -> JSONRe
     if not isinstance(body, dict) or set(body) != {"intent_id"} or not isinstance(body.get("intent_id"), str):
         raise HTTPException(status_code=400, detail="unexpected field")
     import execution_transport
-    import solana_direct_swap
-    rpc = execution_transport.STATE_RPC
-    if rpc is None:
-        raise HTTPException(status_code=409, detail="state_not_fetched")
-    fetched = solana_direct_swap.fetch_state(rpc)
-    if not fetched.get("ok"):
-        raise HTTPException(status_code=409, detail=fetched.get("reason") or "state_not_fetched")
+    import solana_read_rpc
+    reader = solana_read_rpc.configured_reader()
+    if reader is None:
+        raise HTTPException(status_code=409, detail="reads_disabled")
     try:
-        result = execution_transport.reserve_direct(body["intent_id"], fetched)
+        result = execution_transport.reserve_from_reader(body["intent_id"], reader)
     except ValueError:
         raise HTTPException(status_code=400, detail="unexpected field")
+    except solana_read_rpc.RpcError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason)
     code = 200 if result.get("ok") else 409
     return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
 
@@ -1194,6 +1194,18 @@ def phantom_direct_status(request: Request, intent_id: str | None = None) -> JSO
         raise HTTPException(status_code=400, detail="unknown intent")
     import execution_transport
     return JSONResponse(execution_transport.direct_status(intent_id), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/owner-release")
+def phantom_owner_release(request: Request, body: dict | None = None) -> JSONResponse:
+    """Release one real unknown. The body is the action, not a ledger proof."""
+    require_app_token(request)
+    from phantom_runner import owner_release
+    result = owner_release(body or {})
+    result["send"] = False
+    result["sign"] = False
+    result["live_ready"] = False
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/phantom/direct-confirm")
