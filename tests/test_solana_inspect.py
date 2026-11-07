@@ -40,6 +40,7 @@ class FakeRpc:
         self.block_ok = True
         self.sim_err = None
         self.tables = {}
+        self.owners = {}
 
     def __call__(self, payload):
         self.methods.append(payload["method"])
@@ -59,7 +60,10 @@ class FakeRpc:
             if body is None:
                 return {"result": {"context": {"slot": 9}, "value": None}}
             encoded = base64.b64encode(body).decode("ascii")
-            return {"result": {"context": {"slot": 9}, "value": {"data": [encoded, "base64"]}}}
+            return {"result": {"context": {"slot": 9}, "value": {
+                "owner": self.owners.get(payload["params"][0], solana_tx.SYSTEM_PROGRAM),
+                "data": [encoded, "base64"],
+            }}}
         if method == "getSignatureStatuses":
             return {"result": {"context": {"slot": 12}, "value": [{"confirmationStatus": "confirmed", "err": None}]}}
         raise AssertionError(method)

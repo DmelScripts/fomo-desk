@@ -38,15 +38,16 @@ _SWAP_TAIL[47] = None
 # Decompressed JSON sha256 e6c2b425ec740922ee91aa7a3278cea07f4bc00a3ed9efa4eca16facb481bfca.
 # metadata jupiter 0.1.0. Swap::GoonFiV2 is variant 121 and carries only is_bid.
 _GOONFI_V2 = 121
+_WHIRLPOOL = 17
 IDL_SHA256 = "e6c2b425ec740922ee91aa7a3278cea07f4bc00a3ed9efa4eca16facb481bfca"
 IDL_ACCOUNT = "C88XWfp26heEmDkmfSzeXP7Fd7GQJ2j9dDTUsyiZbUTa"
 
 
-def check_instruction(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+def check_instruction(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], rpc=None, commitment: str = "confirmed") -> None:
     from solana_inspect import GateError
     data = instruction.data
     if len(data) >= 8 and data[:8] == ROUTE_V2:
-        _check_route_v2(index, instruction, keys, program_ids)
+        _check_route_v2(index, instruction, keys, program_ids, rpc, commitment)
         return
     if len(data) < 8 or data[:8] != _SHARED:
         raise GateError(
@@ -106,7 +107,7 @@ def check_instruction(index: int, instruction: solana_tx.Instruction, keys: list
     }
 
 
-def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str]) -> None:
+def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], rpc, commitment: str) -> None:
     """Decode the published route_v2 args. GoonFi accounts stay unverified."""
     from solana_inspect import GateError
     data = instruction.data
@@ -155,7 +156,7 @@ def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[s
     variant = data[34]
     is_bid = data[35]
     bps = int.from_bytes(data[36:38], "little")
-    if count != 1 or variant != _GOONFI_V2 or is_bid > 1 or not 1 <= bps <= 10_000:
+    if count != 1 or variant not in {_GOONFI_V2, _WHIRLPOOL} or is_bid > 1 or not 1 <= bps <= 10_000:
         raise GateError(
             f"jupiter instruction {index} route is not supported",
             "unsupported_route", program_ids, index, variant,
@@ -170,6 +171,9 @@ def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[s
             f"jupiter instruction {index} slippage or fee is outside the request",
             "slippage_unbound", program_ids, index, None,
         )
+    if variant == _WHIRLPOOL:
+        _check_whirlpool(index, instruction, keys, program_ids, rpc, commitment, a_to_b=is_bid == 1)
+        return
     instruction.parsed = {
         "instruction": "route_v2",
         "swap": "GoonFiV2",
@@ -183,6 +187,48 @@ def _check_route_v2(index: int, instruction: solana_tx.Instruction, keys: list[s
     raise GateError(
         f"jupiter instruction {index} route_v2 GoonFiV2 accounts are not verified",
         "dex_accounts_unverified", program_ids, index, variant,
+    )
+
+
+def _check_whirlpool(index, instruction, keys, program_ids, rpc, commitment, a_to_b: bool) -> None:
+    import base64
+    from solana_inspect import GateError
+    import solana_whirlpool
+    remaining = instruction.account_indexes[10:]
+    user_source = keys[instruction.account_indexes[1]]
+    user_dest = keys[instruction.account_indexes[2]]
+    source_mint = keys[instruction.account_indexes[3]]
+    dest_mint = keys[instruction.account_indexes[4]]
+    owner = None
+    data = None
+    if len(remaining) == 11 and rpc is not None:
+        pool = keys[remaining[2]]
+        account = rpc.call("getAccountInfo", [pool, {"encoding": "base64", "commitment": commitment}])
+        value = account.get("value") if isinstance(account, dict) else None
+        if isinstance(value, dict):
+            owner = value.get("owner") if isinstance(value.get("owner"), str) else None
+            raw = value.get("data")
+            if isinstance(raw, list) and raw and isinstance(raw[0], str):
+                data = base64.b64decode(raw[0], validate=True)
+    try:
+        solana_whirlpool.check_swap_accounts(
+            keys, remaining, user_source, user_dest, source_mint, dest_mint, a_to_b, owner, data,
+        )
+    except solana_whirlpool.WhirlpoolError as exc:
+        raise GateError(exc.reason, exc.category, program_ids, index, _WHIRLPOOL)
+    instruction.parsed = {
+        "instruction": "route_v2",
+        "swap": "Whirlpool",
+        "dex_label": solana_whirlpool.LABEL,
+        "dex_program": solana_whirlpool.PROGRAM_ID,
+        "whirlpool_pool_verified": True,
+        "tick_arrays_verified": False,
+        "dex_accounts_verified": False,
+        "idl_sha256": IDL_SHA256,
+    }
+    raise GateError(
+        f"jupiter instruction {index} whirlpool pool matches; tick arrays and the signer PDA are not verified",
+        "whirlpool_tick_arrays_unverified", program_ids, index, _WHIRLPOOL,
     )
 
 

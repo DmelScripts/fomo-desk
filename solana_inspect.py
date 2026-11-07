@@ -272,7 +272,7 @@ def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: lis
     program = instruction.program_id
     tag = instruction.data[0] if instruction.data else None
     if program == solana_jupiter.PROGRAM_ID:
-        solana_jupiter.check_instruction(index, instruction, keys, program_ids)
+        solana_jupiter.check_instruction(index, instruction, keys, program_ids, rpc, commitment)
         return
     if program == OKX_DEX_ROUTER:
         raise GateError(

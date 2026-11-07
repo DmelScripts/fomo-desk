@@ -10,5 +10,9 @@
   "decompressed_sha256": "e6c2b425ec740922ee91aa7a3278cea07f4bc00a3ed9efa4eca16facb481bfca",
   "route_v2_discriminator": [187, 100, 250, 204, 49, 196, 175, 20],
   "goonfi_v2_swap_variant": 121,
-  "goonfi_accounts_verified": false
+  "goonfi_accounts_verified": false,
+  "whirlpool_label": "Whirlpool",
+  "whirlpool_program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+  "whirlpool_swap_variant": 17,
+  "documented_build_filter": "dexes=Whirlpool"
 }

@@ -8,6 +8,7 @@ import phantom_transport
 import solana_inspect
 import solana_jupiter
 import solana_tx
+import solana_whirlpool
 from tests.test_solana_inspect import BLOCK, FakeRpc, WALLET
 
 RENT = solana_tx.TOKEN_ACCOUNT_RENT
@@ -280,6 +281,91 @@ class JupiterBuildTest(unittest.TestCase):
         with self.assertRaises(jupiter_build.BuildError) as timed:
             jupiter_build.parse_build(missing_time)
         self.assertEqual(timed.exception.category, "malformed")
+
+    def test_whirlpool_pool_vaults_and_oracle_reject_substitution(self):
+        import json
+        import subprocess
+        pool = solana_tx.b58encode(b"\x21" * 32)
+        node = subprocess.check_output(["node", "--input-type=module", "-e", """
+import { createRequire } from 'module';
+const require = createRequire('/tmp/phantom-pin/node_modules/@solana/web3.js/package.json');
+const { PublicKey } = require('@solana/web3.js');
+const pool = new PublicKey('%s');
+const program = new PublicKey('%s');
+const [oracle] = PublicKey.findProgramAddressSync([Buffer.from('oracle'), pool.toBuffer()], program);
+console.log(JSON.stringify({oracle: oracle.toBase58()}));
+""" % (pool, solana_whirlpool.PROGRAM_ID)], text=True)
+        self.assertEqual(solana_whirlpool.oracle_address(pool), json.loads(node)["oracle"])
+        source = solana_tx.b58encode(b"\x66" * 32)
+        dest = solana_tx.b58encode(b"\x69" * 32)
+        vault_a = solana_tx.b58encode(b"\x31" * 32)
+        vault_b = solana_tx.b58encode(b"\x32" * 32)
+        oracle = solana_whirlpool.oracle_address(pool)
+        pool_data = solana_whirlpool.reference_pool(NATIVE, vault_a, USDC, vault_b)
+        ticks = [solana_tx.b58encode(bytes([40 + i]) * 32) for i in range(3)]
+        authority = solana_tx.b58encode(b"\x41" * 32)
+        event = solana_tx.b58encode(b"\x70" * 32)
+        data = (
+            solana_jupiter.ROUTE_V2
+            + (10_000_000).to_bytes(8, "little")
+            + (897985).to_bytes(8, "little")
+            + (100).to_bytes(2, "little")
+            + (0).to_bytes(4, "little")
+            + (1).to_bytes(4, "little")
+            + bytes([17, 1])
+            + (10_000).to_bytes(2, "little")
+            + bytes([0, 1])
+        )
+        self.assertEqual(len(data), 40)
+        accounts = [
+            _account(WALLET, signer=True, writable=True),
+            _account(source, writable=True),
+            _account(dest, writable=True),
+            _account(NATIVE),
+            _account(USDC),
+            _account(TOKEN),
+            _account(TOKEN),
+            _account(dest, writable=True),
+            _account(event),
+            _account(solana_jupiter.PROGRAM_ID),
+            _account(TOKEN),
+            _account(authority),
+            _account(pool, writable=True),
+            _account(source, writable=True),
+            _account(vault_a, writable=True),
+            _account(dest, writable=True),
+            _account(vault_b, writable=True),
+            _account(ticks[0], writable=True),
+            _account(ticks[1], writable=True),
+            _account(ticks[2], writable=True),
+            _account(oracle),
+        ]
+        body = _body(outAmount="897985", otherAmountThreshold="889006")
+        body["swapInstruction"] = _ix(solana_jupiter.PROGRAM_ID, accounts, data)
+        body["addressesByLookupTableAddress"] = {TABLE: [pool]}
+        fake = _rpc()
+        meta = (1).to_bytes(4, "little") + (b"\xff" * 8) + (b"\x00" * 44)
+        fake.tables[TABLE] = meta + solana_tx.b58decode(pool)
+        fake.tables[pool] = pool_data
+        fake.owners[pool] = solana_whirlpool.PROGRAM_ID
+        shown = jupiter_build.evaluate(body, solana_inspect.RpcClient(fake))
+        self.assertEqual(shown["error_category"], "whirlpool_tick_arrays_unverified")
+        self.assertEqual(shown["instruction_tag"], 17)
+        self.assertNotIn("simulateTransaction", fake.methods)
+        self.assertNotIn("isBlockhashValid", fake.methods)
+        self.assertFalse(shown["dex_accounts_verified"])
+        self.assertFalse(shown["execution_allowed"])
+        self.assertFalse(shown["fee_authorized"])
+        bad = list(accounts)
+        bad[14] = _account(solana_tx.b58encode(b"\x39" * 32), writable=True)
+        body["swapInstruction"] = _ix(solana_jupiter.PROGRAM_ID, bad, data)
+        swapped = FakeRpc()
+        swapped.tables[TABLE] = fake.tables[TABLE]
+        swapped.tables[pool] = pool_data
+        swapped.owners[pool] = solana_whirlpool.PROGRAM_ID
+        rejected = jupiter_build.evaluate(body, solana_inspect.RpcClient(swapped))
+        self.assertEqual(rejected["error_category"], "whirlpool_vault_unbound")
+        self.assertNotIn("simulateTransaction", swapped.methods)
 
     def test_nonzero_fee_does_not_reach_simulation(self):
         fake = _rpc()
