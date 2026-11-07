@@ -285,6 +285,7 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
     meta = transaction.get("meta") if isinstance(transaction.get("meta"), dict) else {}
     fee = meta.get("fee")
     delta = _usdc_delta(meta, decoded)
+    key_count = len(decoded.static_keys)
     slot = transaction.get("slot")
     if row.get("slot") != slot:
         return None
@@ -295,6 +296,9 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
         "message_sha256": digest,
         "acquired_raw": delta,
         "ata_balance": _token_amount(meta.get("postTokenBalances"), decoded, solana_tx.USDC_MINT),
+        "account_keys": list(decoded.static_keys),
+        "native_pre": _native_list(meta.get("preBalances"), key_count),
+        "native_post": _native_list(meta.get("postBalances"), key_count),
         "network_fee_lamports": fee if isinstance(fee, int) and not isinstance(fee, bool) else None,
         "err": None,
         "confirmation_status": row.get("confirmationStatus"),
@@ -302,6 +306,15 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
         "block_height": row.get("blockHeight") if isinstance(row.get("blockHeight"), int) else None,
         "blockhash": decoded.blockhash,
     }
+
+
+def _native_list(rows, count: int) -> list[int] | None:
+    """Native lamports aligned with the message keys. A missing list is not a row of zeros."""
+    if not isinstance(rows, list) or len(rows) != count:
+        return None
+    if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in rows):
+        return None
+    return list(rows)
 
 
 def _usdc_delta(meta: dict, decoded) -> int | None:

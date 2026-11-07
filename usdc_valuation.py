@@ -76,8 +76,14 @@ def assess(quote: dict, now: float) -> dict:
         "confidence": "published_conf",
         "feed_id": FEED_ID,
         "publish_time": published,
+        "price": price,
+        "conf": conf,
+        "expo": expo,
         "upper": format(upper, "f"),
         "lower": format(lower, "f"),
+        "live_provider": False,
+        "fetched": False,
+        "origin": "injected_quote",
     }
 
 
@@ -153,8 +159,77 @@ def enable() -> None:
     )
 
 
+def snapshot(quote: dict) -> dict:
+    """Freeze one injected quote. A later set_quote does not rewrite this copy."""
+    if not isinstance(quote, dict):
+        return {"usable": False, "live_provider": False, "fetched": False, "origin": "injected_quote", "accepted_band": None}
+    return {
+        "usable": quote.get("usable") is True,
+        "live_provider": False,
+        "fetched": False,
+        "origin": "injected_quote",
+        "accepted_band": None,
+        "reason": quote.get("reason"),
+        "upper": quote.get("upper"),
+        "lower": quote.get("lower"),
+        "publish_time": quote.get("publish_time"),
+        "feed_id": quote.get("feed_id"),
+        "price": quote.get("price"),
+        "conf": quote.get("conf"),
+        "expo": quote.get("expo"),
+    }
+
+
+def round_trip_pnl(entry_sol: int, entry_fee: int, exit_sol: int, exit_fee: int, entry_micro: int, exit_micro: int, entry_quote: dict, exit_quote: dict) -> dict:
+    """SOL out once, both chain fees once, SOL back once. The DEX stays inside those SOL amounts.
+
+    Cost uses the entry quote's upper bound. Proceeds and the exit fee use the exit quote.
+    """
+    if not isinstance(entry_quote, dict) or not isinstance(exit_quote, dict) or entry_quote.get("usable") is not True or exit_quote.get("usable") is not True:
+        return {"ok": False, "reason": "valuation_missing", "realized_pnl": None, "dex_added_twice": False}
+    cost_micro = _ceil_lamports(entry_sol, entry_micro) + _ceil_lamports(entry_fee, entry_micro)
+    exit_fee_micro = _ceil_lamports(exit_fee, exit_micro)
+    proceeds_micro = _floor_lamports(exit_sol, exit_micro)
+    if cost_micro is None or exit_fee_micro is None or proceeds_micro is None:
+        return {"ok": False, "reason": "valuation_fields", "realized_pnl": None, "dex_added_twice": False}
+    cost = usd_ceiling(cost_micro, entry_quote)
+    fee = usd_ceiling(exit_fee_micro, exit_quote)
+    proceeds = usd_floor(proceeds_micro, exit_quote)
+    if cost is None or fee is None or proceeds is None:
+        return {"ok": False, "reason": entry_quote.get("reason") or exit_quote.get("reason") or "valuation_missing", "realized_pnl": None, "dex_added_twice": False}
+    signed = proceeds - cost - fee
+    return {
+        "ok": True,
+        "reason": None,
+        "realized_pnl": format(signed, "f"),
+        "cost_usd": format(cost, "f"),
+        "exit_fee_usd": format(fee, "f"),
+        "proceeds_usd": format(proceeds, "f"),
+        "dex_added_twice": False,
+        "proceeds_are_exit_sol": True,
+    }
+
+
+def _ceil_lamports(lamports: int, micro_per_sol: int) -> int | None:
+    if isinstance(lamports, bool) or isinstance(micro_per_sol, bool):
+        return None
+    if not isinstance(lamports, int) or not isinstance(micro_per_sol, int) or lamports < 0 or micro_per_sol <= 0:
+        return None
+    if lamports == 0:
+        return 0
+    return (lamports * micro_per_sol + 10**9 - 1) // 10**9
+
+
+def _floor_lamports(lamports: int, micro_per_sol: int) -> int | None:
+    if isinstance(lamports, bool) or isinstance(micro_per_sol, bool):
+        return None
+    if not isinstance(lamports, int) or not isinstance(micro_per_sol, int) or lamports < 0 or micro_per_sol <= 0:
+        return None
+    return (lamports * micro_per_sol) // 10**9
+
+
 def set_quote(quote: dict | None) -> None:
-    """Test fixture only. Production leaves this unset."""
+    """Install a test dict. This is not a Hermes read and not a live provider."""
     global _QUOTE
     _QUOTE = quote
 
@@ -168,6 +243,9 @@ def _unused(reason: str) -> dict:
         "reason": reason,
         "pool_micro_usdc_is_usd": False,
         "feed_id": FEED_ID,
+        "live_provider": False,
+        "fetched": False,
+        "origin": "injected_quote",
     }
 
 

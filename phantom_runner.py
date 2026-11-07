@@ -302,8 +302,22 @@ def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: 
         return _held(row, "receipt_mismatch")
     if proof.get("message_sha256") != stored.get("message_sha256"):
         return _held(row, "message_mismatch")
-    if proof.get("network_fee_lamports") != stored.get("network_fee_lamports"):
-        return _held(row, "fee_mismatch")
+    from solana_direct_swap import entry_economics
+    import usdc_valuation
+    import spend_policy
+    landed = entry_economics(
+        proof.get("account_keys"), proof.get("native_pre"), proof.get("native_post"),
+        proof.get("network_fee_lamports"), stored.get("entry_lamports"),
+    )
+    if landed.get("ok") is not True:
+        return _held(row, landed.get("reason") or "native_missing")
+    source = spend_policy.usd_source()
+    snap = usdc_valuation.snapshot(source)
+    pool_micro = stored.get("pool_micro_per_sol")
+    dex_micro = usdc_valuation._ceil_lamports(stored.get("dex_fee_lamports") or 0, pool_micro if isinstance(pool_micro, int) else 0)
+    from execution_transport import _combined_fee_ok
+    if snap.get("usable") is not True or dex_micro is None or not _combined_fee_ok(dex_micro, landed["network_fee"], pool_micro, snap):
+        return _held(row, snap.get("reason") or "fee_cap")
     acquired_now = proof.get("acquired_raw")
     minimum = stored.get("entry_token_min_out")
     estimated = stored.get("entry_token_est_out")
@@ -330,6 +344,14 @@ def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: 
     stored["signature"] = signature
     stored["block_height"] = block_height
     stored["fill"] = "chain_status"
+    stored["actual_sol_out_lamports"] = landed["sol_out"]
+    stored["actual_network_fee_lamports"] = landed["network_fee"]
+    stored["rent_net_lamports"] = landed["rent_net"]
+    stored["entry_valuation"] = snap
+    stored["entry_price_micro"] = pool_micro
+    stored["peak_price_micro"] = pool_micro
+    stored["opened_at"] = time.time()
+    stored["trail_armed"] = False
     stored["live_ready"] = False
     stored["sign"] = False
     stored["resubmit"] = False

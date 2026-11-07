@@ -152,7 +152,7 @@ def start_tick_index(tick: int, spacing: int) -> int:
     return math.floor(tick / span) * span
 
 
-def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]]) -> None:
+def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]], created: set[str] | None = None) -> None:
     """Check one Orca swap account list. route_v2's signer is the user."""
     # Orca's swap struct is 11 accounts. A live Jupiter route_v2 had 12 remaining
     # accounts. No published Jupiter layout says the extra one is a program-id
@@ -188,8 +188,11 @@ def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: s
         raise WhirlpoolError("whirlpool vault accounts do not match the pool", "whirlpool_vault_unbound")
     if keys[remaining[10]] != oracle_address(pool):
         raise WhirlpoolError("whirlpool oracle is not the published PDA", "whirlpool_oracle_unbound")
-    _token_identity(accounts, user_source, source_mint, user_authority, "whirlpool_owner_unbound")
-    _token_identity(accounts, user_dest, dest_mint, user_authority, "whirlpool_owner_unbound")
+    created_now = set(created or ())
+    if user_source not in created_now:
+        _token_identity(accounts, user_source, source_mint, user_authority, "whirlpool_owner_unbound")
+    if user_dest not in created_now:
+        _token_identity(accounts, user_dest, dest_mint, user_authority, "whirlpool_owner_unbound")
     _token_identity(accounts, vault_a, mint_a, None, "whirlpool_vault_unbound")
     _token_identity(accounts, vault_b, mint_b, None, "whirlpool_vault_unbound")
     _tick_arrays(keys, remaining[7:10], pool, spacing, current, a_to_b, accounts)

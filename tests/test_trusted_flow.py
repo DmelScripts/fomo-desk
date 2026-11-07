@@ -13,6 +13,7 @@ import phantom_transport
 import solana_direct_swap
 import solana_read_rpc
 import solana_tx
+import exit_policy
 import spend_policy
 import usdc_valuation
 from tests.support import temp_desk_env
@@ -21,6 +22,15 @@ from tests.whirlpool_fixture import FakeTransport, reader
 WALLET = phantom_transport.REQUIRED_WALLET
 WALLET_ID = phantom_transport.REQUIRED_WALLET_ID
 SIGNATURE = "1" * 64
+
+
+def _natives(decoded, wallet_pre: int, sol_delta: int, fee: int):
+    """sol_delta is SOL that leaves besides the fee. A negative delta is SOL coming back."""
+    pre = [0] * len(decoded.static_keys)
+    post = [0] * len(decoded.static_keys)
+    pre[0] = wallet_pre
+    post[0] = wallet_pre - sol_delta - fee
+    return pre, post
 
 
 def _identity():
@@ -68,6 +78,8 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertEqual(stored["message_sha256"], built["message_sha256"])
         self.assertEqual(row["status"], "sim_open")
         execution_transport.remember_review("flow", entry)
+        solana_read_rpc.enable_reads()
+        solana_read_rpc.TRANSPORT = FakeTransport()
         calls = []
 
         def runner(argv, _env, _timeout):
@@ -103,11 +115,14 @@ class TrustedFlowTests(unittest.TestCase):
         transport.statuses = {"context": {"slot": stored["context_slot"]}, "value": [{
             "slot": stored["context_slot"], "err": None, "confirmationStatus": "finalized",
         }]}
+        wallet_pre, wallet_post = _natives(decoded, 2_000_000_000, stored["entry_lamports"], stored["network_fee_lamports"])
         transport.transaction = {
             "slot": stored["context_slot"],
             "meta": {
                 "err": None,
                 "fee": stored["network_fee_lamports"],
+                "preBalances": wallet_pre,
+                "postBalances": wallet_post,
                 "preTokenBalances": [{"accountIndex": index, "mint": solana_tx.USDC_MINT, "owner": WALLET, "uiTokenAmount": {"amount": str(pre)}}],
                 "postTokenBalances": [{"accountIndex": index, "mint": solana_tx.USDC_MINT, "owner": WALLET, "uiTokenAmount": {"amount": str(pre + delta)}}],
             },
@@ -120,7 +135,12 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertEqual(confirmed["acquired_raw"], delta)
         self.assertNotEqual(confirmed["acquired_raw"], stored["entry_token_est_out"])
         self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'flow'")[0]["reserved_usd"], held["reserved_usd"])
-        planned = execution_transport.plan_acquired_exit("flow", reader())
+        exit_policy.set_approval(True)
+        confirmed_row = json.loads(db.query("SELECT result_json FROM phantom_reservations WHERE intent_id = 'flow'")[0]["result_json"])
+        self.assertFalse(confirmed_row["entry_valuation"]["live_provider"])
+        self.assertEqual(confirmed_row["entry_valuation"]["origin"], "injected_quote")
+        stop_mark = confirmed_row["entry_price_micro"] * 106 // 100 + 1
+        planned = execution_transport.plan_acquired_exit("flow", reader(), stop_mark, runner)
         self.assertTrue(planned["ok"], planned)
         self.assertEqual(planned["exit_raw"], delta)
         self.assertFalse(planned["send"])
@@ -159,10 +179,13 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertIsNone(db.query("SELECT realized_pnl FROM phantom_reservations WHERE intent_id = 'flow'")[0]["realized_pnl"])
         close = FakeTransport()
         close.statuses = missing_pre.statuses
+        exit_pre_native, exit_post_native = _natives(exit_decoded, 1_000_000_000, -80_000_000, stored["network_fee_lamports"])
         close.transaction = {
             "slot": bundle["context_slot"],
             "meta": {
                 "err": None, "fee": stored["network_fee_lamports"],
+                "preBalances": exit_pre_native,
+                "postBalances": exit_post_native,
                 "preTokenBalances": [{"accountIndex": exit_index, "mint": solana_tx.USDC_MINT, "owner": WALLET, "uiTokenAmount": {"amount": str(exit_pre)}}],
                 "postTokenBalances": [{"accountIndex": exit_index, "mint": solana_tx.USDC_MINT, "owner": WALLET, "uiTokenAmount": {"amount": str(pre)}}],
             },
@@ -172,6 +195,13 @@ class TrustedFlowTests(unittest.TestCase):
         booked = execution_transport.book_exit_close("flow", solana_tx.first_signature(encoded_exit), 21)
         self.assertTrue(booked["booked"], booked)
         self.assertEqual(booked["reserved_usd"], "0.00")
+        expected = usdc_valuation.round_trip_pnl(
+            after["actual_sol_out_lamports"], after["actual_network_fee_lamports"],
+            80_000_000, stored["network_fee_lamports"], after["pool_micro_per_sol"],
+            after["exit_pool_micro_per_sol"], after["entry_valuation"], after["exit_valuation"],
+        )
+        self.assertEqual(booked["realized_pnl"], expected["realized_pnl"])
+        self.assertNotEqual(booked["realized_pnl"], "-0.10")
         self.assertTrue(booked["realized_pnl"].startswith("-"))
         closed = db.query("SELECT status, reserved_usd, realized_pnl FROM phantom_reservations WHERE intent_id = 'flow'")[0]
         self.assertEqual(closed["status"], "sim_closed")

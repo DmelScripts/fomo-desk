@@ -445,7 +445,7 @@ def prepare_from_state(fetched: dict) -> dict:
     pool = fetched["pool"]
     data = fetched["pool_data"]
     accounts = fetched["accounts"]
-    spend = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
+    spend = ticket_lamports(micro)
     blockhash = fetched.get("blockhash")
     fresh = quote_is_fresh(fetched.get("fetched_at"), time.time(), slot)
     last_valid = fetched.get("last_valid_block_height")
@@ -846,10 +846,64 @@ def _allowed_amounts(state: dict, *, allow_probe: bool = False) -> set[int]:
     """The round-down under the ticket. The 0.01 SOL probe is diagnostic only."""
     amounts = {INPUT_LAMPORTS} if allow_probe else set()
     micro = marginal_micro_usdc_per_sol(state["sqrt_price"])
-    capped = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
+    capped = ticket_lamports(micro)
     if capped > 0:
         amounts.add(capped)
     return amounts
+
+
+def ticket_lamports(pool_micro: int) -> int:
+    """Round the spend down so the USD ceiling at the quote's upper bound is at most $8.
+
+    With no usable quote this stays the pool-micro cap. That cap is not itself a USD price.
+    """
+    base = lamports_within_usd_cap(TICKET_USD_MICRO, pool_micro)
+    sized = _usd_ticket_lamports(pool_micro)
+    return base if sized is None else sized
+
+
+def _usd_ticket_lamports(pool_micro: int) -> int | None:
+    try:
+        import spend_policy
+        source = spend_policy.usd_source()
+    except Exception:
+        return None
+    if source.get("usable") is not True:
+        return None
+    from decimal import Decimal
+    import usdc_valuation
+    micro_cap = _max_micro_under_usd(Decimal("8.00"), source)
+    if micro_cap <= 0:
+        return 0
+    lamports = lamports_within_usd_cap(micro_cap, pool_micro)
+    while lamports > 0 and _ceil_micro(lamports, pool_micro) > micro_cap:
+        lamports -= 1
+    ceiling = usdc_valuation.usd_ceiling(_ceil_micro(lamports, pool_micro), source) if lamports else None
+    if ceiling is None or ceiling > Decimal("8.00"):
+        return 0
+    return lamports
+
+
+def _max_micro_under_usd(cap, quote: dict) -> int:
+    import usdc_valuation
+    from decimal import Decimal, ROUND_FLOOR
+    upper = Decimal(quote["upper"])
+    if upper <= 0:
+        return 0
+    guess = int((cap / upper * Decimal(1_000_000)).to_integral_value(rounding=ROUND_FLOOR))
+    for _ in range(6):
+        priced = usdc_valuation.usd_ceiling(guess, quote)
+        if priced is None or priced <= cap:
+            break
+        guess = int(Decimal(guess) * (cap / priced))
+    while guess > 0 and (usdc_valuation.usd_ceiling(guess, quote) is None or usdc_valuation.usd_ceiling(guess, quote) > cap):
+        guess -= 1
+    while True:
+        nxt = usdc_valuation.usd_ceiling(guess + 1, quote)
+        if nxt is None or nxt > cap:
+            break
+        guess += 1
+    return guess
 
 
 def paper_lifecycle() -> dict:
@@ -926,7 +980,8 @@ def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], s
     quote = solana_whirlpool_quote.quote_exact_in(
         state, arrays, spend, direction, slippage_bps, sqrt_price_limit, context_slot,
     )
-    if quote["token_in"] != spend or quote["token_est_out"] > TICKET_USD_MICRO and spend != INPUT_LAMPORTS:
+    over_micro = quote["token_est_out"] > TICKET_USD_MICRO and spend != INPUT_LAMPORTS and _usd_ticket_lamports(marginal_micro_usdc_per_sol(state["sqrt_price"])) is None
+    if quote["token_in"] != spend or over_micro:
         raise ValueError("quoted output is outside the cap")
     return transaction_from_fields(
         pool, pool_data, source, dest, spend, quote["token_min_out"], sqrt_price_limit,
@@ -1268,6 +1323,213 @@ def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
     if kinds != ["create", "create", "transfer", "sync", "swap", "close"]:
         return {"error": "wrap_unbound"}
     return {"swap": swap, "lamports": transfer, "wsol": wsol, "usdc": usdc}
+
+
+def prove_entry_tx(tx_b64: str, stored: dict, accounts: dict | None) -> str | None:
+    """The only supported entry is the wrap, one swap, and the close. Extras fail closed."""
+    decoded = _decode_tx(tx_b64)
+    if decoded is None:
+        return "bytes"
+    if not _has_swap(decoded):
+        return "swap_missing"
+    plan = _wrap_plan(decoded)
+    if plan.get("error"):
+        return "transaction_shape"
+    parsed = decode_swap_data(plan["swap"].data)
+    if parsed is None or not parsed["amount_specified_is_input"] or not parsed["a_to_b"]:
+        return "direction"
+    if parsed["sqrt_price_limit"] != MIN_SQRT_PRICE + 1:
+        return "sqrt_price_limit"
+    if parsed["amount"] == INPUT_LAMPORTS:
+        return "probe"
+    if parsed["amount"] != stored.get("entry_lamports") or plan["lamports"] != parsed["amount"]:
+        return "amount"
+    if parsed["other_amount_threshold"] != stored.get("entry_token_min_out"):
+        return "min_out"
+    if len(plan["swap"].account_indexes) != 11:
+        return "swap_accounts"
+    pool = decoded.static_keys[plan["swap"].account_indexes[2]]
+    if pool != SOL_USDC_POOL:
+        return "pool"
+    if decoded.static_keys[plan["swap"].account_indexes[1]] != phantom_transport.REQUIRED_WALLET:
+        return "authority"
+    if decoded.static_keys[plan["swap"].account_indexes[0]] != solana_tx.TOKEN_PROGRAM:
+        return "token_program"
+    if decoded.static_keys[plan["swap"].account_indexes[10]] != solana_whirlpool.oracle_address(pool):
+        return "oracle"
+    privilege = _privilege_map(decoded, plan["swap"])
+    if privilege:
+        return privilege
+    if accounts is None:
+        return "account_proof"
+    try:
+        solana_whirlpool.check_swap_accounts(
+            decoded.static_keys, plan["swap"].account_indexes, phantom_transport.REQUIRED_WALLET,
+            plan["wsol"], plan["usdc"], solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, True, accounts,
+            created={plan["wsol"]},
+        )
+    except solana_whirlpool.WhirlpoolError as error:
+        return error.category
+    return None
+
+
+def prove_exit_tx(tx_b64: str, acquired: int, min_out: int, accounts: dict | None) -> str | None:
+    """USDC to SOL: create the wrapped account, one swap, close it. USDC stays open."""
+    decoded = _decode_tx(tx_b64)
+    if decoded is None:
+        return "bytes"
+    if not _has_swap(decoded):
+        return "swap_missing"
+    if [_kind(decoded, item) for item in decoded.instructions] != ["create", "swap", "close"]:
+        return "transaction_shape"
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    usdc = solana_tx.associated_token_address(wallet, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
+    create, swap, close = decoded.instructions
+    if not _ata_create(decoded, create, wsol, solana_tx.NATIVE_MINT):
+        return "transaction_shape"
+    if not _close_wsol(decoded, close, wsol):
+        return "transaction_shape"
+    parsed = decode_swap_data(swap.data)
+    if parsed is None or not parsed["amount_specified_is_input"] or parsed["a_to_b"]:
+        return "direction"
+    if parsed["sqrt_price_limit"] != MAX_SQRT_PRICE - 1:
+        return "sqrt_price_limit"
+    if parsed["amount"] != acquired or parsed["other_amount_threshold"] != min_out:
+        return "amount"
+    if len(swap.account_indexes) != 11:
+        return "swap_accounts"
+    pool = decoded.static_keys[swap.account_indexes[2]]
+    if pool != SOL_USDC_POOL:
+        return "pool"
+    if decoded.static_keys[swap.account_indexes[1]] != wallet:
+        return "authority"
+    if decoded.static_keys[swap.account_indexes[0]] != solana_tx.TOKEN_PROGRAM:
+        return "token_program"
+    if decoded.static_keys[swap.account_indexes[10]] != solana_whirlpool.oracle_address(pool):
+        return "oracle"
+    if decoded.static_keys[swap.account_indexes[3]] != wsol or decoded.static_keys[swap.account_indexes[5]] != usdc:
+        return "token_accounts"
+    privilege = _privilege_map(decoded, swap)
+    if privilege:
+        return privilege
+    if accounts is None:
+        return "account_proof"
+    try:
+        solana_whirlpool.check_swap_accounts(
+            decoded.static_keys, swap.account_indexes, wallet, usdc, wsol,
+            solana_tx.USDC_MINT, solana_tx.NATIVE_MINT, False, accounts, created={wsol},
+        )
+    except solana_whirlpool.WhirlpoolError as error:
+        return error.category
+    return None
+
+
+def entry_economics(account_keys, native_pre, native_post, fee, entry_lamports: int) -> dict:
+    """Rent of a wrapped account created and closed here nets to zero. A missing native list is not zero."""
+    checked = _native_frame(account_keys, native_pre, native_post, fee)
+    if checked.get("ok") is not True:
+        return checked
+    if native_post[0] != native_pre[0] - int(entry_lamports) - int(fee):
+        return {"ok": False, "reason": "native_contradiction"}
+    return {"ok": True, "sol_out": int(entry_lamports), "network_fee": int(fee), "rent_net": 0}
+
+
+def exit_economics(account_keys, native_pre, native_post, fee) -> dict:
+    """SOL that came back is the wallet's native increase plus the chain fee. No wrapped-token row is invented."""
+    checked = _native_frame(account_keys, native_pre, native_post, fee)
+    if checked.get("ok") is not True:
+        return {"ok": False, "reason": "proceeds_missing"}
+    proceeds = native_post[0] - native_pre[0] + int(fee)
+    if proceeds <= 0:
+        return {"ok": False, "reason": "proceeds_missing"}
+    return {"ok": True, "sol_proceeds": proceeds, "network_fee": int(fee), "rent_net": 0}
+
+
+def _native_frame(account_keys, native_pre, native_post, fee) -> dict:
+    if not isinstance(account_keys, list) or not account_keys:
+        return {"ok": False, "reason": "native_missing"}
+    if not isinstance(native_pre, list) or not isinstance(native_post, list):
+        return {"ok": False, "reason": "native_missing"}
+    if len(native_pre) != len(account_keys) or len(native_post) != len(account_keys):
+        return {"ok": False, "reason": "native_missing"}
+    if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in native_pre + native_post):
+        return {"ok": False, "reason": "native_missing"}
+    if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
+        return {"ok": False, "reason": "fee_missing"}
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    if account_keys[0] != wallet or wsol not in account_keys:
+        return {"ok": False, "reason": "native_missing"}
+    index = account_keys.index(wsol)
+    # Created and closed in this transaction: both ends are zero. A preexisting balance
+    # without a token row cannot be split into rent and leftover SOL, so it stays unproven.
+    if native_pre[index] != 0 or native_post[index] != 0:
+        return {"ok": False, "reason": "rent_unproven"}
+    return {"ok": True}
+
+
+def _decode_tx(tx_b64: str):
+    try:
+        return solana_tx.decode_transaction(base64.b64decode(tx_b64, validate=True))
+    except Exception:
+        return None
+
+
+def _has_swap(decoded) -> bool:
+    program = solana_whirlpool.PROGRAM_ID
+    return any(decoded.static_keys[item.program_index] == program for item in decoded.instructions if item.program_index < len(decoded.static_keys))
+
+
+def _privilege_map(decoded, swap) -> str | None:
+    try:
+        if decoded.required_signatures != 1 or decoded.readonly_signed != 0:
+            return "privileges"
+    except Exception:
+        return "privileges"
+    pool = decoded.static_keys[swap.account_indexes[2]]
+    oracle = solana_whirlpool.oracle_address(pool)
+    readonly = {
+        solana_tx.TOKEN_PROGRAM, solana_tx.SYSTEM_PROGRAM, solana_tx.ASSOCIATED_TOKEN,
+        solana_whirlpool.PROGRAM_ID, solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, oracle,
+    }
+    writable = {decoded.static_keys[index] for index in swap.account_indexes[2:10]}
+    writable.add(phantom_transport.REQUIRED_WALLET)
+    for index, key in enumerate(decoded.static_keys):
+        try:
+            signer, can_write = decoded.account_flags(index)
+        except ValueError:
+            return "privileges"
+        if key == phantom_transport.REQUIRED_WALLET:
+            if not signer or not can_write:
+                return "privileges"
+        elif key in readonly:
+            if signer or can_write:
+                return "privileges"
+        elif key in writable:
+            if signer or not can_write:
+                return "privileges"
+        else:
+            return "account_set"
+    return None
+
+
+def _ata_create(decoded, instruction, ata: str, mint: str) -> bool:
+    wallet = phantom_transport.REQUIRED_WALLET
+    if decoded.static_keys[instruction.program_index] != solana_tx.ASSOCIATED_TOKEN or instruction.data != bytes([1]):
+        return False
+    if len(instruction.account_indexes) != 6:
+        return False
+    keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+    return keys == [wallet, ata, wallet, mint, solana_tx.SYSTEM_PROGRAM, solana_tx.TOKEN_PROGRAM]
+
+
+def _close_wsol(decoded, instruction, wsol: str) -> bool:
+    wallet = phantom_transport.REQUIRED_WALLET
+    if decoded.static_keys[instruction.program_index] != solana_tx.TOKEN_PROGRAM or instruction.data != bytes([9]):
+        return False
+    keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+    return keys == [wsol, wallet, wallet]
 
 
 def _kind(decoded: solana_tx.Decoded, instruction: solana_tx.Instruction) -> str:
