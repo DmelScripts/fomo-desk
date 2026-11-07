@@ -33,11 +33,15 @@ def fee_usd(ticket_usd: float, discount: float | None = None) -> float:
 
 
 def round_trip_fees(size_usd: float, entry: float, exit_price: float, discount: float | None = None) -> float:
+    sold = exit_notional(size_usd, entry, exit_price)
+    return fee_usd(size_usd, discount) + fee_usd(sold, discount)
+
+
+def exit_notional(size_usd: float, entry: float, exit_price: float) -> float:
+    """Dollars received before the exit fee. Entry notional is size_usd."""
     if entry <= 0:
-        exit_notional = size_usd
-    else:
-        exit_notional = size_usd * (exit_price / entry)
-    return fee_usd(size_usd, discount) + fee_usd(exit_notional, discount)
+        return float(size_usd)
+    return float(size_usd) * (float(exit_price) / float(entry))
 
 
 def pnl_usd(size_usd: float, entry: float, exit_price: float, discount: float | None = None) -> tuple[float, float]:

@@ -32,7 +32,7 @@ TABLES = {
     "positions": (
         "id", "mint", "opened_at", "entry_price", "size_usd", "peak_price",
         "stop_price", "trail_active", "closed_at", "exit_price", "exit_reason",
-        "pnl_usd", "fees_usd", "mode", "trail_giveback_pct",
+        "pnl_usd", "fees_usd", "mode", "trail_giveback_pct", "entry_fee_usd",
     ),
     "activity": (
         "id", "ts", "kind", "mint", "agent", "title", "subtitle", "value",
@@ -129,7 +129,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

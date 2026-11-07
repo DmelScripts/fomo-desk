@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS positions (
     pnl_usd REAL,
     fees_usd REAL,
     mode TEXT CHECK (mode IN ('PAPER', 'LIVE')),
-    trail_giveback_pct REAL
+    trail_giveback_pct REAL,
+    entry_fee_usd REAL
 );
 
 CREATE TABLE IF NOT EXISTS activity (
@@ -239,6 +240,11 @@ def init_db() -> None:
                     (now,),
                 )
             conn.execute("PRAGMA user_version=3")
+        if version < 4:
+            have = {row[1] for row in conn.execute("PRAGMA table_info(positions)")}
+            if "entry_fee_usd" not in have:
+                conn.execute("ALTER TABLE positions ADD COLUMN entry_fee_usd REAL")
+            conn.execute("PRAGMA user_version=4")
         conn.commit()
     finally:
         conn.close()
@@ -249,6 +255,21 @@ def execute(sql: str, params: tuple = ()) -> None:
     try:
         conn.execute(sql, params)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def exclusive(work):
+    """Run work(conn) inside one immediate transaction. work may read and write."""
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = work(conn)
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

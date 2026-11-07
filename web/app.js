@@ -370,6 +370,19 @@
     today.textContent = pct(data.today_pct);
     today.className = "num today" + (num(data.today_pct) && data.today_pct < 0 ? " down" : "");
     $("multiplier").textContent = num(data.multiplier) ? data.multiplier.toFixed(2) + "×" : "—";
+    var unrealized = $("unrealized");
+    if (unrealized) {
+      if (data.open_positions > 0 && num(data.unrealized)) {
+        unrealized.hidden = false;
+        unrealized.textContent = "Unrealized " + usd(data.unrealized);
+      } else if (data.open_positions > 0) {
+        unrealized.hidden = false;
+        unrealized.textContent = "Unrealized n/a";
+      } else {
+        unrealized.hidden = true;
+        unrealized.textContent = "";
+      }
+    }
     $("paper-badge").hidden = data.mode !== "PAPER";
     var running = (data.agents || []).filter(function (card) { return card.running; }).length;
     $("agents-label").textContent = "Agents · " + running + " running";
@@ -1028,6 +1041,8 @@
       var trail = coin.exit_lines ? coin.exit_lines.trail : null;
       var carried = num(coin.position.stop_pct) ? " · -" + Number(coin.position.stop_pct).toFixed(2) + "%" : "";
       card.appendChild(el("p", "Stop " + (num(stop) ? usd(stop) : "—") + carried + " carried"));
+      var unreal = coin.position.unrealized_usd;
+      card.appendChild(el("p", num(unreal) ? "Unrealized " + usd(unreal) : "Unrealized n/a"));
       card.appendChild(el("p", "Trail " + (num(trail) ? usd(trail) : "not trailing")));
       var left = coin.position.timeout_left_s;
       var leftText = "Time left —";

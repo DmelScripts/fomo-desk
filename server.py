@@ -138,7 +138,7 @@ async def _fetch_prices(url: str):
 def health():
     return {
         "ok": True,
-        "step": 10,
+        "step": 11,
         "db": db_status(),
         "agents_enabled": agents_enabled(),
         "heartbeats": heartbeat_ages(),

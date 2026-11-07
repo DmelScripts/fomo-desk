@@ -345,17 +345,23 @@ def _cards() -> list[dict]:
 
 
 def _state(now: float | None = None) -> dict:
-    balance = paper_balance()
+    from agents.executor import paper_books, paper_night_status
+    books = paper_books()
+    balance = books["equity"]
     baseline = _balance_before(_night_start(time.time() if now is None else now))
     today = 0.0 if baseline == 0 else (balance - baseline) / baseline * 100.0
     multiplier = 1.0 if baseline == 0 else balance / baseline
     return {
         "balance": balance,
+        "cash": books["cash"],
+        "realized": books["realized"],
+        "unrealized": books["unrealized"],
         "today_pct": today,
         "multiplier": multiplier,
         "mode": get_setting("mode", "PAPER"),
         "agents": _cards(),
         "open_positions": int(query("SELECT COUNT(*) AS n FROM positions WHERE closed_at IS NULL")[0]["n"] or 0),
+        "paper_night": paper_night_status(),
         "fixture": os.environ.get("DESK_FIXTURE") == "1",
     }
 
@@ -488,9 +494,26 @@ def _coin(mint: str) -> dict:
             "exit_price": pos["exit_price"],
             "exit_reason": pos["exit_reason"],
             "pnl_usd": pos["pnl_usd"],
+            "fees_usd": pos["fees_usd"],
+            "entry_fee_usd": pos["entry_fee_usd"] if "entry_fee_usd" in pos.keys() else None,
             "mode": pos["mode"],
             "open": pos["closed_at"] is None,
         }
+        if position["open"]:
+            from agents.executor import _entry_fee, _last_price
+            import fees as fee_mod
+            entry_fee = _entry_fee(pos)
+            position["entry_fee_usd"] = entry_fee
+            mark = _last_price(mint)
+            entry = float(pos["entry_price"] or 0)
+            size = float(pos["size_usd"] or 0)
+            if mark is None or entry <= 0:
+                position["unrealized_usd"] = None
+            else:
+                sold = fee_mod.exit_notional(size, entry, mark)
+                position["unrealized_usd"] = (sold - fee_mod.fee_usd(sold)) - (size + entry_fee)
+        else:
+            position["unrealized_usd"] = None
         trail = None
         if pos["trail_active"] and pos["peak_price"] is not None and pos["trail_giveback_pct"] is not None:
             trail = float(pos["peak_price"]) * (1 - float(pos["trail_giveback_pct"]) / 100.0)
