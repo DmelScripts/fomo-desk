@@ -289,16 +289,17 @@ def _preflight(text: str, code: int) -> dict:
         "expected_mints": inspected.get("expected_mints"),
         "quoted_out_amount": inspected.get("quoted_out_amount"),
         "slippage_bps": inspected.get("slippage_bps"),
-        "slippage_verified": inspected.get("slippage_verified", False),
+        "slippage_field_ok": inspected.get("slippage_field_ok", False),
+        "slippage_verified": False,
         "quote_id": _find_quote_id(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else None),
         "buy_amount": _buy_base(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else {}),
     })
-    base["intent_verified"] = bool(
-        inspected.get("chain_ok")
-        and base.get("buy_amount")
-        and inspected.get("quoted_out_amount") == base["buy_amount"]
-        and inspected.get("slippage_verified") is True
+    # buyAmount is the quote's output amount. quotedOutAmount is the Jupiter
+    # instruction field. Equality is not a minimum-output guarantee.
+    base["quoted_out_equals_buy_amount"] = bool(
+        base.get("buy_amount") and inspected.get("quoted_out_amount") == base["buy_amount"]
     )
+    base["intent_verified"] = False
     base["spend_verified"] = False
     base["execution_allowed"] = False
     base["send"] = False

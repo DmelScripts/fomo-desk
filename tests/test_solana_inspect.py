@@ -148,6 +148,39 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertFalse(rejected["freshness_guarantee"])
         self.assertEqual(wrong.methods, ["getGenesisHash"])
 
+    def test_two_lookup_tables_follow_the_web3_writable_then_readonly_order(self):
+        # Serialized by @solana/web3.js MessageV0.compile. Static payer and program,
+        # then both tables' writable addresses, then both tables' readonly addresses.
+        tx = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAQABAgEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQEBBAIEAwUBCQIVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQEAAQEWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFgEAAQE="
+        expected = [
+            "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+            "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+            "gBxS1f6uyyGPuW5MzGBukidSb71jdsCb5fZaoSzULE5",
+            "p2Yicb86aZig616Eav2VWG9vuXR5mEqhtzshZYBxzsV",
+            "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+            "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        ]
+        decoded = solana_tx.decode_transaction(base64.b64decode(tx))
+        self.assertEqual(decoded.version, "v0")
+        self.assertEqual(len(decoded.signers), 1)
+        self.assertEqual(decoded.fee_payer, expected[0])
+        self.assertEqual([item.program_index for item in decoded.instructions], [1])
+        self.assertEqual(decoded.instructions[0].account_indexes, [2, 4, 3, 5])
+        fake = FakeRpc()
+        for look, addresses in (
+            (decoded.lookups[0], [bytes([10]) * 32, bytes([11]) * 32]),
+            (decoded.lookups[1], [bytes([12]) * 32, bytes([13]) * 32]),
+        ):
+            meta = (1).to_bytes(4, "little") + (b"\xff" * 8) + (b"\x00" * 44)
+            fake.tables[look.table] = meta + b"".join(addresses)
+        self.assertEqual(decoded.lookups[0].writable, [0])
+        self.assertEqual(decoded.lookups[0].readonly, [1])
+        self.assertEqual(decoded.lookups[1].writable, [0])
+        self.assertEqual(decoded.lookups[1].readonly, [1])
+        resolved = solana_inspect._resolve(decoded, solana_inspect.RpcClient(fake), "confirmed")
+        self.assertEqual(resolved, expected)
+        self.assertEqual(decoded.instructions[0].program_id, expected[1])
+
     def test_token_layouts_are_narrow_and_later_programs_are_kept(self):
         token = solana_tx.TOKEN_PROGRAM
         system = solana_tx.SYSTEM_PROGRAM
@@ -242,7 +275,8 @@ class TestSolanaInspect(unittest.TestCase):
         ], BLOCK)
         checked = solana_inspect.inspect(swap, solana_inspect.RpcClient(FakeRpc()))
         self.assertTrue(checked["chain_ok"])
-        self.assertTrue(checked["slippage_verified"])
+        self.assertTrue(checked["slippage_field_ok"])
+        self.assertFalse(checked["slippage_verified"])
         self.assertEqual(checked["quoted_out_amount"], "898162")
         self.assertEqual(checked["slippage_bps"], 100)
         self.assertFalse(checked["spend_verified"])

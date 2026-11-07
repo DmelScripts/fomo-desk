@@ -94,14 +94,14 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         return _rejected("more than one jupiter route", "unsupported_route", program_ids)
     quoted_out = None
     slippage_bps = None
-    slippage_verified = False
+    slippage_field_ok = False
     if jupiter:
         route = jupiter[0]
         if route["in_amount"] != debited:
             return _rejected("jupiter input does not match the SOL debit", "amount_unbound", program_ids)
         quoted_out = route["quoted_out_amount"]
         slippage_bps = route["slippage_bps"]
-        slippage_verified = True
+        slippage_field_ok = True
     try:
         validity = rpc.call("isBlockhashValid", [decoded.blockhash, {"commitment": commitment}])
         slot = _slot(validity)
@@ -136,7 +136,8 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "program_ids": sorted({item.program_id for item in decoded.instructions}),
         "quoted_out_amount": quoted_out,
         "slippage_bps": slippage_bps,
-        "slippage_verified": slippage_verified,
+        "slippage_field_ok": slippage_field_ok,
+        "slippage_verified": False,
         "spend_verified": False,
         "intent_verified": False,
         "provider_expiry": None,
@@ -200,7 +201,14 @@ def _exact_b58(text: str, size: int) -> bytes | None:
 
 
 def _resolve(decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> list[str]:
+    """Loaded addresses are every table's writables, then every table's readables.
+
+    That is the order in solana-web3.js MessageV0.resolveAddressTableLookups.
+    Writable and readonly indexes are not interleaved per table.
+    """
     keys = list(decoded.static_keys)
+    writable = []
+    readonly = []
     for lookup in decoded.lookups:
         account = rpc.call("getAccountInfo", [lookup.table, {"encoding": "base64", "commitment": commitment}])
         value = account.get("value")
@@ -213,8 +221,10 @@ def _resolve(decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> lis
         for index in lookup.writable + lookup.readonly:
             if index >= len(addresses):
                 raise ValueError("lookup table is not usable")
-        keys.extend(addresses[index] for index in lookup.writable)
-        keys.extend(addresses[index] for index in lookup.readonly)
+        writable.extend(addresses[index] for index in lookup.writable)
+        readonly.extend(addresses[index] for index in lookup.readonly)
+    keys.extend(writable)
+    keys.extend(readonly)
     decoded.resolved_keys = keys
     for instruction in decoded.instructions:
         if instruction.program_index >= len(keys) or any(index >= len(keys) for index in instruction.account_indexes):
@@ -523,6 +533,7 @@ def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] 
         "instruction_index": index,
         "instruction_tag": tag,
         "program_ids": sorted(set(program_ids or [])),
+        "slippage_field_ok": False,
         "slippage_verified": False,
         "spend_verified": False,
         "intent_verified": False,

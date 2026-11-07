@@ -88,7 +88,6 @@ def check_instruction(index: int, instruction: solana_tx.Instruction, keys: list
         "in_amount": in_amount,
         "quoted_out_amount": str(quoted),
         "slippage_bps": slippage_bps,
-        "min_out_amount": str(quoted * (10_000 - slippage_bps) // 10_000),
         "route_steps": steps,
     }
 
