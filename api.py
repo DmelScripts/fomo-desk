@@ -969,7 +969,7 @@ def mode(request: Request, body: dict) -> dict:
 
 @router.post("/api/quote/request")
 def quote_request(request: Request, body: dict) -> dict:
-    """Owner asks for a PAPER quote. This process does not call Phantom."""
+    """Owner stores a PAPER quote request. This process does not call Phantom."""
     require_app_token(request)
     from quotes import create_request
     return create_request(body)
@@ -977,7 +977,7 @@ def quote_request(request: Request, body: dict) -> dict:
 
 @router.post("/api/quote/result")
 def quote_result(request: Request, body: dict) -> dict:
-    """Owner records a quote-only result. Execution fields are refused."""
+    """Owner records a manually imported quote. Execution fields are refused."""
     require_app_token(request)
     from quotes import record_result
     return record_result(body)

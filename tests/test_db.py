@@ -49,8 +49,10 @@ TABLES = {
     "push_outbox": ("event_id", "endpoint", "status", "updated_at"),
     "restart_events": ("event_id", "agent", "down_min", "push_text", "created_at"),
     "quotes": (
-        "id", "status", "label", "provider", "wallet", "amount", "mint", "chain",
-        "slippage", "expiry", "out_amount", "failure", "created_at", "updated_at",
+        "id", "status", "label", "provider", "provenance", "wallet", "amount", "amount_unit",
+        "sell_chain", "buy_chain", "sell_native", "buy_native", "sell_mint", "buy_mint",
+        "sell_decimals", "buy_decimals", "exact_out", "slippage", "expiry", "out_amount",
+        "provider_quote_id", "failure", "request_json", "created_at", "updated_at",
     ),
 }
 
@@ -140,7 +142,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

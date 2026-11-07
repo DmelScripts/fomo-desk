@@ -710,16 +710,23 @@
     if (!node) return;
     clear(node);
     node.appendChild(el("h2", "Quotes"));
-    node.appendChild(el("p", "PAPER · quote only. This desk does not call Phantom or send a transaction.", "muted"));
+    node.appendChild(el("p", "PAPER · manually imported. The Phantom bridge is not connected. This desk does not call Phantom or send a transaction.", "muted"));
     var rows = (state.account && state.account.quotes) || [];
     if (!rows.length) {
       node.appendChild(el("p", "No quote has been recorded.", "muted"));
       return;
     }
     rows.forEach(function (row) {
-      var line = row.label + " · " + row.status + " · " + row.chain + " · " + row.amount;
-      if (row.mint) line += " · " + row.mint;
+      var line = row.label + " · " + row.status + " · " + row.provider;
+      line += " · " + row.provenance + " · bridge " + row.bridge;
+      line += " · " + (row.wallet || "wallet pending");
+      line += " · slippage " + row.slippage;
+      line += " · " + (row.expiry ? "expires " + new Date(row.expiry * 1000).toISOString() : "no expiry");
+      if (!row.usable) line += " · unusable";
+      line += " · " + row.sell_chain + " " + row.amount + " " + row.amount_unit;
+      if (row.buy_mint) line += " → " + row.buy_mint;
       if (row.out_amount) line += " → " + row.out_amount;
+      if (row.provider_quote_id) line += " · " + row.provider_quote_id;
       if (row.failure) line += " · " + row.failure;
       node.appendChild(el("p", line));
     });

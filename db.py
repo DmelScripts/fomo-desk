@@ -184,14 +184,25 @@ CREATE TABLE IF NOT EXISTS quotes (
     status TEXT NOT NULL,
     label TEXT NOT NULL,
     provider TEXT NOT NULL,
+    provenance TEXT NOT NULL,
     wallet TEXT,
     amount TEXT NOT NULL,
-    mint TEXT,
-    chain TEXT NOT NULL,
-    slippage REAL,
+    amount_unit TEXT NOT NULL,
+    sell_chain TEXT NOT NULL,
+    buy_chain TEXT NOT NULL,
+    sell_native INTEGER NOT NULL,
+    buy_native INTEGER NOT NULL,
+    sell_mint TEXT,
+    buy_mint TEXT,
+    sell_decimals INTEGER,
+    buy_decimals INTEGER,
+    exact_out INTEGER NOT NULL,
+    slippage REAL NOT NULL,
     expiry REAL,
     out_amount TEXT,
+    provider_quote_id TEXT,
     failure TEXT,
+    request_json TEXT NOT NULL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -299,6 +310,40 @@ def init_db() -> None:
             conn.execute("PRAGMA user_version=6")
         if version < 7:
             conn.execute("PRAGMA user_version=7")
+        if version < 8:
+            # Version 7 stored a manual note. That table was never deployed.
+            # Replace it with the immutable pair contract.
+            conn.execute("DROP TABLE IF EXISTS quotes")
+            conn.executescript("""
+                CREATE TABLE quotes (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    wallet TEXT,
+                    amount TEXT NOT NULL,
+                    amount_unit TEXT NOT NULL,
+                    sell_chain TEXT NOT NULL,
+                    buy_chain TEXT NOT NULL,
+                    sell_native INTEGER NOT NULL,
+                    buy_native INTEGER NOT NULL,
+                    sell_mint TEXT,
+                    buy_mint TEXT,
+                    sell_decimals INTEGER,
+                    buy_decimals INTEGER,
+                    exact_out INTEGER NOT NULL,
+                    slippage REAL NOT NULL,
+                    expiry REAL,
+                    out_amount TEXT,
+                    provider_quote_id TEXT,
+                    failure TEXT,
+                    request_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+            """)
+            conn.execute("PRAGMA user_version=8")
         conn.commit()
     finally:
         conn.close()
