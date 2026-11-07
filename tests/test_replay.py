@@ -179,9 +179,13 @@ class TestReplayGuard(unittest.TestCase):
         db.init_db()
         db.set_setting("mode", "LIVE", "test")
         db.set_setting("agents_enabled", "1", "test")
+        previous_jev = os.environ.pop("TYPESAFE_API_KEY", None)
+        self.addCleanup(lambda: _put("TYPESAFE_API_KEY", previous_jev))
         replay.prepare()
         self.assertEqual(db.get_setting("mode"), "PAPER")
         self.assertEqual(db.get_setting("agents_enabled"), "0")
+        self.assertEqual(db.get_setting("analyst_mode"), "rules")
+        self.assertFalse(__import__("agents.executor", fromlist=["paper_night_done"]).paper_night_done())
 
     def test_notify_off_records_activity_without_calling_webpush(self):
         from notifier import Notifier

@@ -407,6 +407,7 @@ async def pumpportal_loop(scanner: Scanner) -> None:
             async with websockets.connect(PUMPPORTAL_URL) as ws:
                 backoff = 1
                 await ws.send(json.dumps({"method": "subscribeMigration"}))
+                log.info("pumpportal migration socket open")
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=WS_SILENT_S)

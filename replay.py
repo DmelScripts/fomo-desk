@@ -5,17 +5,25 @@ does not call it. Start it only with DESK_REPLAY=1 and a dedicated data
 directory whose name contains "replay". Stop it with SIGTERM or SIGINT.
 The default length is 7200 seconds. Web push stays off unless
 DESK_REPLAY_NOTIFY=1.
+
+The five agents run on that socket. DexScreener, RugCheck, and the public
+Solana RPC are the inputs. No trade subscription, no wallet, and no LIVE.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import db
+from agents.executor import paper_night_done
+from agents.scanner import DEX_URL, PUMPPORTAL_URL, RUGCHECK_REPORT
 from main import run_desk
 
 
@@ -40,8 +48,11 @@ def guard() -> Path:
     return path
 
 
-def prepare() -> None:
-    """Create the isolated database and keep it in PAPER. Agents are not a setting here."""
+def prepare() -> str:
+    """Create the isolated database and keep it in PAPER. Agents are not a setting here.
+
+    With no Jev key this process uses rules. It does not read or print the key.
+    """
     db.init_db()
     if (db.get_setting("mode") or "PAPER") != "PAPER":
         db.set_setting("mode", "PAPER", "replay")
@@ -49,10 +60,73 @@ def prepare() -> None:
         raise SystemExit("refusing: mode is not PAPER")
     if db.get_setting("agents_enabled") == "1":
         db.set_setting("agents_enabled", "0", "replay")
+    if paper_night_done():
+        raise SystemExit("refusing: paper night is unlocked")
+    if os.environ.get("TYPESAFE_API_KEY"):
+        mode = db.get_setting("analyst_mode", "jev") or "jev"
+    else:
+        db.set_setting("analyst_mode", "rules", "replay")
+        mode = "rules"
+    return mode
 
 
-async def _bounded(seconds: float) -> None:
+def write_provenance(directory: Path, analyst_mode: str, seconds: float) -> dict:
+    """Facts about this run. No secrets, no endpoints, no key material."""
+    rpc = db.get_setting("rpc_url") or ""
+    host = urlparse(rpc).hostname
+    record = {
+        "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "replay_seconds": seconds,
+        "mode": db.get_setting("mode"),
+        "agents_enabled": db.get_setting("agents_enabled"),
+        "paper_night_done": paper_night_done(),
+        "analyst_mode": analyst_mode,
+        "analyst_mode_declared": "rules" if analyst_mode == "rules" else "configured",
+        "notify": os.environ.get("DESK_NOTIFY") != "0",
+        "source": PUMPPORTAL_URL,
+        "source_method": "subscribeMigration",
+        "trade_subscriptions": False,
+        "dex": DEX_URL,
+        "rugcheck": RUGCHECK_REPORT,
+        "rpc_host": host,
+        "live_orders": False,
+        "wallet": False,
+        "data_dir_name": directory.name,
+    }
+    (directory / "provenance.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return record
+
+
+def export_activity(directory: Path) -> dict:
+    """Every activity row, plus counts. An empty list is an honest zero."""
+    rows = []
+    try:
+        for row in db.query(
+            "SELECT ts, kind, mint, agent, title, subtitle, value FROM activity ORDER BY ts, id"
+        ):
+            rows.append({key: row[key] for key in row.keys()})
+    except Exception:
+        rows = []
+    counts = {}
+    for table in ("scans", "audits", "verdicts", "signals", "positions", "coins"):
+        try:
+            counts[table] = int(db.query(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"] or 0)
+        except Exception:
+            counts[table] = None
+    payload = {"exported_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "activity": rows, "counts": counts}
+    (directory / "activity.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
+async def _bounded(directory: Path, seconds: float) -> None:
     task = asyncio.create_task(run_desk())
+
+    async def snapshot() -> None:
+        while True:
+            await asyncio.sleep(30)
+            export_activity(directory)
+
+    snap = asyncio.create_task(snapshot())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):
@@ -64,22 +138,27 @@ async def _bounded(seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
     except TimeoutError:
         pass
+    snap.cancel()
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
+    export_activity(directory)
 
 
 def main() -> None:
-    guard()
+    directory = guard()
     if os.environ.get("DESK_REPLAY_NOTIFY") != "1":
         os.environ["DESK_NOTIFY"] = "0"
-    prepare()
+    analyst_mode = prepare()
     seconds = float(os.environ.get("REPLAY_SECONDS") or "7200")
     if seconds <= 0:
         raise SystemExit("refusing: REPLAY_SECONDS must be positive")
-    asyncio.run(_bounded(seconds))
+    directory.mkdir(parents=True, exist_ok=True)
+    write_provenance(directory, analyst_mode, seconds)
+    export_activity(directory)
+    asyncio.run(_bounded(directory, seconds))
 
 
 if __name__ == "__main__":

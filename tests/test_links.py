@@ -104,6 +104,57 @@ class TestLinks(unittest.TestCase):
         for host in SHORTENERS:
             self.assertNotIn(host, source)
 
+    def test_api_account_push_and_report_use_links(self):
+        """API, a rendered push, Account, and the report payload. Not a Canvas page."""
+        import os
+        from fastapi.testclient import TestClient
+
+        import db
+        from report import gather
+        from tests.support import temp_desk_env
+
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        os.environ["APP_TOKEN"] = "dummy-app-token"
+        self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
+        os.environ.pop("DESK_AGENTS", None)
+        db.init_db()
+        db.execute(
+            "INSERT INTO coins (mint, name, symbol) VALUES (?, ?, ?)",
+            (MINT, "Link", "LNK"),
+        )
+        import server
+        client = TestClient(server.app)
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        auth = {"Authorization": "Bearer dummy-app-token"}
+        coin = client.get("/api/coin/" + MINT, headers=auth)
+        self.assertEqual(coin.status_code, 200)
+        self.assertEqual(coin.json()["coin_url"], coin_url(MINT, "solana"))
+        self.assertIn("r=savipww", coin.json()["coin_url"])
+        account = client.get("/api/account", headers=auth)
+        self.assertEqual(account.json()["signup_url"], SIGNUP_URL)
+        self.assertIn("/r/savipww", account.json()["signup_url"])
+        report = client.get("/api/report", headers=auth)
+        self.assertEqual(report.status_code, 200)
+        self.assertTrue(report.json()["footer"].endswith(SIGNUP_URL))
+        gathered = gather()
+        self.assertIn("/r/savipww", gathered["footer"])
+        trades = gathered["trades"]
+        for key in ("red", "green", "unpriced"):
+            for row in trades[key]:
+                self.assertIn("r=savipww", row["coin_url"])
+        notifier = Notifier(mode="PAPER")
+        url = coin_url(MINT, "solana")
+        notifier.push("Buy LNK", "sized", url, [{"label": "Buy on FOMO", "url": url}])
+        self.assertIn("r=savipww", notifier.pushes[0]["buttons"][0]["url"])
+        self.assertNotIn("bit.ly", json_text(notifier.pushes[0]))
+
+
+def json_text(value) -> str:
+    import json
+    return json.dumps(value)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
