@@ -1065,6 +1065,24 @@ def phantom_exit_policy_set(request: Request, body: dict | None = None) -> JSONR
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
+@router.post("/api/phantom/preflight")
+def phantom_preflight(request: Request, body: dict | None = None) -> JSONResponse:
+    """Read-only prepare and inspect. The unsigned transaction is not returned."""
+    require_app_token(request)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    from phantom_read import preflight
+    try:
+        result = preflight()
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="phantom package is not available")
+    result["send"] = False
+    result["executable"] = False
+    result["live_ready"] = False
+    result["execution_allowed"] = False
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/phantom/quote")
 def phantom_quote_check(request: Request, body: dict | None = None) -> JSONResponse:
     """Request one execute:false quote. The result cannot be sent."""

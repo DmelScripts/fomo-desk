@@ -18,12 +18,15 @@ import phantom_transport
 import solana_tx
 
 _METHODS = {
+    "getGenesisHash",
     "isBlockhashValid",
     "simulateTransaction",
     "getSignatureStatuses",
     "getTransaction",
     "getAccountInfo",
 }
+MAINNET_RPC = "https://api.mainnet-beta.solana.com"
+MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 _COMMITMENTS = {"confirmed", "finalized"}
 _MAX_LAMPORTS = 10_000_000
 
@@ -45,9 +48,23 @@ class RpcClient:
         if not isinstance(envelope, dict) or envelope.get("error") or "result" not in envelope:
             raise RpcError("rpc result is not usable")
         result = envelope["result"]
+        if method == "getGenesisHash":
+            if not isinstance(result, str) or not result:
+                raise RpcError("rpc result is not usable")
+            return result
         if not isinstance(result, dict):
             raise RpcError("rpc result is not usable")
         return result
+
+
+def mainnet_rpc() -> RpcClient:
+    """Fixed public mainnet endpoint. The URL is not taken from the request."""
+    def transport(payload):
+        import httpx
+        response = httpx.post(MAINNET_RPC, json=payload, timeout=20.0)
+        response.raise_for_status()
+        return response.json()
+    return RpcClient(transport)
 
 
 def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamports: int = _MAX_LAMPORTS) -> dict:
@@ -59,19 +76,21 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         raw = base64.b64decode(tx_b64, validate=True)
         decoded = solana_tx.decode_transaction(raw)
         keys = _resolve(decoded, rpc, commitment)
-        _programs(decoded, keys)
+        program_ids = _programs(decoded, keys)
         debited = _debits(decoded, keys)
+    except GateError as exc:
+        return _rejected(exc.reason, exc.category, exc.program_ids)
     except (ValueError, RpcError) as exc:
-        return _rejected(str(exc))
+        return _rejected(str(exc), "not_usable")
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
-        return _rejected("fee payer is not the allowlisted wallet")
+        return _rejected("fee payer is not the allowlisted wallet", "wallet_unbound", program_ids)
     if debited is None or debited > max_lamports:
-        return _rejected("debit is not bound")
+        return _rejected("debit is not bound", "amount_unbound", program_ids)
     try:
         validity = rpc.call("isBlockhashValid", [decoded.blockhash, {"commitment": commitment}])
         slot = _slot(validity)
         if validity.get("value") is not True:
-            return _rejected("blockhash is not valid")
+            return _rejected("blockhash is not valid", "blockhash_invalid", program_ids)
         simulated = rpc.call("simulateTransaction", [tx_b64, {
             "encoding": "base64",
             "commitment": commitment,
@@ -81,9 +100,13 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         sim_slot = _slot(simulated)
         value = simulated.get("value")
         if not isinstance(value, dict) or value.get("err") is not None:
-            return _rejected("simulation failed")
+            return _rejected("simulation failed", "simulation_failed", program_ids)
+        if sim_slot < slot:
+            return _rejected("slot is inconsistent", "slot_inconsistent", program_ids)
+    except GateError as exc:
+        return _rejected(exc.reason, exc.category, exc.program_ids)
     except (ValueError, RpcError) as exc:
-        return _rejected(str(exc))
+        return _rejected(str(exc), "not_usable", program_ids)
     return {
         "stage": "chain_checked",
         "chain_ok": True,
@@ -102,7 +125,29 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "send": False,
         "executable": False,
         "live_ready": False,
+        "error_category": None,
     }
+
+
+def preflight_transaction(tx_b64: str, rpc: RpcClient) -> dict:
+    """Check mainnet identity, then inspect. A valid blockhash is not an expiry."""
+    try:
+        genesis = rpc.call("getGenesisHash", [])
+    except (ValueError, RpcError):
+        return _rejected("genesis is not usable", "wrong_network")
+    if genesis != MAINNET_GENESIS:
+        return _rejected("genesis is not mainnet", "wrong_network")
+    result = inspect(tx_b64, rpc)
+    result["genesis_ok"] = True
+    result["mainnet"] = True
+    result["freshness_guarantee"] = False
+    result["provider_expiry"] = None
+    result["slippage_verified"] = False
+    result["execution_allowed"] = False
+    result["send"] = False
+    result["executable"] = False
+    result["live_ready"] = False
+    return result
 
 
 def signature_status(rpc: RpcClient, signature: str, commitment: str = "confirmed") -> dict:
@@ -155,16 +200,19 @@ def _resolve(decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> lis
     return keys
 
 
-def _programs(decoded: solana_tx.Decoded, keys: list[str]) -> None:
+def _programs(decoded: solana_tx.Decoded, keys: list[str]) -> list[str]:
+    program_ids = []
     for instruction in decoded.instructions:
         program = keys[instruction.program_index]
         instruction.program_id = program
+        program_ids.append(program)
         if program not in solana_tx.ALLOWED_PROGRAMS:
-            raise ValueError("program is not verified")
+            raise GateError("program is not verified", "unverified_program", program_ids)
         if program in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022} and solana_tx.transfer_checked(instruction.data) is None:
-            raise ValueError("token instruction is not verified")
+            raise GateError("token instruction is not verified", "unverified_program", program_ids)
         if program == solana_tx.SYSTEM_PROGRAM and solana_tx.system_transfer(instruction.data) is None:
-            raise ValueError("system instruction is not verified")
+            raise GateError("system instruction is not verified", "unverified_program", program_ids)
+    return sorted(set(program_ids))
 
 
 def _debits(decoded: solana_tx.Decoded, keys: list[str]) -> int | None:
@@ -201,11 +249,20 @@ def _slot(result: dict) -> int:
     return context["slot"]
 
 
-def _rejected(reason: str) -> dict:
+class GateError(Exception):
+    def __init__(self, reason: str, category: str, program_ids: list[str] | None = None):
+        self.reason = reason
+        self.category = category
+        self.program_ids = program_ids or []
+
+
+def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] | None = None) -> dict:
     return {
         "stage": "rejected",
         "chain_ok": False,
         "reason": reason,
+        "error_category": category,
+        "program_ids": sorted(set(program_ids or [])),
         "slippage_verified": False,
         "provider_expiry": None,
         "freshness_guarantee": False,

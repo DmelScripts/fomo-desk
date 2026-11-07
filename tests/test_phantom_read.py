@@ -1,4 +1,5 @@
 """Read-only balance and execute:false quote checks. The binary is a fake."""
+import base64
 import json
 import os
 import unittest
@@ -63,6 +64,10 @@ if [ "$1" = "buy" ]; then
   if [ "$mode" = "down" ]; then
     echo "upstream unavailable" >&2
     exit 1
+  fi
+  if [ "$mode" = "prepared" ]; then
+    cat "$HOME/prepared.json"
+    exit 0
   fi
   echo '{"quoteRequest":{"taker":{"chainId":"solana:101","resourceType":"address","address":"'"$WALLET"'"},"buyToken":{"chainId":"solana:101","resourceType":"address","address":"'"$USDC"'"},"sellToken":{"chainId":"solana:101","resourceType":"nativeToken","slip44":"501"},"sellAmount":"10000000","base64EncodedTx":false,"execute":false},"quoteResponse":{"quotes":[{"quoteId":"pq-new","sellAmount":"10000000","buyAmount":"891179","fees":[{"amount":"7640"}],"transactionData":"TXDATA-DO-NOT-STORE"}]}}'
   exit 0
@@ -250,6 +255,67 @@ exit 2
         down = self.client.post("/api/phantom/quote", headers=AUTH, json={}).json()
         self.assertEqual(down["status"], "unable_to_verify")
         self.assertNotIn("upstream", json.dumps(down))
+        self.assertNotIn("login", self._args())
+
+    def test_preflight_keeps_the_unsigned_transaction_in_memory(self):
+        import solana_inspect
+        import solana_tx
+        raw = bytearray(base64.b64decode(solana_tx.encode_legacy_transfer(
+            WALLET, solana_tx.b58encode(b"\x22" * 32), 10_000_000, solana_tx.b58encode(b"\x11" * 32),
+        )))
+        program_at = 1 + 64 + 4 + 32 + 32
+        raw[program_at:program_at + 32] = b"\x03" * 32
+        tx = base64.b64encode(bytes(raw)).decode("ascii")
+        (self.home / "prepared.json").write_text(json.dumps({
+            "quoteRequest": {
+                "taker": {"chainId": "solana:101", "resourceType": "address", "address": WALLET},
+                "buyToken": {"chainId": "solana:101", "resourceType": "address", "address": USDC},
+                "sellToken": {"chainId": "solana:101", "resourceType": "nativeToken", "slip44": "501"},
+                "sellAmount": "10000000",
+                "base64EncodedTx": True,
+                "execute": False,
+            },
+            "quoteResponse": {"quotes": [{
+                "quoteId": "pq-pre",
+                "sellAmount": "10000000",
+                "buyAmount": "891179",
+                "transactionData": tx,
+            }]},
+        }), encoding="utf-8")
+        (self.home / "mode").write_text("prepared", encoding="utf-8")
+        calls = []
+
+        def transport(payload):
+            calls.append(payload["method"])
+            if payload["method"] == "getGenesisHash":
+                return {"result": solana_inspect.MAINNET_GENESIS}
+            raise AssertionError(payload["method"])
+
+        original = phantom_read._rpc
+        phantom_read._rpc = lambda: solana_inspect.RpcClient(transport)
+        self.addCleanup(lambda: setattr(phantom_read, "_rpc", original))
+        self.assertEqual(self.client.post("/api/phantom/preflight", json={}).status_code, 401)
+        shown = self.client.post("/api/phantom/preflight", headers=AUTH, json={})
+        self.assertEqual(shown.status_code, 200, shown.text)
+        self.assertEqual(shown.headers.get("cache-control"), "no-store")
+        body = shown.json()
+        self.assertEqual(body["error_category"], "unverified_program")
+        self.assertIn(solana_tx.b58encode(b"\x03" * 32), body["program_ids"])
+        self.assertFalse(body["slippage_verified"])
+        self.assertFalse(body["execution_allowed"])
+        self.assertFalse(body["send"])
+        self.assertFalse(body["executable"])
+        self.assertFalse(body["live_ready"])
+        self.assertIsNone(body["provider_expiry"])
+        self.assertFalse(body["freshness_guarantee"])
+        self.assertNotIn(tx, shown.text)
+        self.assertNotIn("transactionData", shown.text)
+        self.assertEqual(calls, ["getGenesisHash"])
+        args = self._args().splitlines()
+        self.assertEqual(args[args.index("--execute") + 1], "false")
+        self.assertEqual(args[args.index("--base64-encoded-tx") + 1], "true")
+        self.assertEqual(args[args.index("--amount") + 1], "10000000")
+        self.assertEqual(db.query("SELECT id FROM quotes"), [])
         self.assertNotIn("login", self._args())
 
     def test_restart_keeps_cached_auth_and_failures_stay_closed(self):

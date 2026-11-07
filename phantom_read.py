@@ -38,6 +38,28 @@ def balance() -> dict:
     return result
 
 
+def preflight() -> dict:
+    """Prepare one unsigned quote in memory and inspect it. The bytes are not returned."""
+    text, code = _run([
+        "buy",
+        "--sell-chain-id", "solana:mainnet",
+        "--buy-chain-id", "solana:mainnet",
+        "--sell-token-is-native", "true",
+        "--buy-token-mint", USDC,
+        "--amount", SELL_AMOUNT,
+        "--amount-unit", "base",
+        "--slippage-tolerance", "1",
+        "--exact-out", "false",
+        "--auto-slippage", "false",
+        "--base64-encoded-tx", "true",
+        "--execute", "false",
+        "--taker", phantom_transport.REQUIRED_WALLET,
+        "--wallet-id", phantom_transport.REQUIRED_WALLET_ID,
+        "--format", "json",
+    ])
+    return _preflight(text, code)
+
+
 def quote() -> dict:
     text, code = _run([
         "buy",
@@ -206,6 +228,79 @@ def _quote(text: str, code: int) -> dict:
     base["buy_amount"] = _buy_base(response)
     base["buy_decimals"] = decimals
     return base
+
+
+def _preflight(text: str, code: int) -> dict:
+    import solana_inspect
+    base = _base()
+    base.update({
+        "status": "preflight",
+        "slippage_verified": False,
+        "provider_expiry": None,
+        "freshness_guarantee": False,
+        "execution_allowed": False,
+        "usable": False,
+    })
+    if phantom_auth._auth_text(text):
+        base["error_category"] = "auth_error"
+        return base
+    if code != 0:
+        base["error_category"] = "provider_error"
+        return base
+    body, _shape = phantom_auth._payload(text)
+    if not isinstance(body, dict):
+        base["error_category"] = "not_usable"
+        return base
+    request = body.get("quoteRequest") if isinstance(body.get("quoteRequest"), dict) else {}
+    response = body.get("quoteResponse") if isinstance(body.get("quoteResponse"), dict) else {}
+    if request.get("execute") is True:
+        base["error_category"] = "execute_refused"
+        return base
+    taker = _taker(request)
+    if taker != phantom_transport.REQUIRED_WALLET:
+        base["error_category"] = "wallet_unbound" if taker else "not_usable"
+        return base
+    bound, _decimals = _bound_quote(request, response)
+    if not bound:
+        base["error_category"] = "amount_unbound"
+        return base
+    tx = _pull_tx(response)
+    if not isinstance(tx, str) or not tx:
+        base["error_category"] = "missing_transaction"
+        return base
+    inspected = solana_inspect.preflight_transaction(tx, _rpc())
+    cleaned, _omitted = _strip(body)
+    base.update({
+        "reason": inspected.get("reason"),
+        "error_category": inspected.get("error_category"),
+        "program_ids": inspected.get("program_ids") or [],
+        "chain_ok": inspected.get("chain_ok", False),
+        "genesis_ok": inspected.get("genesis_ok"),
+        "mainnet": inspected.get("mainnet"),
+        "blockhash_slot": inspected.get("blockhash_slot"),
+        "simulation_slot": inspected.get("simulation_slot"),
+        "debited_lamports": inspected.get("debited_lamports"),
+        "quote_id": _find_quote_id(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else None),
+        "buy_amount": _buy_base(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else {}),
+    })
+    return base
+
+
+def _pull_tx(response: dict):
+    quotes = response.get("quotes") if isinstance(response, dict) else None
+    if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
+        return None
+    raw = quotes[0].get("transactionData")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], str):
+        return raw[0]
+    return None
+
+
+def _rpc():
+    import solana_inspect
+    return solana_inspect.mainnet_rpc()
 
 
 def _remember(status: str, source: str) -> None:

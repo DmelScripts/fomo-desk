@@ -24,6 +24,8 @@ class FakeRpc:
     def __call__(self, payload):
         self.methods.append(payload["method"])
         method = payload["method"]
+        if method == "getGenesisHash":
+            return {"result": solana_inspect.MAINNET_GENESIS}
         if method == "isBlockhashValid":
             self.commitment = payload["params"][1]["commitment"]
             return {"result": {"context": {"slot": 10}, "value": self.block_ok}}
@@ -61,6 +63,14 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertFalse(shown["executable"])
         self.assertNotIn(tx, json.dumps(shown))
         self.assertEqual(fake.methods, ["isBlockhashValid", "simulateTransaction"])
+        prepared = solana_inspect.preflight_transaction(tx, solana_inspect.RpcClient(FakeRpc()))
+        self.assertTrue(prepared["genesis_ok"])
+        self.assertTrue(prepared["mainnet"])
+        self.assertTrue(prepared["chain_ok"])
+        self.assertFalse(prepared["freshness_guarantee"])
+        self.assertFalse(prepared["slippage_verified"])
+        self.assertFalse(prepared["execution_allowed"])
+        self.assertIsNone(prepared["provider_expiry"])
         self.assertIsNone(phantom_transport.quote({}).get("quote"))
 
     def test_lookup_unknown_program_stale_hash_and_status_read(self):
@@ -97,3 +107,15 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertEqual(status_rpc.methods, ["getSignatureStatuses"])
         self.assertNotIn("solana_inspect", Path("api.py").read_text())
         self.assertNotIn("solana_inspect", Path("server.py").read_text())
+        wrong = FakeRpc()
+
+        def genesis_only(payload):
+            wrong.methods.append(payload["method"])
+            if payload["method"] == "getGenesisHash":
+                return {"result": "not-mainnet"}
+            raise AssertionError(payload["method"])
+
+        rejected = solana_inspect.preflight_transaction(tx, solana_inspect.RpcClient(genesis_only))
+        self.assertEqual(rejected["error_category"], "wrong_network")
+        self.assertFalse(rejected["freshness_guarantee"])
+        self.assertEqual(wrong.methods, ["getGenesisHash"])
