@@ -7,6 +7,7 @@ import unittest
 
 import db
 import execution_transport
+import solana_direct_swap
 import exit_policy
 import phantom_auth
 import phantom_runner
@@ -55,7 +56,8 @@ class ExecutionTransportTest(unittest.TestCase):
         self.assertEqual(status["agents"], ["scanner", "auditor", "analyst", "executor", "risk"])
         self.assertIn("fee_policy_approved", status["unmet"])
         self.assertIn("aggregate_loss_policy_approved", status["unmet"])
-        self.assertIn("swap_path_verified", status["unmet"])
+        self.assertTrue(status["checks"]["swap_path_verified"])
+        self.assertFalse(solana_direct_swap.route_guard()["future_exit_guaranteed"])
         self.assertIn("signer_enabled", status["unmet"])
         self.assertFalse(status["live_ready"])
         self.assertEqual(status["chat_conditional_live_approval"], "not_a_control")
@@ -71,24 +73,26 @@ class ExecutionTransportTest(unittest.TestCase):
         self.assertFalse(forced["ready"])
         self.assertIn("fee_policy_approved", forced["unmet"])
         import spend_policy
-        spend_policy.store_fee_ceiling(0)
-        spend_policy.store_aggregate_loss("6.00")
+        self.assertFalse(spend_policy.store_fee_ceiling(0)["approved"])
+        self.assertFalse(spend_policy.store_aggregate_loss("6.00")["approved"])
         stored = execution_transport.activation_status()
-        self.assertTrue(stored["checks"]["fee_policy_approved"])
-        self.assertTrue(stored["checks"]["aggregate_loss_policy_approved"])
-        self.assertFalse(stored["checks"]["swap_path_verified"])
+        self.assertFalse(stored["checks"]["fee_policy_approved"])
+        self.assertFalse(stored["checks"]["aggregate_loss_policy_approved"])
+        self.assertTrue(stored["checks"]["swap_path_verified"])
         self.assertFalse(stored["checks"]["signer_enabled"])
         self.assertFalse(stored["ready"])
         self.assertFalse(stored["live_applicable"])
-        prepared = execution_transport.prepare_readonly(466545251)
+        prepared = execution_transport.prepare_readonly(466547240)
         self.assertTrue(prepared["diagnostic"])
         self.assertFalse(prepared["probe_is_ticket"])
         self.assertFalse(prepared["sign"])
         self.assertFalse(prepared["cli"])
         self.assertFalse(prepared["stale"])
-        self.assertEqual(prepared["min_out"], 889420)
+        self.assertFalse(prepared["usd_spend_is_exact"])
+        self.assertEqual(prepared["entry_lamports"], 88979314)
+        self.assertEqual(prepared["min_out"], 7915673)
         self.assertEqual(len(prepared["unsigned_tx_sha256"]), 64)
-        stale = execution_transport.prepare_readonly(466542559)
+        stale = execution_transport.prepare_readonly(466545251)
         self.assertTrue(stale["stale"])
         self.assertIsNone(stale["unsigned_tx_sha256"])
         self.assertEqual(forced["chat_conditional_live_approval"], "not_a_control")
@@ -223,7 +227,7 @@ class CliBridgeTest(ExecutionTransportTest):
         self.assertIn("fee_policy_approved", result["unmet"])
         self.assertIn("aggregate_loss_policy_approved", result["unmet"])
         self.assertIn("slippage_verified", result["unmet"])
-        self.assertFalse(execution_transport.activation_status()["checks"]["swap_path_verified"])
+        self.assertTrue(execution_transport.activation_status()["checks"]["swap_path_verified"])
 
     def test_matching_identity_uses_explicit_network_before_send(self):
         self._ready("intent-cli")

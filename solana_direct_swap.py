@@ -44,10 +44,10 @@ SOL_USDC_SNAPSHOT = {
     "method": "getMultipleAccounts",
     "commitment": "confirmed",
     "min_context_slot": MIN_CONTEXT_SLOT,
-    "context_slot": 466545251,
-    "min_context_slot_used": 466542559,
-    "tick_current_index": -24094,
-    "sqrt_price": 5530517110832706924,
+    "context_slot": 466547240,
+    "min_context_slot_used": 466545251,
+    "tick_current_index": -24091,
+    "sqrt_price": 5531210526019943285,
     "liquidity": 576950119138,
     "fee_rate": 500,
     "protocol_fee_rate": 1300,
@@ -55,18 +55,20 @@ SOL_USDC_SNAPSHOT = {
     "fee_tier_seed": 8,
     "adaptive_fee": False,
     "discriminator_ok": True,
-    "vault_a_amount": 1098598783628,
-    "vault_b_amount": 103302777808,
+    "vault_a_amount": 1098283677722,
+    "vault_b_amount": 103331159477,
     "wallet_wsol_ata_exists": False,
     "wallet_usdc_ata_amount": 188718141,
     "wallet_usdc_ata_lamports": 1488440,
     "wsol_decimals": 9,
     "usdc_decimals": 6,
-    "tick_array_starts": (-24640, -25344, -26048),
+    "tick_array_starts": (-26048, -25344, -24640, -23936, -23232),
     "tick_array_addresses": (
-        "7nDppuGeG1KBH6hY6Tctg4G2aVoaQYka4A7cFiY3RcNF",
-        "4nyKDVYimL5pFkjZg5TtuxYjecVqaCEBHnqHVJk7bRWs",
         "62AC6bi6g4DSUdKcXQYEM4EzWm53zgZg66CWHJrbxeqy",
+        "4nyKDVYimL5pFkjZg5TtuxYjecVqaCEBHnqHVJk7bRWs",
+        "7nDppuGeG1KBH6hY6Tctg4G2aVoaQYka4A7cFiY3RcNF",
+        "6U6pVLPnquaocYi3rLBwMxHegVtZDoCUF2TttX3UzjkF",
+        "Hty4rPfcu3LGjmLKRJymy4XGUS6i8n6eXesUs7H7PrDp",
     ),
     "tick_arrays_present": True,
     "tick_arrays_match_current_tick": True,
@@ -74,9 +76,18 @@ SOL_USDC_SNAPSHOT = {
     "tick_array_discriminator": "4561bdbe6e0742bb",
     "i32_seed_accounts_present": False,
     "quote": "computed",
-    "token_est_out": 898405,
-    "token_min_out": 889420,
+    "token_est_out": 898631,
+    "token_min_out": 889644,
     "trade_fee": 5000,
+    "entry_lamports": 88979314,
+    "entry_token_est_out": 7995630,
+    "entry_token_min_out": 7915673,
+    "entry_trade_fee_lamports": 44490,
+    "exit_token_est_out": 88882136,
+    "exit_token_min_out": 87993314,
+    "exit_trade_fee_usdc_raw": 3998,
+    "marginal_micro_usdc_per_sol": 89908537,
+    "future_exit_guaranteed": False,
     "quote_reason": None,
     "specified_slippage_bps": 100,
     "rent_exemption_165": RENT_EXEMPTION_165,
@@ -84,7 +95,7 @@ SOL_USDC_SNAPSHOT = {
     "sdk_token_est_out": 898405,
     "sdk_token_min_out": 889420,
     "sdk_trade_fee": 5000,
-    "wallet_observed_slot": 466542559,
+    "wallet_observed_slot": 466547240,
 }
 SOL_USDC_OBSERVATION = {
     "context_slot": 466540548,
@@ -202,58 +213,88 @@ def snapshot_status() -> dict:
     }
 
 
+def marginal_micro_usdc_per_sol(sqrt_price: int) -> int:
+    """Floor of the pool's marginal USDC price. A caller-supplied spot is not used."""
+    if isinstance(sqrt_price, bool) or not isinstance(sqrt_price, int) or sqrt_price <= 0:
+        raise ValueError("sqrt price is not usable")
+    return (sqrt_price * sqrt_price * 10**SOL_DECIMALS) // (1 << 128)
+
+
+def lamports_within_usd_cap(micro_usdc_cap: int, micro_per_sol: int) -> int:
+    """Round down so the marginal value stays inside the cap. Residual is unspent."""
+    if isinstance(micro_usdc_cap, bool) or isinstance(micro_per_sol, bool):
+        return 0
+    if not isinstance(micro_usdc_cap, int) or not isinstance(micro_per_sol, int):
+        return 0
+    if micro_usdc_cap <= 0 or micro_per_sol <= 0:
+        return 0
+    if micro_usdc_cap >= 10**18 or micro_per_sol >= 10**18:
+        return 0
+    return (micro_usdc_cap * 10**SOL_DECIMALS) // micro_per_sol
+
+
 def sizing() -> dict:
-    """Pool USDC out per the diagnostic input. This is not an external USD oracle."""
-    est = SOL_USDC_SNAPSHOT["token_est_out"]
-    numerator = TICKET_USD_MICRO * INPUT_LAMPORTS
-    floor = numerator // est
-    remainder = numerator % est
+    """$8 is a cap. The probe is not that ticket, and the fill is requoted."""
+    snap = SOL_USDC_SNAPSHOT
+    micro = marginal_micro_usdc_per_sol(snap["sqrt_price"])
+    lamports = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
+    marginal_value = (lamports * micro) // 10**SOL_DECIMALS
+    rent_value = (RENT_EXEMPTION_165 * micro) // 10**SOL_DECIMALS
     return {
-        "diagnostic": True,
-        "probe_lamports": INPUT_LAMPORTS,
-        "probe_usdc_raw": est,
-        "probe_usdc": f"{est / 10 ** USDC_DECIMALS:.6f}",
-        "sol_decimals": SOL_DECIMALS,
-        "usdc_decimals": USDC_DECIMALS,
-        "ticket_usd": "8.00",
-        "ticket_lamports_floor": floor,
-        "ticket_conversion_exact": remainder == 0,
-        "ticket_remainder_micro_usdc": remainder,
+        "diagnostic_probe_lamports": INPUT_LAMPORTS,
+        "probe_usdc_raw": snap["token_est_out"],
+        "probe_usdc": f"{snap['token_est_out'] / 10 ** USDC_DECIMALS:.6f}",
+        "marginal_micro_usdc_per_sol": micro,
+        "fx_slot": snap["context_slot"],
+        "entry_lamports": lamports,
+        "marginal_value_micro_usdc": marginal_value,
+        "unspent_micro_usdc": TICKET_USD_MICRO - marginal_value,
+        "quoted_out_micro_usdc": snap["entry_token_est_out"],
+        "quoted_under_cap": snap["entry_token_est_out"] <= TICKET_USD_MICRO,
+        "dex_fee_lamports": snap["entry_trade_fee_lamports"],
+        "rent_deposit_lamports": RENT_EXEMPTION_165,
+        "rent_deposit_micro_usdc": rent_value,
+        "rent_refundable": snap["wallet_wsol_ata_exists"] is False,
         "probe_is_ticket": False,
-        "whirlpool_fee_lamports": SOL_USDC_SNAPSHOT["trade_fee"],
-        "rent_exemption_refundable": RENT_EXEMPTION_165,
+        "usd_spend_is_exact": False,
+        "ticket_usd": "8.00",
+        "bankroll_usd": "100.00",
     }
 
 
 def route_guard() -> dict:
-    """Why this snapshot is not an entry or an exit."""
+    """Snapshot quotes are checked. They are not a future liquidity guarantee."""
     size = sizing()
-    missing = (-23936, -23232)
+    verified = (
+        size["entry_lamports"] == SOL_USDC_SNAPSHOT["entry_lamports"]
+        and size["quoted_under_cap"]
+        and size["unspent_micro_usdc"] >= 0
+        and SOL_USDC_SNAPSHOT["exit_token_est_out"] > 0
+    )
     return {
-        "swap_path_verified": False,
+        "swap_path_verified": verified,
+        "future_exit_guaranteed": False,
         "diagnostic": True,
-        "probe_is_ticket": size["probe_is_ticket"],
-        "exit_quote": "upward_arrays_not_in_snapshot",
-        "exit_starts_missing": missing,
+        "probe_is_ticket": False,
+        "exit_quote": "quoted_on_snapshot",
+        "exit_starts_missing": (),
         "sign": False,
         "blockers": (
-            "diagnostic 0.01 SOL probe is not the $8 ticket",
-            "ticket conversion against this quote is not an exact lamport count",
-            "USDC to SOL exit needs tick arrays starting at -23936 and -23232, which were not read",
+            "fee policy has no owner-approved USD cap for DEX plus network fees",
+            "aggregate loss cap including fees is not owner-approved",
+            "this snapshot does not guarantee later exit liquidity",
+            "no blockhash has been fetched, so nothing here is broadcastable",
         ),
     }
 
 
 def quote_exit_exact_in(pool: dict, arrays: list[dict], usdc_raw: int, slippage_bps: int, context_slot: int) -> dict:
-    """USDC to SOL. The snapshot does not include the upward arrays, so it refuses them."""
-    have = {item["start_tick_index"] for item in arrays}
-    needed = set(route_guard()["exit_starts_missing"])
-    if pool.get("tick_spacing") == 8 and pool.get("tick_current_index") == SOL_USDC_SNAPSHOT["tick_current_index"] and not needed <= have:
-        raise solana_whirlpool_quote.QuoteError("exit_arrays_absent")
+    """USDC to SOL using the supplied tick arrays. This is not a later-liquidity promise."""
     quoted = solana_whirlpool_quote.quote_exact_in(pool, arrays, usdc_raw, False, slippage_bps, 0, context_slot)
     quoted["direction"] = "USDC->SOL"
     quoted["usdc_decimals"] = USDC_DECIMALS
     quoted["sol_decimals"] = SOL_DECIMALS
+    quoted["future_exit_guaranteed"] = False
     return quoted
 
 
@@ -263,9 +304,11 @@ def prepare_diagnostic(slot: int) -> dict:
     if slot != snap["context_slot"]:
         return {"stale": True, "sign": False, "cli": False, "diagnostic": True, "unsigned_tx_sha256": None, "context_slot": slot}
     pool, data, accounts = _snapshot_accounts()
+    state = solana_whirlpool.pool_state(data)
+    spend = lamports_within_usd_cap(TICKET_USD_MICRO, marginal_micro_usdc_per_sol(state["sqrt_price"]))
     limit = MIN_SQRT_PRICE + 1
     blockhash = solana_tx.b58encode(b"\x22" * 32)
-    tx = build(pool, data, accounts, snap["specified_slippage_bps"], limit, blockhash, slot)
+    tx = build(pool, data, accounts, snap["specified_slippage_bps"], limit, blockhash, slot, amount=spend)
     raw = base64.b64decode(tx)
     checked = inspect(tx, accounts, snap["specified_slippage_bps"], slot)
     return {
@@ -276,13 +319,25 @@ def prepare_diagnostic(slot: int) -> dict:
         "probe_is_ticket": False,
         "context_slot": slot,
         "account_addresses": tuple(sorted(accounts)),
-        "quote_token_est_out": snap["token_est_out"],
-        "quote_token_min_out": snap["token_min_out"],
-        "quote_trade_fee": snap["trade_fee"],
+        "entry_lamports": spend,
+        "quote_token_est_out": snap["entry_token_est_out"],
+        "quote_token_min_out": snap["entry_token_min_out"],
+        "quote_trade_fee": snap["entry_trade_fee_lamports"],
+        "usd_spend_is_exact": False,
         "unsigned_tx_sha256": hashlib.sha256(raw).hexdigest(),
         "byte_checks_passed": checked["byte_checks_passed"],
         "min_out": checked["min_out"],
     }
+
+
+def _allowed_amounts(state: dict) -> set[int]:
+    """Probe or the round-down under $8. The amount is not taken from a caller flag."""
+    amounts = {INPUT_LAMPORTS}
+    micro = marginal_micro_usdc_per_sol(state["sqrt_price"])
+    capped = lamports_within_usd_cap(TICKET_USD_MICRO, micro)
+    if capped > 0:
+        amounts.add(capped)
+    return amounts
 
 
 def _snapshot_accounts():
@@ -372,23 +427,26 @@ def decode_swap_data(data: bytes) -> dict | None:
     }
 
 
-def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int) -> str:
+def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, sqrt_price_limit: int, blockhash: str, context_slot: int, amount: int | None = None) -> str:
     """Unsigned wrapped swap. The threshold is the quote of these account bytes."""
     direction = _direction(pool_data)
     state = solana_whirlpool.pool_state(pool_data)
     if state is None:
         raise ValueError("pool is not usable")
+    spend = INPUT_LAMPORTS if amount is None else amount
+    if spend not in _allowed_amounts(state):
+        raise ValueError("spend is outside the probe and the $8 cap")
     _require_limit(direction, sqrt_price_limit, state["sqrt_price"])
     source = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
     dest = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM)
     arrays = _quote_arrays(pool, pool_data, accounts, direction)
     quote = solana_whirlpool_quote.quote_exact_in(
-        state, arrays, INPUT_LAMPORTS, direction, slippage_bps, sqrt_price_limit, context_slot,
+        state, arrays, spend, direction, slippage_bps, sqrt_price_limit, context_slot,
     )
-    if quote["token_in"] != INPUT_LAMPORTS:
-        raise ValueError("quote does not consume the readiness amount")
+    if quote["token_in"] != spend or quote["token_est_out"] > TICKET_USD_MICRO and spend != INPUT_LAMPORTS:
+        raise ValueError("quoted output is outside the cap")
     return transaction_from_fields(
-        pool, pool_data, source, dest, INPUT_LAMPORTS, quote["token_min_out"], sqrt_price_limit,
+        pool, pool_data, source, dest, spend, quote["token_min_out"], sqrt_price_limit,
         True, direction, blockhash, wrap=True,
     )
 
@@ -530,7 +588,8 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         body["error_category"] = tail
         return body
     body["min_out"] = parsed["other_amount_threshold"]
-    if not parsed["amount_specified_is_input"] or parsed["amount"] != INPUT_LAMPORTS or plan["lamports"] != INPUT_LAMPORTS:
+    allowed = _allowed_amounts(state)
+    if not parsed["amount_specified_is_input"] or parsed["amount"] not in allowed or plan["lamports"] != parsed["amount"]:
         body["error_category"] = "spend_unbound"
         return body
     try:
@@ -555,7 +614,7 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         )
         arrays = _quote_arrays(pool, pool_data, accounts, direction)
         quote = solana_whirlpool_quote.quote_exact_in(
-            state, arrays, INPUT_LAMPORTS, direction, slippage_bps, parsed["sqrt_price_limit"], context_slot,
+            state, arrays, parsed["amount"], direction, slippage_bps, parsed["sqrt_price_limit"], context_slot,
         )
     except solana_whirlpool.WhirlpoolError as error:
         body["error_category"] = error.category
@@ -566,7 +625,7 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
     if quote.get("zero_liquidity") or quote["token_est_out"] <= 0 or quote["token_min_out"] <= 0:
         body["error_category"] = "zero_output"
         return body
-    if quote["token_in"] != INPUT_LAMPORTS or quote["token_min_out"] != parsed["other_amount_threshold"]:
+    if quote["token_in"] != parsed["amount"] or quote["token_min_out"] != parsed["other_amount_threshold"]:
         body["error_category"] = "slippage_unbound"
         body["min_out"] = parsed["other_amount_threshold"]
         return body

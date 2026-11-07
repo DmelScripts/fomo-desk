@@ -133,7 +133,7 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertIsNone(snap["reason"])
         self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["liquidity"], 576950119138)
         self.assertTrue(snap["tick_arrays_present"])
-        self.assertEqual(snap["context_slot"], 466545251)
+        self.assertEqual(snap["context_slot"], 466547240)
         pool = solana_direct_swap.SOL_USDC_POOL
         program = solana_tx.b58decode(solana_whirlpool.PROGRAM_ID)
         raw_pool = solana_tx.b58decode(pool)
@@ -162,24 +162,31 @@ class DirectWhirlpoolTests(unittest.TestCase):
             "liquidity": int(body["liquidity"]),
             "tick_spacing": body["tickSpacing"],
         }, arrays, 10_000_000, True, 100, 0, body["slot"])
-        self.assertEqual(quoted["token_est_out"], 898405)
-        self.assertEqual(quoted["token_min_out"], 889420)
+        self.assertEqual(quoted["token_est_out"], 898631)
+        self.assertEqual(quoted["token_min_out"], 889644)
         self.assertEqual(quoted["trade_fee"], 5000)
-        self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["token_min_out"], 889420)
-        with self.assertRaises(solana_whirlpool_quote.QuoteError) as missing:
-            solana_direct_swap.quote_exit_exact_in({
-                "sqrt_price": int(body["sqrtPrice"]),
-                "tick_current_index": body["tickCurrentIndex"],
-                "fee_rate": body["feeRate"],
-                "liquidity": int(body["liquidity"]),
-                "tick_spacing": body["tickSpacing"],
-            }, arrays, 100_000, 100, body["slot"])
-        self.assertEqual(missing.exception.category, "exit_arrays_absent")
+        pool_state = {
+            "sqrt_price": int(body["sqrtPrice"]),
+            "tick_current_index": body["tickCurrentIndex"],
+            "fee_rate": body["feeRate"],
+            "liquidity": int(body["liquidity"]),
+            "tick_spacing": body["tickSpacing"],
+        }
+        entry = solana_whirlpool_quote.quote_exact_in(pool_state, arrays, 88979314, True, 100, 0, body["slot"])
+        self.assertEqual((entry["token_est_out"], entry["token_min_out"], entry["trade_fee"]), (7995630, 7915673, 44490))
+        exited = solana_direct_swap.quote_exit_exact_in(pool_state, arrays, entry["token_est_out"], 100, body["slot"])
+        self.assertEqual((exited["token_est_out"], exited["token_min_out"], exited["trade_fee"]), (88882136, 87993314, 3998))
+        self.assertFalse(exited["future_exit_guaranteed"])
         size = solana_direct_swap.sizing()
-        self.assertEqual(size["probe_usdc"], "0.898405")
+        self.assertEqual(size["probe_usdc"], "0.898631")
+        self.assertEqual(size["entry_lamports"], 88979314)
+        self.assertEqual(size["unspent_micro_usdc"], 1)
+        self.assertLess(size["quoted_out_micro_usdc"], size["marginal_value_micro_usdc"])
         self.assertFalse(size["probe_is_ticket"])
-        self.assertFalse(size["ticket_conversion_exact"])
-        self.assertNotEqual(size["ticket_lamports_floor"], size["probe_lamports"])
+        self.assertFalse(size["usd_spend_is_exact"])
+        self.assertEqual(solana_direct_swap.lamports_within_usd_cap(0, size["marginal_micro_usdc_per_sol"]), 0)
+        self.assertEqual(solana_direct_swap.lamports_within_usd_cap(8_000_000, 10**18), 0)
+        self.assertFalse(solana_direct_swap.context_binds(body["slot"] - 1, body["slot"]))
         self.assertTrue(snap["context_fresh"])
         self.assertFalse(solana_direct_swap.context_binds(466540548, 466542559))
         self.assertFalse(solana_direct_swap.context_binds(466540547, 466542559))
