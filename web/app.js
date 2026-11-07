@@ -701,7 +701,28 @@
     renderIntegrations();
     renderKey();
     renderPush();
+    renderQuotes();
     renderCommand();
+  }
+
+  function renderQuotes() {
+    var node = $("account-quotes");
+    if (!node) return;
+    clear(node);
+    node.appendChild(el("h2", "Quotes"));
+    node.appendChild(el("p", "PAPER · quote only. This desk does not call Phantom or send a transaction.", "muted"));
+    var rows = (state.account && state.account.quotes) || [];
+    if (!rows.length) {
+      node.appendChild(el("p", "No quote has been recorded.", "muted"));
+      return;
+    }
+    rows.forEach(function (row) {
+      var line = row.label + " · " + row.status + " · " + row.chain + " · " + row.amount;
+      if (row.mint) line += " · " + row.mint;
+      if (row.out_amount) line += " → " + row.out_amount;
+      if (row.failure) line += " · " + row.failure;
+      node.appendChild(el("p", line));
+    });
   }
 
   function renderCommand() {

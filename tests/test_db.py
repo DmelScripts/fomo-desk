@@ -48,6 +48,10 @@ TABLES = {
     "reports": ("window_id", "url", "acked_at", "skips_cleared"),
     "push_outbox": ("event_id", "endpoint", "status", "updated_at"),
     "restart_events": ("event_id", "agent", "down_min", "push_text", "created_at"),
+    "quotes": (
+        "id", "status", "label", "provider", "wallet", "amount", "mint", "chain",
+        "slippage", "expiry", "out_amount", "failure", "created_at", "updated_at",
+    ),
 }
 
 TIMESTAMP_COLUMNS = {
@@ -62,6 +66,7 @@ PRIMARY_KEYS = {
     "push_subs": "endpoint",
     "reports": "window_id",
     "restart_events": "event_id",
+    "quotes": "id",
 }
 INDEXES = {
     "prices": ("mint", "ts"),
@@ -135,7 +140,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

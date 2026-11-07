@@ -673,6 +673,11 @@ def _secret_flags(name: str) -> dict:
     return {"configured": bool(loaded), "host_locked": bool(os.environ.get(name))}
 
 
+def listed_quotes() -> list:
+    from quotes import listed
+    return listed()
+
+
 def _account() -> dict:
     handle = get_setting("fomo_handle")
     profile = links.profile_url(handle) if handle else None
@@ -704,6 +709,7 @@ def _account() -> dict:
             "host_locked": jev["host_locked"],
             "detail": jev_detail,
         },
+        "quotes": listed_quotes(),
     }
 
 
@@ -959,6 +965,22 @@ def mode(request: Request, body: dict) -> dict:
             return JSONResponse(status_code=409, content={"ok": False, "error": "LIVE locked", "mode": get_setting("mode", "PAPER")})
         return {"ok": True, "mode": "LIVE"}
     raise HTTPException(status_code=400, detail="mode must be PAPER or LIVE")
+
+
+@router.post("/api/quote/request")
+def quote_request(request: Request, body: dict) -> dict:
+    """Owner asks for a PAPER quote. This process does not call Phantom."""
+    require_app_token(request)
+    from quotes import create_request
+    return create_request(body)
+
+
+@router.post("/api/quote/result")
+def quote_result(request: Request, body: dict) -> dict:
+    """Owner records a quote-only result. Execution fields are refused."""
+    require_app_token(request)
+    from quotes import record_result
+    return record_result(body)
 
 
 @router.post("/api/push")

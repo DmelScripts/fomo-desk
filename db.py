@@ -179,6 +179,23 @@ CREATE TABLE IF NOT EXISTS restart_events (
     created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS quotes (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    label TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    wallet TEXT,
+    amount TEXT NOT NULL,
+    mint TEXT,
+    chain TEXT NOT NULL,
+    slippage REAL,
+    expiry REAL,
+    out_amount TEXT,
+    failure TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_scans_mint_ts ON scans (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_audits_mint_ts ON audits (mint, ts);
@@ -280,6 +297,8 @@ def init_db() -> None:
             conn.execute("PRAGMA user_version=5")
         if version < 6:
             conn.execute("PRAGMA user_version=6")
+        if version < 7:
+            conn.execute("PRAGMA user_version=7")
         conn.commit()
     finally:
         conn.close()
