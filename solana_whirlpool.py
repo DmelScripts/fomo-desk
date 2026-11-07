@@ -40,11 +40,14 @@ class WhirlpoolError(Exception):
         self.category = category
 
 
-def reference_pool(mint_a: str, vault_a: str, mint_b: str, vault_b: str, tick_spacing: int = 8, tick_current: int = 16, sqrt_price: int = 0) -> bytes:
+def reference_pool(mint_a: str, vault_a: str, mint_b: str, vault_b: str, tick_spacing: int = 8, tick_current: int = 16, sqrt_price: int = 0, *, fee_rate: int = 0, liquidity: int = 0) -> bytes:
     """Synthetic pool using the published field offsets. Not an on-chain account."""
     raw = bytearray(_MIN_LEN)
     raw[:8] = _DISC
     raw[_TICK_SPACING:_TICK_SPACING + 2] = int(tick_spacing).to_bytes(2, "little")
+    raw[_TICK_SPACING + 2:_TICK_SPACING + 4] = int(tick_spacing).to_bytes(2, "little")
+    raw[_TICK_SPACING + 4:_TICK_SPACING + 6] = int(fee_rate).to_bytes(2, "little")
+    raw[_TICK_CURRENT - 32:_TICK_CURRENT - 16] = int(liquidity).to_bytes(16, "little")
     raw[_TICK_CURRENT - 16:_TICK_CURRENT] = int(sqrt_price).to_bytes(16, "little")
     raw[_TICK_CURRENT:_TICK_CURRENT + 4] = int(tick_current).to_bytes(4, "little", signed=True)
     raw[_MINT_A:_MINT_A + 32] = solana_tx.b58decode(mint_a)
@@ -52,6 +55,42 @@ def reference_pool(mint_a: str, vault_a: str, mint_b: str, vault_b: str, tick_sp
     raw[_MINT_B:_MINT_B + 32] = solana_tx.b58decode(mint_b)
     raw[_VAULT_B:_VAULT_B + 32] = solana_tx.b58decode(vault_b)
     return bytes(raw)
+
+
+def pool_state(data: bytes) -> dict | None:
+    """Fee, liquidity, price, and the adaptive-fee seed. Seed equal to tick spacing is classic."""
+    if pool_fields(data) is None or sqrt_price(data) is None:
+        return None
+    spacing = int.from_bytes(data[_TICK_SPACING:_TICK_SPACING + 2], "little")
+    seed = int.from_bytes(data[_TICK_SPACING + 2:_TICK_SPACING + 4], "little")
+    return {
+        "fee_rate": int.from_bytes(data[_TICK_SPACING + 4:_TICK_SPACING + 6], "little"),
+        "liquidity": int.from_bytes(data[_TICK_CURRENT - 32:_TICK_CURRENT - 16], "little"),
+        "sqrt_price": sqrt_price(data),
+        "tick_current_index": int.from_bytes(data[_TICK_CURRENT:_TICK_CURRENT + 4], "little", signed=True),
+        "tick_spacing": spacing,
+        "fee_tier_seed": seed,
+        "adaptive_fee": seed != spacing,
+    }
+
+
+def tick_array_state(data: bytes) -> dict | None:
+    """Initialized flag and liquidity_net from each published 113-byte tick."""
+    if len(data) != _TICK_ARRAY_LEN or data[:8] != _TICK_DISC:
+        return None
+    ticks = []
+    offset = 12
+    for _ in range(TICK_ARRAY_SIZE):
+        ticks.append({
+            "initialized": data[offset] == 1,
+            "liquidity_net": int.from_bytes(data[offset + 1:offset + 17], "little", signed=True),
+        })
+        offset += _TICK_LEN
+    return {
+        "start_tick_index": int.from_bytes(data[8:12], "little", signed=True),
+        "ticks": ticks,
+        "pool": solana_tx.b58encode(data[-32:]),
+    }
 
 
 def sqrt_price(data: bytes) -> int | None:
