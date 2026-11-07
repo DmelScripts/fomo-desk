@@ -1081,8 +1081,6 @@ def phantom_preflight(request: Request, body: dict | None = None) -> JSONRespons
     result["live_ready"] = False
     result["execution_allowed"] = False
     result["spend_verified"] = False
-    result["intent_verified"] = False
-    result["slippage_verified"] = False
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
