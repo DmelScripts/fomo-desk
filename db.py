@@ -204,7 +204,9 @@ CREATE TABLE IF NOT EXISTS quotes (
     failure TEXT,
     request_json TEXT NOT NULL,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    observed_at REAL,
+    import_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
@@ -340,10 +342,19 @@ def init_db() -> None:
                     failure TEXT,
                     request_json TEXT NOT NULL,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    observed_at REAL,
+                    import_json TEXT
                 );
             """)
             conn.execute("PRAGMA user_version=8")
+        if version < 9:
+            have = {row[1] for row in conn.execute("PRAGMA table_info(quotes)")}
+            if "observed_at" not in have:
+                conn.execute("ALTER TABLE quotes ADD COLUMN observed_at REAL")
+            if "import_json" not in have:
+                conn.execute("ALTER TABLE quotes ADD COLUMN import_json TEXT")
+            conn.execute("PRAGMA user_version=9")
         conn.commit()
     finally:
         conn.close()

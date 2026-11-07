@@ -12,6 +12,7 @@ from tests.support import temp_desk_env
 TOKEN = "dummy-app-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 WALLET = "4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f"
+REAL_WALLET = "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"
 MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 OTHER = "So11111111111111111111111111111111111111112"
 
@@ -182,6 +183,163 @@ class TestQuotes(unittest.TestCase):
         self.assertEqual(recorded.json()["out_amount"], "8")
         self.assertEqual(db.get_setting("mode"), "PAPER")
         self.assertEqual(db.get_setting("agents_enabled"), "0")
+        fractional = self._request("q-base")
+        fractional["amountUnit"] = "base"
+        fractional["amount"] = "1.5"
+        self.assertEqual(self.client.post("/api/quote/request", headers=AUTH, json=fractional).status_code, 400)
+
+    def test_real_provider_quote_is_observed_and_not_executable(self):
+        created = self.client.post("/api/quote/request", headers=AUTH, json=self._request("hist")).json()
+        self.assertEqual(created["tool_args"]["amount"], "0.01")
+        self.assertEqual(created["tool_args"]["amountUnit"], "ui")
+        self.assertFalse(created["tool_args"]["execute"])
+        payload = "TXDATA-DO-NOT-STORE"
+        dirty = self._real_result(created)
+        dirty["quote"]["quoteResponse"]["quotes"][0]["transactionData"] = payload
+        saved = self.client.post("/api/quote/result", headers=AUTH, json=dirty)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertNotIn(payload, saved.text)
+        self.assertNotIn("transactionData", saved.text)
+        self.assertNotIn("rawTransaction", saved.text)
+        body = saved.json()
+        self.assertEqual(body["status"], "observed")
+        self.assertFalse(body["usable"])
+        self.assertFalse(body["executable"])
+        self.assertFalse(body["execute"])
+        self.assertTrue(body["provider_expiry_unknown"])
+        self.assertIsNone(body["expiry"])
+        self.assertIsNone(body["local_ttl"])
+        self.assertEqual(body["provenance"], "manual_import")
+        self.assertEqual(body["bridge"], "not_connected")
+        self.assertEqual(body["provider"], "phantom")
+        self.assertEqual(body["wallet"], REAL_WALLET)
+        self.assertEqual(body["provider_quote_id"], "e09cf162-9f00-40fa-9c36-0714a7c5fa94")
+        self.assertEqual(body["sell_amount_base"], "10000000")
+        self.assertEqual(body["out_amount"], "891179")
+        self.assertEqual(body["route_provider"], "OKX")
+        self.assertEqual(body["provider_chain"], "solana:101")
+        self.assertEqual(body["quote_session_id"], "67346b2e-fac9-49d5-8d9c-7a949d1864c7")
+        self.assertTrue(body["transaction_material_omitted"])
+        self.assertEqual(
+            [(fee["name"], fee["amount"]) for fee in body["fees"]],
+            [("Phantom fee", "7640"), ("Tip payment", "6000"), ("Priority fee", "82880")],
+        )
+        self.assertAlmostEqual(body["proposed_slippage"], 0.75)
+        self.assertIsNotNone(body["observed_at"])
+        stored = db.query("SELECT status, expiry, import_json FROM quotes WHERE id = 'hist'")[0]
+        self.assertEqual(stored["status"], "observed")
+        self.assertIsNone(stored["expiry"])
+        self.assertNotIn(payload, stored["import_json"])
+        account = self.client.get("/api/account", headers=AUTH).json()["quotes"][0]
+        self.assertTrue(account["provider_expiry_unknown"])
+        self.assertFalse(account["usable"])
+        self.assertFalse(account["executable"])
+        render = Path("web/app.js").read_text().split("function renderQuotes")[1].split("function renderCommand")[0]
+        for label in ("provider expiry unknown", "not executable", "row.fees", "row.wallet", "row.slippage"):
+            self.assertIn(label, render)
+        mismatch = self._real_result(created)
+        mismatch["quote"]["quoteRequest"]["sellAmount"] = "999"
+        mismatch["quote"]["quoteResponse"]["quotes"][0]["sellAmount"] = "999"
+        self.assertEqual(self.client.post("/api/quote/result", headers=AUTH, json=mismatch).status_code, 400)
+        self.assertEqual(db.query("SELECT provider_quote_id FROM quotes WHERE id = 'hist'")[0]["provider_quote_id"], "e09cf162-9f00-40fa-9c36-0714a7c5fa94")
+        other = self.client.post("/api/quote/request", headers=AUTH, json=self._request("hist2")).json()
+        bad_taker = self._real_result(other)
+        bad_taker["quote"]["quoteRequest"]["taker"]["address"] = WALLET
+        bad_taker["quote"]["quoteResponse"]["taker"]["address"] = WALLET
+        refused = self.client.post("/api/quote/result", headers=AUTH, json=bad_taker)
+        self.assertEqual(refused.status_code, 400)
+        self.assertNotIn(WALLET, refused.text)
+        self.assertEqual(db.query("SELECT status FROM quotes WHERE id = 'hist2'")[0]["status"], "pending")
+        raw = self._real_result(other)
+        raw["quote"]["quoteResponse"]["quotes"][0]["rawTransaction"] = payload
+        omitted = self.client.post("/api/quote/result", headers=AUTH, json=raw)
+        self.assertEqual(omitted.status_code, 200, omitted.text)
+        self.assertNotIn(payload, omitted.text)
+        self.assertTrue(omitted.json()["transaction_material_omitted"])
+        self.assertFalse(omitted.json()["executable"])
+        third = self.client.post("/api/quote/request", headers=AUTH, json=self._request("hist3")).json()
+        signed = self._real_result(third)
+        signed["quote"]["quoteResponse"]["quotes"][0]["signature"] = payload
+        blocked = self.client.post("/api/quote/result", headers=AUTH, json=signed)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertNotIn(payload, blocked.text)
+        self.assertIsNone(db.query("SELECT wallet FROM quotes WHERE id = 'hist3'")[0]["wallet"])
+        zero = self._real_result(other)
+        zero["quote"]["quoteResponse"]["quotes"][0]["buyAmount"] = "0"
+        self.assertEqual(self.client.post("/api/quote/result", headers=AUTH, json=zero).status_code, 400)
+        self.assertEqual(db.get_setting("mode"), "PAPER")
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
+        self.assertEqual(db.get_setting("stop_pct"), "6")
+        self.assertEqual(db.get_setting("min_score"), "70")
+
+    def test_version_8_quote_row_keeps_its_pair(self):
+        self.client.post("/api/quote/request", headers=AUTH, json=self._request("keep"))
+        conn = db.connect()
+        try:
+            conn.execute("ALTER TABLE quotes RENAME TO quotes_v9")
+            conn.execute(
+                """
+                CREATE TABLE quotes (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    wallet TEXT,
+                    amount TEXT NOT NULL,
+                    amount_unit TEXT NOT NULL,
+                    sell_chain TEXT NOT NULL,
+                    buy_chain TEXT NOT NULL,
+                    sell_native INTEGER NOT NULL,
+                    buy_native INTEGER NOT NULL,
+                    sell_mint TEXT,
+                    buy_mint TEXT,
+                    sell_decimals INTEGER,
+                    buy_decimals INTEGER,
+                    exact_out INTEGER NOT NULL,
+                    slippage REAL NOT NULL,
+                    expiry REAL,
+                    out_amount TEXT,
+                    provider_quote_id TEXT,
+                    failure TEXT,
+                    request_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO quotes (
+                    id, status, label, provider, provenance, wallet, amount, amount_unit,
+                    sell_chain, buy_chain, sell_native, buy_native, sell_mint, buy_mint,
+                    sell_decimals, buy_decimals, exact_out, slippage, expiry, out_amount,
+                    provider_quote_id, failure, request_json, created_at, updated_at
+                )
+                SELECT id, status, label, provider, provenance, wallet, amount, amount_unit,
+                    sell_chain, buy_chain, sell_native, buy_native, sell_mint, buy_mint,
+                    sell_decimals, buy_decimals, exact_out, slippage, expiry, out_amount,
+                    provider_quote_id, failure, request_json, created_at, updated_at
+                FROM quotes_v9
+                """
+            )
+            conn.execute("DROP TABLE quotes_v9")
+            conn.execute("PRAGMA user_version=8")
+            conn.commit()
+        finally:
+            conn.close()
+        db.init_db()
+        row = db.query("SELECT id, status, amount FROM quotes WHERE id = 'keep'")[0]
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["amount"], "0.01")
+        conn = db.connect()
+        try:
+            columns = [info[1] for info in conn.execute("PRAGMA table_info(quotes)")]
+        finally:
+            conn.close()
+        self.assertIn("observed_at", columns)
+        self.assertIn("import_json", columns)
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
 
     def _request(self, quote_id, sell_native=True, sell_mint=None, buy_mint=MINT):
         body = {
@@ -202,6 +360,61 @@ class TestQuotes(unittest.TestCase):
 
     def _wallet(self):
         return {"addresses": [{"addressType": "solana", "address": WALLET}]}
+
+    def _real_result(self, created):
+        usdc = {
+            "chainId": "solana:101",
+            "resourceType": "address",
+            "address": MINT,
+        }
+        native = {"chainId": "solana:101", "resourceType": "nativeToken", "slip44": "501"}
+        wrapped = {
+            "chainId": "solana:101",
+            "resourceType": "address",
+            "address": "So11111111111111111111111111111111111111112",
+        }
+        taker = {"chainId": "solana:101", "resourceType": "address", "address": REAL_WALLET}
+        return {
+            "id": created["id"],
+            "wallet_addresses": {"addresses": [{"addressType": "Solana", "address": REAL_WALLET}]},
+            "quote": {
+                "quoteRequest": {
+                    "taker": dict(taker),
+                    "buyToken": dict(usdc),
+                    "sellToken": dict(native),
+                    "sellAmount": "10000000",
+                    "slippageTolerance": 1,
+                    "exactOut": False,
+                    "autoSlippage": False,
+                    "base64EncodedTx": False,
+                },
+                "quoteResponse": {
+                    "type": "solana",
+                    "quotes": [{
+                        "quoteId": "e09cf162-9f00-40fa-9c36-0714a7c5fa94",
+                        "sellAmount": "10000000",
+                        "buyAmount": "891179",
+                        "slippageTolerance": 1,
+                        "priceImpact": 0,
+                        "simulationFailed": False,
+                        "baseProvider": {"id": "okx", "name": "OKX"},
+                        "fees": [
+                            {"name": "Phantom fee", "amount": 7640, "type": "phantom", "percentage": 0.0085, "token": dict(usdc)},
+                            {"name": "Tip payment", "amount": 6000, "type": "tips", "percentage": 0, "token": dict(native)},
+                            {"name": "Priority fee", "amount": 82880, "type": "priority_fee", "percentage": 0, "token": dict(native)},
+                        ],
+                        "balanceSufficiency": "sufficient",
+                    }],
+                    "taker": dict(taker),
+                    "buyToken": dict(usdc),
+                    "sellToken": dict(wrapped),
+                    "slippageTolerance": 1,
+                    "proposedSlippage": 0.75,
+                    "quoteSessionId": "67346b2e-fac9-49d5-8d9c-7a949d1864c7",
+                    "requestId": "11b95f6f-068f-4932-813b-24409797745a",
+                },
+            },
+        }
 
     def _result(self, created, **response):
         payload = {

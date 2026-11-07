@@ -710,7 +710,7 @@
     if (!node) return;
     clear(node);
     node.appendChild(el("h2", "Quotes"));
-    node.appendChild(el("p", "PAPER · manually imported. The Phantom bridge is not connected. This desk does not call Phantom or send a transaction.", "muted"));
+    node.appendChild(el("p", "PAPER · manually imported. The Phantom bridge is not connected. A recorded quote is not an order.", "muted"));
     var rows = (state.account && state.account.quotes) || [];
     if (!rows.length) {
       node.appendChild(el("p", "No quote has been recorded.", "muted"));
@@ -721,8 +721,19 @@
       line += " · " + row.provenance + " · bridge " + row.bridge;
       line += " · " + (row.wallet || "wallet pending");
       line += " · slippage " + row.slippage;
-      line += " · " + (row.expiry ? "expires " + new Date(row.expiry * 1000).toISOString() : "no expiry");
+      if (row.provider_expiry_unknown) line += " · provider expiry unknown";
+      else if (row.expiry) line += " · provider expires " + new Date(row.expiry * 1000).toISOString();
+      else line += " · no provider expiry";
+      line += row.local_ttl ? " · local ttl " + new Date(row.local_ttl * 1000).toISOString() : " · no local ttl";
       if (!row.usable) line += " · unusable";
+      if (row.executable === false) line += " · not executable";
+      if (row.observed_at) line += " · observed " + new Date(row.observed_at * 1000).toISOString();
+      if (row.route_provider) line += " · route " + row.route_provider;
+      if (row.fees && row.fees.length) {
+        line += " · fees";
+        row.fees.forEach(function (fee) { line += " " + fee.name + " " + fee.amount; });
+      }
+      if (row.transaction_material_omitted) line += " · transaction payload omitted";
       line += " · " + row.sell_chain + " " + row.amount + " " + row.amount_unit;
       if (row.buy_mint) line += " → " + row.buy_mint;
       if (row.out_amount) line += " → " + row.out_amount;

@@ -53,11 +53,13 @@ TABLES = {
         "sell_chain", "buy_chain", "sell_native", "buy_native", "sell_mint", "buy_mint",
         "sell_decimals", "buy_decimals", "exact_out", "slippage", "expiry", "out_amount",
         "provider_quote_id", "failure", "request_json", "created_at", "updated_at",
+        "observed_at", "import_json",
     ),
 }
 
 TIMESTAMP_COLUMNS = {
     "migrated_at", "ts", "opened_at", "closed_at", "until", "created_at", "updated_at",
+    "observed_at",
 }
 BOOLEAN_COLUMNS = {"pass", "alive_6h", "organic", "flush", "chase", "trail_active"}
 ID_TABLES = ("scans", "audits", "verdicts", "signals", "positions", "activity")
@@ -142,7 +144,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 9)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

@@ -26,6 +26,17 @@ _ID = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 _QUOTE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 _MINT = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _DECIMAL = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
+_BASE_INT = re.compile(r"^[1-9]\d*$")
+_SHORT = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
+_FEE_TYPE = re.compile(r"^[a-z0-9_]{1,40}$")
+_WORD = re.compile(r"^[a-z_]{1,40}$")
+WRAPPED_SOL = "So11111111111111111111111111111111111111112"
+_SOLANA_CHAINS = {"solana:mainnet", "solana:101"}
+_REJECT = {
+    "signature", "execution", "signedtransaction", "broadcast",
+    "signed", "secret", "stamper", "privatekey", "session",
+}
+_STRIP = {"transactiondata", "rawtransaction", "transaction", "transactions"}
 _REQUEST_KEYS = {
     "id", "sellChainId", "buyChainId", "sellTokenMint", "buyTokenMint",
     "sellTokenIsNative", "buyTokenIsNative", "amount", "amountUnit",
@@ -39,11 +50,6 @@ _TOOL_KEYS = {
     "sellTokenIsNative", "amount", "amountUnit", "buyTokenDecimals", "sellTokenDecimals",
     "slippageTolerance", "exactOut", "autoSlippage", "base64EncodedTx", "execute",
     "taker", "derivationIndex",
-}
-_FORBIDDEN = {
-    "execute", "execution", "signature", "rawtransaction", "transaction",
-    "signedtransaction", "secret", "session", "stamper", "privatekey",
-    "broadcast", "signed", "transactions",
 }
 _RESULT_KEYS = {"id", "wallet_addresses", "quote"}
 
@@ -89,32 +95,35 @@ def record_result(body: dict) -> dict:
     wallet = _solana_wallet(body["wallet_addresses"])
     quote = body["quote"]
     _exact(quote, _QUOTE_KEYS)
-    request = quote["quoteRequest"]
-    response = quote["quoteResponse"]
+    request, request_omitted = _sanitize(quote["quoteRequest"])
+    response, response_omitted = _sanitize(quote["quoteResponse"])
     if not isinstance(request, dict) or not isinstance(response, dict):
         raise HTTPException(status_code=400, detail="quote must contain request and response objects")
-    _reject_tree(response)
+    omitted = request_omitted or response_omitted
     stored = json.loads(row["request_json"])
-    _matches_request(request, stored, wallet)
-    provider_quote_id = _provider_quote_id(response)
-    out_amount = _quoted_out(response)
-    _bound_slippage(response, stored)
+    if _is_normalized(request):
+        projection = _bind_normalized(request, response, stored, wallet, omitted)
+    else:
+        _matches_request(request, stored, wallet)
+        projection = _bind_legacy(response, stored, omitted)
     _expire_row(row)
     row = _row(quote_id)
     if row["status"] != "pending":
-        if row["wallet"] != wallet or row["provider_quote_id"] != provider_quote_id:
+        if row["wallet"] != wallet or row["provider_quote_id"] != projection["provider_quote_id"]:
             raise HTTPException(status_code=409, detail="quote id is already bound")
         return _view(row)
-    expiry = _expiry(_expiry_value(response))
     now = time.time()
     db.execute(
         """
         UPDATE quotes
-        SET status = 'quoted', wallet = ?, out_amount = ?, expiry = ?, provider_quote_id = ?,
-            failure = NULL, updated_at = ?
+        SET status = ?, wallet = ?, out_amount = ?, expiry = ?, provider_quote_id = ?,
+            observed_at = ?, import_json = ?, failure = NULL, updated_at = ?
         WHERE id = ? AND status = 'pending'
         """,
-        (wallet, out_amount, expiry, provider_quote_id, now, quote_id),
+        (
+            projection["status"], wallet, projection["out_amount"], projection["expiry"],
+            projection["provider_quote_id"], now, _canonical_json(projection), now, quote_id,
+        ),
     )
     return _view(_row(quote_id))
 
@@ -146,6 +155,8 @@ def _request_spec(body: dict) -> dict:
     unit = body.get("amountUnit")
     if unit not in {"ui", "base"}:
         raise HTTPException(status_code=400, detail="amountUnit must be ui or base")
+    if unit == "base" and _BASE_INT.fullmatch(amount) is None:
+        raise HTTPException(status_code=400, detail="base amount must be a positive integer")
     exact_out = body.get("exactOut", False)
     if exact_out is not False:
         raise HTTPException(status_code=400, detail="exactOut must be false")
@@ -196,15 +207,23 @@ def _request_spec(body: dict) -> dict:
 def _view(row) -> dict:
     status, usable = _status_on_read(row)
     tool = json.loads(row["request_json"])
+    imported = json.loads(row["import_json"]) if row["import_json"] else {}
+    unknown = bool(imported.get("provider_expiry_unknown"))
+    if imported.get("simulation_failed"):
+        usable = False
     return {
         "id": row["id"],
         "status": status,
         "usable": usable,
+        "executable": False,
         "label": LABEL,
         "provenance": PROVENANCE,
         "bridge": "not_connected",
         "provider": PROVIDER,
         "provider_quote_id": row["provider_quote_id"],
+        "provider_expiry_unknown": unknown,
+        "local_ttl": None,
+        "observed_at": row["observed_at"],
         "wallet": row["wallet"],
         "amount": row["amount"],
         "amount_unit": row["amount_unit"],
@@ -216,9 +235,20 @@ def _view(row) -> dict:
         "buy_mint": row["buy_mint"],
         "sell_decimals": row["sell_decimals"],
         "buy_decimals": row["buy_decimals"],
+        "sell_amount_base": imported.get("sell_amount_base"),
         "slippage": row["slippage"],
+        "proposed_slippage": imported.get("proposed_slippage"),
         "expiry": row["expiry"],
         "out_amount": row["out_amount"],
+        "fees": imported.get("fees") or [],
+        "route_provider": imported.get("route_provider"),
+        "provider_chain": imported.get("provider_chain"),
+        "price_impact": imported.get("price_impact"),
+        "simulation_failed": imported.get("simulation_failed"),
+        "balance": imported.get("balance"),
+        "quote_session_id": imported.get("quote_session_id"),
+        "provider_request_id": imported.get("provider_request_id"),
+        "transaction_material_omitted": bool(imported.get("transaction_material_omitted")),
         "failure": row["failure"],
         "execute": False,
         "tool": "buy",
@@ -433,30 +463,305 @@ def _matches_request(request: dict, stored: dict, wallet: str) -> None:
         raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
 
 
-def _reject_tree(value) -> None:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            normalized = str(key).lower().replace("-", "").replace("_", "")
-            if normalized in _FORBIDDEN:
-                raise HTTPException(status_code=400, detail="execution fields are refused")
-            _reject_tree(item)
-    elif isinstance(value, list):
-        for item in value:
-            _reject_tree(item)
-
-
 def _solana_wallet(payload: dict) -> str:
     _exact(payload, _WALLET_KEYS)
     rows = payload.get("addresses")
-    if not isinstance(rows, list) or len(rows) != 1:
+    if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="wallet_addresses must contain one Solana address")
-    _exact(rows[0], _ADDRESS_KEYS)
-    if rows[0].get("addressType") != "solana":
+    solana = []
+    for item in rows:
+        _exact(item, _ADDRESS_KEYS)
+        if str(item.get("addressType", "")).lower() == "solana":
+            solana.append(item)
+    if len(solana) != 1:
         raise HTTPException(status_code=400, detail="wallet_addresses must contain one Solana address")
-    address = rows[0].get("address")
+    address = solana[0].get("address")
     if not isinstance(address, str) or _MINT.fullmatch(address) is None:
         raise HTTPException(status_code=400, detail="wallet_addresses must contain one Solana address")
     return address
+
+
+def _sanitize(value):
+    omitted = False
+
+    def walk(node):
+        nonlocal omitted
+        if isinstance(node, dict):
+            clean = {}
+            for key, item in node.items():
+                normalized = str(key).lower().replace("-", "").replace("_", "")
+                if normalized == "execute":
+                    if item is not False:
+                        raise HTTPException(status_code=400, detail="quotes do not execute")
+                    clean[key] = False
+                    continue
+                if normalized in _REJECT:
+                    raise HTTPException(status_code=400, detail="execution fields are refused")
+                if normalized in _STRIP:
+                    omitted = True
+                    continue
+                clean[key] = walk(item)
+            return clean
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    if not isinstance(value, (dict, list)):
+        raise HTTPException(status_code=400, detail="quote must contain request and response objects")
+    return walk(value), omitted
+
+
+def _is_normalized(request: dict) -> bool:
+    return any(key in request for key in ("sellToken", "buyToken", "sellAmount"))
+
+
+def _bind_legacy(response: dict, stored: dict, omitted: bool) -> dict:
+    _bound_slippage(response, stored)
+    expiry = _expiry(_expiry_value(response))
+    return {
+        "status": "quoted",
+        "expiry": expiry,
+        "out_amount": _quoted_out(response),
+        "provider_quote_id": _provider_quote_id(response),
+        "provider_expiry_unknown": False,
+        "transaction_material_omitted": omitted,
+        "sell_amount_base": _expected_base(stored),
+        "fees": [],
+        "route_provider": None,
+        "provider_chain": None,
+        "proposed_slippage": None,
+        "price_impact": None,
+        "simulation_failed": False,
+        "balance": None,
+        "quote_session_id": None,
+        "provider_request_id": None,
+    }
+
+
+def _bind_normalized(request: dict, response: dict, stored: dict, wallet: str, omitted: bool) -> dict:
+    _flags(request)
+    expected = _expected_base(stored)
+    sell_amount = _base_int(request.get("sellAmount"), "sell amount")
+    if sell_amount != expected:
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    _same_slippage(request.get("slippageTolerance"), stored)
+    sell = _token_ref(request.get("sellToken"))
+    buy = _token_ref(request.get("buyToken"))
+    if not _same_side(sell, bool(stored["sellTokenIsNative"]), stored.get("sellTokenMint")):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    if not _same_side(buy, bool(stored["buyTokenIsNative"]), stored.get("buyTokenMint")):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    if _taker_address(request.get("taker")) != wallet:
+        raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
+    if _taker_address(response.get("taker")) != wallet:
+        raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
+    if not _same_side(_token_ref(response.get("sellToken")), bool(stored["sellTokenIsNative"]), stored.get("sellTokenMint")):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    if not _same_side(_token_ref(response.get("buyToken")), bool(stored["buyTokenIsNative"]), stored.get("buyTokenMint")):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    _same_slippage(response.get("slippageTolerance"), stored)
+    quotes = response.get("quotes")
+    if not isinstance(quotes, list) or len(quotes) != 1 or not isinstance(quotes[0], dict):
+        raise HTTPException(status_code=400, detail="quote response must contain one quote")
+    chosen = quotes[0]
+    if _base_int(chosen.get("sellAmount"), "sell amount") != expected:
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    _same_slippage(chosen.get("slippageTolerance"), stored)
+    buy_amount = _base_int(chosen.get("buyAmount"), "buy amount")
+    provider_quote_id = chosen.get("quoteId")
+    if not isinstance(provider_quote_id, str) or _QUOTE_ID.fullmatch(provider_quote_id) is None:
+        raise HTTPException(status_code=400, detail="provider quote id is not usable")
+    found = []
+    _find_named(response, {"expiry", "expiresAt", "expires_at", "validUntil", "valid_until"}, found)
+    if not found:
+        expiry = None
+        unknown = True
+        status = "observed"
+    else:
+        stamps = [_parse_expiry(value) for value in found]
+        if any(abs(stamp - stamps[0]) > 1 for stamp in stamps):
+            raise HTTPException(status_code=400, detail="quote expiries disagree")
+        expiry = _expiry(stamps[0])
+        unknown = False
+        status = "quoted"
+    simulation_failed = chosen.get("simulationFailed")
+    if not isinstance(simulation_failed, bool):
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    if simulation_failed:
+        status = "observed"
+    return {
+        "status": status,
+        "expiry": expiry,
+        "out_amount": buy_amount,
+        "provider_quote_id": provider_quote_id,
+        "provider_expiry_unknown": unknown,
+        "transaction_material_omitted": omitted,
+        "sell_amount_base": expected,
+        "fees": _fees(chosen.get("fees")),
+        "route_provider": _route_provider(chosen.get("baseProvider")),
+        "provider_chain": sell["chain"],
+        "proposed_slippage": _optional_slippage(response.get("proposedSlippage")),
+        "price_impact": _impact(chosen.get("priceImpact")),
+        "simulation_failed": simulation_failed,
+        "balance": _word(chosen.get("balanceSufficiency")),
+        "quote_session_id": _optional_id(response.get("quoteSessionId")),
+        "provider_request_id": _optional_id(response.get("requestId")),
+    }
+
+
+def _flags(request: dict) -> None:
+    for key in ("exactOut", "autoSlippage", "base64EncodedTx"):
+        if request.get(key) not in (None, False):
+            raise HTTPException(status_code=400, detail="quotes do not execute")
+    if request.get("derivationIndex") not in (None, 0):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+
+
+def _expected_base(stored: dict) -> str:
+    amount = stored["amount"]
+    if stored["amountUnit"] == "base":
+        if _BASE_INT.fullmatch(amount) is None:
+            raise HTTPException(status_code=400, detail="base amount must be a positive integer")
+        return amount
+    decimals = stored.get("sellTokenDecimals")
+    if stored.get("sellTokenIsNative") and decimals is None:
+        decimals = 9
+    if isinstance(decimals, bool) or not isinstance(decimals, int):
+        raise HTTPException(status_code=400, detail="decimals are required for ui amounts")
+    scaled = Decimal(amount) * (Decimal(10) ** decimals)
+    if scaled != scaled.to_integral_value() or scaled <= 0:
+        raise HTTPException(status_code=400, detail="amount must be a positive base integer")
+    return format(scaled.quantize(Decimal(1)), "f")
+
+
+def _base_int(value, label: str) -> str:
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=label + " must be a positive integer")
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise HTTPException(status_code=400, detail=label + " must be a positive integer")
+    if _BASE_INT.fullmatch(text) is None:
+        raise HTTPException(status_code=400, detail=label + " must be a positive integer")
+    return text
+
+
+def _same_slippage(value, stored: dict) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    if _json_number(float(value)) != stored["slippageTolerance"]:
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+
+
+def _optional_slippage(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    if not 0 <= float(value) <= 100:
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    return _json_number(float(value))
+
+
+def _impact(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    return _json_number(float(value))
+
+
+def _token_ref(value) -> dict:
+    if not isinstance(value, dict) or value.get("chainId") not in _SOLANA_CHAINS:
+        raise HTTPException(status_code=400, detail="quote does not match the request")
+    kind = value.get("resourceType")
+    chain = value["chainId"]
+    if kind == "nativeToken":
+        if str(value.get("slip44")) != "501":
+            raise HTTPException(status_code=400, detail="quote does not match the request")
+        return {"chain": chain, "native": True, "address": None}
+    if kind == "address" and isinstance(value.get("address"), str) and _MINT.fullmatch(value["address"]):
+        return {"chain": chain, "native": False, "address": value["address"]}
+    raise HTTPException(status_code=400, detail="quote does not match the request")
+
+
+def _same_side(ref: dict, native: bool, mint: str | None) -> bool:
+    if native:
+        return ref["native"] or ref["address"] == WRAPPED_SOL
+    return (not ref["native"]) and ref["address"] == mint
+
+
+def _taker_address(value) -> str:
+    if isinstance(value, str):
+        address = value
+        chain = CHAIN
+    elif isinstance(value, dict):
+        address = value.get("address")
+        chain = value.get("chainId", CHAIN)
+        if value.get("resourceType") not in (None, "address"):
+            raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
+    else:
+        raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
+    if chain not in _SOLANA_CHAINS or not isinstance(address, str) or _MINT.fullmatch(address) is None:
+        raise HTTPException(status_code=400, detail="quote wallet does not match wallet_addresses")
+    return address
+
+
+def _fees(value) -> list:
+    if not isinstance(value, list) or not value:
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    fees = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="quote response is incomplete")
+        name = item.get("name")
+        kind = item.get("type")
+        if not isinstance(name, str) or _SHORT.fullmatch(name) is None:
+            raise HTTPException(status_code=400, detail="quote response is incomplete")
+        if not isinstance(kind, str) or _FEE_TYPE.fullmatch(kind) is None:
+            raise HTTPException(status_code=400, detail="quote response is incomplete")
+        fees.append({
+            "name": name,
+            "amount": _base_int(item.get("amount"), "fee"),
+            "type": kind,
+            "percentage": _optional_slippage(item.get("percentage")),
+            "token": _token_ref(item.get("token")),
+        })
+    return fees
+
+
+def _route_provider(value) -> str:
+    if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    if _SHORT.fullmatch(value["name"]) is None:
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    return value["name"]
+
+
+def _word(value) -> str:
+    if not isinstance(value, str) or _WORD.fullmatch(value) is None:
+        raise HTTPException(status_code=400, detail="quote response is incomplete")
+    return value
+
+
+def _optional_id(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or _QUOTE_ID.fullmatch(value) is None:
+        raise HTTPException(status_code=400, detail="provider quote id is not usable")
+    return value
+
+
+def _find_named(value, names: set[str], found: list) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in names:
+                found.append(item)
+            else:
+                _find_named(item, names, found)
+    elif isinstance(value, list):
+        for item in value:
+            _find_named(item, names, found)
 
 
 def _allow(body: dict, allowed: set[str]) -> None:
@@ -482,4 +787,6 @@ def _jsonable(value):
         return _json_number(value)
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
     raise HTTPException(status_code=400, detail="unexpected field")
