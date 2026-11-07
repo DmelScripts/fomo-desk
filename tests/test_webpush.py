@@ -188,6 +188,7 @@ class TestWebPush(unittest.TestCase):
         state = webpush.status()
         self.assertTrue(state["keys_match"])
         self.assertTrue(state["contact_is_mailto"])
+        self.assertFalse(state["contact_is_https"])
         self.assertFalse(state["contact_host_public"])
         blob = json.dumps(state)
         self.assertNotIn(private, blob)
@@ -196,6 +197,55 @@ class TestWebPush(unittest.TestCase):
         webpush._public = lambda: b64urlencode(b"\x04" + (b"\x01" * 64))
         self.assertFalse(webpush.status()["keys_match"])
         self.assertTrue(webpush.status()["private_key_parseable"])
+
+    def test_current_subject_signs_and_https_origin_is_accepted(self):
+        import time
+        from py_vapid import Vapid, _check_sub
+        from py_vapid.jwt import decode
+        from py_vapid.utils import b64urlencode
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        self.assertEqual(webpush._CONTACT, "mailto:desk@localhost")
+        proposed = "https://fomo-desk-nb3d.onrender.com"
+        self.assertTrue(_check_sub(proposed))
+        self.assertFalse(_check_sub(proposed + "/"))
+        vapid = Vapid()
+        vapid.generate_keys()
+        raw = b64urlencode(vapid.private_key.private_numbers().private_value.to_bytes(32, "big"))
+        public = b64urlencode(vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint))
+        now = int(time.time())
+        for subject in (webpush._CONTACT, proposed):
+            curled = self.real_webpush(
+                subscription_info={
+                    "endpoint": "https://web.push.apple.com/example",
+                    "keys": {"p256dh": public, "auth": b64urlencode(b"0123456789abcdef")},
+                },
+                data="hello",
+                vapid_private_key=vapid,
+                vapid_claims={"sub": subject},
+                ttl=webpush._TTL_S,
+                curl=True,
+            )
+            self.assertIsInstance(curled, str)
+            self.assertIn("TTL: " + str(webpush._TTL_S), curled.replace("ttl:", "TTL:"))
+            self.assertNotIn(raw, curled)
+            auth = ""
+            for line in curled.splitlines():
+                if "authorization:" in line.lower() and "vapid " in line.lower():
+                    auth = line.split(":", 1)[1].strip().strip("\\").strip().strip('"')
+            self.assertTrue(auth.lower().startswith("vapid "))
+            parts = {}
+            for piece in auth.split(" ", 1)[1].split(","):
+                key, value = piece.split("=", 1)
+                parts[key] = value
+            claims = decode(parts["t"], parts["k"])
+            self.assertEqual(claims["aud"], "https://web.push.apple.com")
+            self.assertEqual(claims["sub"], subject)
+            self.assertLessEqual(int(claims["exp"]) - now, 24 * 60 * 60)
+            self.assertGreater(int(claims["exp"]) - now, 60 * 60)
+            self.assertTrue(Vapid.verify(auth))
+            point = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+            self.assertEqual(parts["k"], b64urlencode(point))
 
     def test_pem_signs_locally_and_parse_failure_is_not_a_mismatch(self):
         import requests

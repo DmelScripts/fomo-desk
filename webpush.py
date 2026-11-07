@@ -114,6 +114,7 @@ def status() -> dict:
         "public_key_parseable": keys["public_key_parseable"],
         "keys_match": keys["keys_match"],
         "contact_is_mailto": contact["contact_is_mailto"],
+        "contact_is_https": contact["contact_is_https"],
         "contact_host_public": contact["contact_host_public"],
     }
 
@@ -311,11 +312,23 @@ def _reason(response: object) -> str | None:
 
 
 def _contact_flags() -> dict:
-    text = _CONTACT.lower()
-    mailto = text.startswith("mailto:") and "@" in text
-    host = text.split("@", 1)[1] if mailto else ""
+    text = _CONTACT.strip()
+    lowered = text.lower()
+    mailto = lowered.startswith("mailto:") and "@" in text
+    https = lowered.startswith("https://")
+    if mailto:
+        host = text.split("@", 1)[1].lower()
+    elif https:
+        from urllib.parse import urlparse
+        host = (urlparse(text).hostname or "").lower()
+    else:
+        host = ""
     public = bool(host) and host != "localhost" and "." in host
-    return {"contact_is_mailto": mailto, "contact_host_public": public}
+    return {
+        "contact_is_mailto": mailto,
+        "contact_is_https": https and public,
+        "contact_host_public": public,
+    }
 
 
 def _load_private(text: str):
