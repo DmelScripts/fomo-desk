@@ -34,7 +34,13 @@ class TestNotify(unittest.TestCase):
         self.addCleanup(restore)
         self.previous_private = os.environ.get("VAPID_PRIVATE_KEY")
         self.previous_token = os.environ.get("APP_TOKEN")
-        os.environ["VAPID_PRIVATE_KEY"] = PRIVATE
+        from py_vapid import Vapid
+        from py_vapid.utils import b64urlencode
+        vapid = Vapid()
+        vapid.generate_keys()
+        os.environ["VAPID_PRIVATE_KEY"] = b64urlencode(
+            vapid.private_key.private_numbers().private_value.to_bytes(32, "big")
+        )
         os.environ["APP_TOKEN"] = TOKEN
         os.environ.pop("DESK_AGENTS", None)
         self.addCleanup(self._restore)

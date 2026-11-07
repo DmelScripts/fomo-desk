@@ -20,6 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "dummy-app-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 PRIVATE = "dummy-vapid"
+
+
+def _raw_private() -> str:
+    from py_vapid import Vapid
+    from py_vapid.utils import b64urlencode
+
+    vapid = Vapid()
+    vapid.generate_keys()
+    return b64urlencode(vapid.private_key.private_numbers().private_value.to_bytes(32, "big"))
 MINT = "MintPush11111111111111111111111111111111"
 GONE = "https://push.example/gone"
 OK = "https://push.example/ok"
@@ -39,7 +48,8 @@ class TestWebPush(unittest.TestCase):
         self.addCleanup(restore)
         self.previous_private = os.environ.get("VAPID_PRIVATE_KEY")
         self.previous_tg = os.environ.get("TG_TOKEN")
-        os.environ["VAPID_PRIVATE_KEY"] = PRIVATE
+        self.signing_key = _raw_private()
+        os.environ["VAPID_PRIVATE_KEY"] = self.signing_key
         os.environ["APP_TOKEN"] = TOKEN
         os.environ.pop("TG_TOKEN", None)
         os.environ.pop("DESK_AGENTS", None)
@@ -48,6 +58,7 @@ class TestWebPush(unittest.TestCase):
         db.set_setting("notifier", "webpush", "test")
         db.set_setting("mode", "PAPER", "test")
         self.calls = []
+        self.real_webpush = pywebpush.webpush
         original = pywebpush.webpush
 
         def fake_webpush(**kwargs):
@@ -89,17 +100,18 @@ class TestWebPush(unittest.TestCase):
         self.assertEqual(result["sent"], 1)
         self.assertEqual(result["removed"], 1)
         self.assertEqual(result["failed"], 1)
-        self.assertNotIn(PRIVATE, json.dumps(result))
+        self.assertNotIn(self.signing_key, json.dumps(result))
         self.assertNotIn("push-response-secret", json.dumps(result))
         logged = "\n".join(caught.output)
-        self.assertNotIn(PRIVATE, logged)
+        self.assertNotIn(self.signing_key, logged)
         self.assertNotIn("push-response-secret", logged)
         self.assertNotIn("dummy-auth", logged)
         endpoints = {row["endpoint"] for row in db.query("SELECT endpoint FROM push_subs")}
         self.assertEqual(endpoints, {OK, FAIL})
         self.assertEqual(len(self.calls), 3)
         for call in self.calls:
-            self.assertEqual(call["vapid_private_key"], PRIVATE)
+            self.assertTrue(hasattr(call["vapid_private_key"], "sign"))
+            self.assertNotIn(self.signing_key, str(call["vapid_claims"]))
             self.assertFalse(call["verbose"])
             self.assertGreater(call["ttl"], 0)
             self.assertEqual(call["vapid_claims"]["sub"], "mailto:desk@localhost")
@@ -131,7 +143,7 @@ class TestWebPush(unittest.TestCase):
         self.assertEqual(result["sent"], 0)
         self.assertEqual(result["failed"], 1)
         self.assertFalse(result["ok"])
-        self.assertEqual(result["errors"], [{"status": 400, "reason": "BadTtl"}])
+        self.assertEqual(result["errors"], [{"status": 400, "reason": "BadTtl", "category": "provider"}])
         blob = json.dumps(result)
         self.assertNotIn("endpoint-secret", blob)
         self.assertNotIn(OK, blob)
@@ -183,6 +195,86 @@ class TestWebPush(unittest.TestCase):
         self.assertNotIn("desk@localhost", blob)
         webpush._public = lambda: b64urlencode(b"\x04" + (b"\x01" * 64))
         self.assertFalse(webpush.status()["keys_match"])
+        self.assertTrue(webpush.status()["private_key_parseable"])
+
+    def test_pem_signs_locally_and_parse_failure_is_not_a_mismatch(self):
+        import requests
+        from py_vapid import Vapid
+        from py_vapid.utils import b64urlencode
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        vapid = Vapid()
+        vapid.generate_keys()
+        raw = b64urlencode(vapid.private_key.private_numbers().private_value.to_bytes(32, "big"))
+        public = b64urlencode(vapid.public_key.public_bytes(
+            Encoding.X962, PublicFormat.UncompressedPoint,
+        ))
+        pem = vapid.private_pem().decode()
+        self.assertRaises(Exception, Vapid.from_string, pem)
+        loaded = webpush._load_private(pem)
+        signed = loaded.sign({"sub": "mailto:desk@localhost", "aud": "https://web.push.apple.com"})
+        self.assertTrue(signed["Authorization"].startswith("vapid "))
+        self.assertNotIn(raw, signed["Authorization"])
+        self.assertNotIn("BEGIN", signed["Authorization"])
+        curled = self.real_webpush(
+            subscription_info={
+                "endpoint": "https://push.example/phone",
+                "keys": {"p256dh": public, "auth": b64urlencode(b"0123456789abcdef")},
+            },
+            data="hello",
+            vapid_private_key=loaded,
+            vapid_claims={"sub": "mailto:desk@localhost"},
+            ttl=webpush._TTL_S,
+            curl=True,
+        )
+        self.assertIsInstance(curled, str)
+        self.assertIn(str(webpush._TTL_S), curled)
+        self.assertNotIn(raw, curled)
+        self.assertNotIn("BEGIN", curled)
+        escaped = pem.replace("\n", "\\n")
+        self.assertTrue(webpush._load_private(escaped).public_key)
+        os.environ["VAPID_PRIVATE_KEY"] = pem
+        original = webpush._public
+        webpush._public = lambda: public
+        self.addCleanup(lambda: setattr(webpush, "_public", original))
+        state = webpush.status()
+        self.assertTrue(state["private_key_parseable"])
+        self.assertTrue(state["public_key_parseable"])
+        self.assertTrue(state["keys_match"])
+        blob = json.dumps(state)
+        self.assertNotIn(raw, blob)
+        self.assertNotIn("BEGIN", blob)
+        webpush._public = lambda: b64urlencode(b"\x04" + (b"\x03" * 64))
+        mismatched = webpush.status()
+        self.assertTrue(mismatched["private_key_parseable"])
+        self.assertTrue(mismatched["public_key_parseable"])
+        self.assertFalse(mismatched["keys_match"])
+        os.environ["VAPID_PRIVATE_KEY"] = "not-a-key"
+        broken = webpush.status()
+        self.assertFalse(broken["private_key_parseable"])
+        self.assertIsNone(broken["keys_match"])
+        self.assertNotIn("not-a-key", json.dumps(broken))
+        os.environ["VAPID_PRIVATE_KEY"] = pem
+        webpush._public = lambda: public
+
+        def offline(**_kwargs):
+            raise requests.ConnectionError("hidden-host")
+
+        pywebpush.webpush = offline
+        self._sub("https://push.example/offline")
+        result = webpush.deliver("Test push", "https://example.test/page")
+        self.assertEqual(result["errors"], [{"status": None, "reason": None, "category": "network"}])
+        self.assertNotIn("hidden-host", json.dumps(result))
+        self.assertNotIn(raw, json.dumps(result))
+        os.environ["VAPID_PRIVATE_KEY"] = "not-a-key"
+        def refuse_network(**_kwargs):
+            raise AssertionError("network was called")
+
+        pywebpush.webpush = refuse_network
+        refused = webpush.deliver("Test push", "https://example.test/page")
+        self.assertEqual(refused["errors"][0]["category"], "private_key")
+        self.assertIsNone(refused["errors"][0]["status"])
+        self.assertNotIn("not-a-key", json.dumps(refused))
 
     def test_test_push_reports_a_provider_failure(self):
         import server
@@ -207,7 +299,7 @@ class TestWebPush(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertEqual(body["sent"], 0)
         self.assertEqual(body["failed"], 1)
-        self.assertEqual(body["errors"], [{"status": 400, "reason": "BadTtl"}])
+        self.assertEqual(body["errors"], [{"status": 400, "reason": "BadTtl", "category": "provider"}])
         self.assertNotIn("do-not-show", sent.text)
         self.assertNotIn(OK, sent.text)
         self.assertNotIn(PRIVATE, sent.text)
@@ -299,7 +391,7 @@ class TestWebPush(unittest.TestCase):
         self.assertEqual(refused.status_code, 409)
         self.assertNotIn(PRIVATE, refused.text)
         self.assertEqual(self.calls, [])
-        os.environ["VAPID_PRIVATE_KEY"] = PRIVATE
+        os.environ["VAPID_PRIVATE_KEY"] = self.signing_key
         self._sub(OK)
         sent = client.post("/api/push/test", headers=AUTH)
         self.assertEqual(sent.status_code, 200)

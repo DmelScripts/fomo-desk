@@ -907,6 +907,7 @@
         var err = body.errors && body.errors[0];
         if (err && typeof err.status === "number") note += " Provider status " + err.status + ".";
         if (err && err.reason && /^[A-Za-z]{1,40}$/.test(err.reason)) note += " Reason " + err.reason + ".";
+        if (err && err.category && /^[a-z_]{1,40}$/.test(err.category)) note += " Category " + err.category + ".";
       } else if (sent) {
         note = "Test push sent to " + sent + (sent === 1 ? " phone." : " phones.");
       } else {

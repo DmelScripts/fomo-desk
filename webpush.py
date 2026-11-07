@@ -38,10 +38,26 @@ _REASONS = frozenset({
 })
 
 
+_CATEGORIES = frozenset({
+    "private_key",
+    "sign",
+    "subscription",
+    "network",
+    "provider",
+    "local",
+})
+
+
 class PushStatus(Exception):
-    def __init__(self, status: int | None, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        status: int | None,
+        reason: str | None = None,
+        category: str | None = None,
+    ) -> None:
         self.status = status if isinstance(status, int) else None
         self.reason = reason if reason in _REASONS else None
+        self.category = category if category in _CATEGORIES else "local"
 
 
 def _private() -> str | None:
@@ -89,11 +105,14 @@ def status() -> dict:
     else:
         detail = "Web push is on. A test push reports how many phones accepted it. The private key is not shown."
     contact = _contact_flags()
+    keys = _key_status()
     return {
         "ready": ready,
         "channel": channel,
         "detail": detail,
-        "keys_match": _keys_match(),
+        "private_key_parseable": keys["private_key_parseable"],
+        "public_key_parseable": keys["public_key_parseable"],
+        "keys_match": keys["keys_match"],
         "contact_is_mailto": contact["contact_is_mailto"],
         "contact_host_public": contact["contact_host_public"],
     }
@@ -101,20 +120,33 @@ def status() -> dict:
 
 def _pywebpush_send(subscription: dict, data: str, private_key: str) -> None:
     import pywebpush
+    import requests
+    from py_vapid import VapidException
 
+    try:
+        vapid = _load_private(private_key)
+    except Exception:
+        raise PushStatus(None, category="private_key") from None
     try:
         pywebpush.webpush(
             subscription_info=subscription,
             data=data,
-            vapid_private_key=private_key,
+            vapid_private_key=vapid,
             vapid_claims={"sub": _CONTACT},
             ttl=_TTL_S,
             verbose=False,
         )
     except pywebpush.WebPushException as exc:
-        raise PushStatus(exc.status_code, _reason(getattr(exc, "response", None))) from None
+        response = getattr(exc, "response", None)
+        if response is None:
+            raise PushStatus(None, category="subscription") from None
+        raise PushStatus(exc.status_code, _reason(response), category="provider") from None
+    except requests.RequestException:
+        raise PushStatus(None, category="network") from None
+    except VapidException:
+        raise PushStatus(None, category="sign") from None
     except Exception:
-        raise PushStatus(None) from None
+        raise PushStatus(None, category="local") from None
 
 
 def deliver(line: str, url: str | None, *, sender=None) -> dict:
@@ -243,11 +275,16 @@ def deliver_once(event_id: str, line: str, url: str, *, sender=None) -> dict:
 
 def _fail(result: dict, exc: PushStatus) -> None:
     result["failed"] += 1
-    result["errors"].append({"status": exc.status, "reason": exc.reason})
+    result["errors"].append({
+        "status": exc.status,
+        "reason": exc.reason,
+        "category": exc.category,
+    })
     log.warning(
-        "web push failed status=%s reason=%s",
+        "web push failed status=%s reason=%s category=%s",
         "none" if exc.status is None else exc.status,
         exc.reason or "none",
+        exc.category,
     )
 
 
@@ -281,28 +318,73 @@ def _contact_flags() -> dict:
     return {"contact_is_mailto": mailto, "contact_host_public": public}
 
 
-def _keys_match() -> bool | None:
-    """True when the private key's public point equals the public file.
+def _load_private(text: str):
+    """Open the private key. PEM is what this library writes; raw is what it also accepts.
 
-    The key material is not returned. A value of None means one side is missing.
+    The key text is never logged.
     """
-    private = _private()
-    public = _public()
-    if private is None or public is None:
+    from py_vapid import Vapid
+
+    cleaned = text.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+        cleaned = cleaned[1:-1].strip()
+    if "\\n" in cleaned and "BEGIN" in cleaned:
+        cleaned = cleaned.replace("\\n", "\n")
+    if "BEGIN" in cleaned:
+        return Vapid.from_pem(cleaned.encode("utf-8"))
+    return Vapid.from_string(private_key=cleaned)
+
+
+def _public_point(text: str | None):
+    if not text:
         return None
     try:
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-        from py_vapid import Vapid
-
-        point = Vapid.from_string(private_key=private).public_key.public_bytes(
-            Encoding.X962,
-            PublicFormat.UncompressedPoint,
-        )
-        padded = public + ("=" * ((4 - len(public) % 4) % 4))
         import base64
-        return base64.urlsafe_b64decode(padded.encode("ascii")) == point
+        padded = text + ("=" * ((4 - len(text) % 4) % 4))
+        point = base64.urlsafe_b64decode(padded.encode("ascii"))
     except Exception:
-        return False
+        return None
+    if len(point) != 65 or point[0] != 4:
+        return None
+    return point
+
+
+def _key_status() -> dict:
+    """Parse and compare without returning key material.
+
+    keys_match is null unless both sides parsed. A parse failure is not a mismatch.
+    """
+    public_text = _public()
+    private_text = _private()
+    public_ok = None if public_text is None else _public_point(public_text) is not None
+    if private_text is None:
+        return {
+            "private_key_parseable": None,
+            "public_key_parseable": public_ok,
+            "keys_match": None,
+        }
+    try:
+        vapid = _load_private(private_text)
+    except Exception:
+        return {
+            "private_key_parseable": False,
+            "public_key_parseable": public_ok,
+            "keys_match": None,
+        }
+    point = _public_point(public_text)
+    if point is None:
+        return {
+            "private_key_parseable": True,
+            "public_key_parseable": public_ok,
+            "keys_match": None,
+        }
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    derived = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return {
+        "private_key_parseable": True,
+        "public_key_parseable": True,
+        "keys_match": derived == point,
+    }
 
 
 def _claim(event_id: str, endpoint: str, now: float) -> bool:
