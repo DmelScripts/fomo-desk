@@ -280,8 +280,8 @@ def route_guard() -> dict:
         "exit_starts_missing": (),
         "sign": False,
         "blockers": (
-            "fee policy has no owner-approved USD cap for DEX plus network fees",
-            "aggregate loss cap including fees is not owner-approved",
+            "the $0.05 fee cap and the $20 loss stop are specified and not persisted",
+            "realized DEX and network fees are not accounted in USD on the runner",
             "this snapshot does not guarantee later exit liquidity",
             "no blockhash has been fetched, so nothing here is broadcastable",
         ),
