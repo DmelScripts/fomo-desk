@@ -1,9 +1,8 @@
 """Phantom MCP transport. This process does not log in, sign, or broadcast.
 
-The pinned server can be started with an empty home. A running process is not
-a session and it is not permission to quote or send. Fresh auth would be a
-device login that creates a new agent wallet. Nothing here reaches the wallet
-already used for the manual quote.
+The allowlist is the wallet id and Solana address verified on the server.
+A later login does not replace that pair. The manual quote used a different
+address and stays non-executable.
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ PINNED_PACKAGE = "@phantom/mcp-server@1.2.9"
 PINNED_CLI = "@phantom/cli@3.0.0"
 AUTH = "AWAITING_OWNER_AUTH_PROCEDURE"
 TRANSPORT = "BLOCKED"
-REQUIRED_WALLET_ID = "d76451f8-288c-4ab8-b6de-1cfd84403873"
-REQUIRED_WALLET = "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"
+REQUIRED_WALLET_ID = "eba28e4f-6b99-4543-af72-c7d1b008ce4e"
+REQUIRED_WALLET = "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"
 
 
 def status() -> dict:
@@ -36,8 +35,8 @@ def status() -> dict:
         "required_wallet_id": REQUIRED_WALLET_ID,
         "required_wallet": REQUIRED_WALLET,
         "detail": (
-            "Render has no Phantom session. A new login creates a different agent wallet. "
-            "The buy walletId argument is not authorization. Persistent files are not a session."
+            "The allowlist is the verified server wallet. A later login does not replace it. "
+            "Login is not permission to quote or send. The recorded quote stays non-executable."
         ),
     }
 

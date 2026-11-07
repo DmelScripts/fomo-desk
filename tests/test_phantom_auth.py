@@ -57,10 +57,10 @@ if [ "$1" = "wallet" ]; then
     exit 0
   fi
   if [ "$mode" = "toon" ]; then
-    printf '%s\n' 'walletId: d76451f8-288c-4ab8-b6de-1cfd84403873' 'organizationId: org_1' 'addresses[1]{addressType,address}:' '  solana,GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh'
+    printf '%s\n' 'walletId: eba28e4f-6b99-4543-af72-c7d1b008ce4e' 'organizationId: org_1' 'addresses[1]{addressType,address}:' '  solana,7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t'
     exit 0
   fi
-  echo '{"walletId":"d76451f8-288c-4ab8-b6de-1cfd84403873","addresses":[{"addressType":"Solana","address":"GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"}]}'
+  echo '{"walletId":"eba28e4f-6b99-4543-af72-c7d1b008ce4e","addresses":[{"addressType":"Solana","address":"7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"}]}'
   exit 0
 fi
 exit 2
@@ -158,7 +158,8 @@ exit 2
         self.assertEqual(view["observed_wallet_id"], "11111111-2222-4333-8444-555555555555")
         self.assertFalse(view["matches_allowlist"])
         self.assertEqual(view["required_wallet_id"], phantom_transport.REQUIRED_WALLET_ID)
-        self.assertEqual(phantom_transport.REQUIRED_WALLET, "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh")
+        self.assertEqual(phantom_transport.REQUIRED_WALLET_ID, "eba28e4f-6b99-4543-af72-c7d1b008ce4e")
+        self.assertEqual(phantom_transport.REQUIRED_WALLET, "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t")
         self.assertIsNone(phantom_transport.quote({}).get("quote"))
         self.assertFalse(view["live_ready"])
         self.assertEqual(db.get_setting("paper_start_stack"), "200")
@@ -189,18 +190,18 @@ exit 2
 
     def test_addresses_shapes_do_not_call_a_missing_identity_a_mismatch(self):
         match = {
-            "walletId": "d76451f8-288c-4ab8-b6de-1cfd84403873",
+            "walletId": "eba28e4f-6b99-4543-af72-c7d1b008ce4e",
             "organizationId": "org_1",
             "addresses": [
-                {"addressType": "solana", "address": "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"},
+                {"addressType": "solana", "address": "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"},
                 {"addressType": "ethereum", "address": "0xabc"},
             ],
         }
         toon = "\n".join([
-            "walletId: d76451f8-288c-4ab8-b6de-1cfd84403873",
+            "walletId: eba28e4f-6b99-4543-af72-c7d1b008ce4e",
             "organizationId: org_1",
             "addresses[2]{addressType,address}:",
-            "  solana,GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh",
+            "  solana,7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
             "  ethereum,0xabc",
         ])
         self.assertEqual(phantom_auth._classify(toon, 0)["state"], "observed")
@@ -220,7 +221,13 @@ exit 2
         self.assertEqual(empty["state"], "unable_to_verify")
         self.assertIsNone(empty["wallet_id"])
         self.assertIsNone(empty["address"])
-        partial = phantom_auth._classify(json.dumps({"walletId": "d76451f8-288c-4ab8-b6de-1cfd84403873"}), 0)
+        partial = phantom_auth._classify(json.dumps({"walletId": "eba28e4f-6b99-4543-af72-c7d1b008ce4e"}), 0)
+        old_quote_wallet = phantom_auth._classify(json.dumps({
+            "walletId": "d76451f8-288c-4ab8-b6de-1cfd84403873",
+            "addresses": [{"addressType": "solana", "address": "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"}],
+        }), 0)
+        self.assertEqual(old_quote_wallet["state"], "mismatch")
+        self.assertNotEqual(phantom_transport.REQUIRED_WALLET, old_quote_wallet["address"])
         self.assertEqual(partial["state"], "unable_to_verify")
         self.assertIsNone(partial["wallet_id"])
         wrapped = phantom_auth._classify(json.dumps({
