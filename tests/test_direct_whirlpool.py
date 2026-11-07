@@ -1,7 +1,8 @@
 """Wrapped direct Whirlpool route. No network, no Phantom process, and no send."""
-import unittest
-
 import base64
+import json
+import unittest
+from pathlib import Path
 
 import execution_transport
 import phantom_transport
@@ -120,38 +121,52 @@ class DirectWhirlpoolTests(unittest.TestCase):
         self.assertFalse(state["enabled"])
         self.assertFalse(state["mounted"])
         self.assertEqual(state["production_path"], "phantom_cli_unchanged")
-        self.assertEqual(state["live_quote"], "program_tick_array_accounts_absent")
+        self.assertEqual(state["live_quote"], "computed")
         self.assertEqual(state["specified_slippage_bps"], 100)
         self.assertEqual(state["fee_policy"], "not_approved")
         self.assertFalse(state["aggregate_loss_policy"])
         self.assertEqual(execution_transport.status()["send"], "disabled")
         self.assertEqual(len(execution_transport.SWAP_BLOCKERS), 2)
 
-    def test_live_snapshot_has_no_tick_arrays_and_does_not_quote(self):
+    def test_string_seed_arrays_match_the_sdk_quote(self):
         snap = solana_direct_swap.snapshot_status()
-        self.assertEqual(snap["quote"], "not_computed")
-        self.assertEqual(snap["reason"], "program_tick_array_accounts_absent")
+        self.assertEqual(snap["quote"], "computed")
+        self.assertIsNone(snap["reason"])
         self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["liquidity"], 576950119138)
-        self.assertTrue(solana_direct_swap.SOL_USDC_SNAPSHOT["program_pda_matches_batch"])
-        self.assertFalse(solana_direct_swap.SOL_USDC_SNAPSHOT["string_helper_pda_matches_batch"])
-        self.assertTrue(solana_direct_swap.SOL_USDC_SNAPSHOT["fixed_and_dynamic_same_program_pda"])
+        self.assertTrue(snap["tick_arrays_present"])
+        self.assertEqual(snap["context_slot"], 466545251)
         pool = solana_direct_swap.SOL_USDC_POOL
         program = solana_tx.b58decode(solana_whirlpool.PROGRAM_ID)
         raw_pool = solana_tx.b58decode(pool)
-        for start, requested in (
-            (-24640, "2Em5ctCiXrMyFDrcNYuK8sJyxu3773sxLnb8pr7uawEY"),
-            (-25344, "BnXc8W397zg66J7uq8tYydnyRF3nb9SsyXRNdT4QUvmR"),
-            (-26048, "EeD3cajrp1TTbUJpjwrw1gbxJksigZD6q3rch93eEYjy"),
-        ):
-            self.assertEqual(solana_whirlpool.tick_array_address(pool, start), requested)
-            string_seed, _bump = solana_tx.find_program_address(
-                [b"tick_array", raw_pool, str(start).encode()], program,
+        with open(Path(__file__).resolve().parent / "fixtures" / "sol_usdc_ts8_ticks.json", encoding="utf-8") as handle:
+            body = json.load(handle)
+        arrays = []
+        for arr, address in zip(body["arrays"], solana_direct_swap.SOL_USDC_SNAPSHOT["tick_array_addresses"]):
+            self.assertEqual(solana_whirlpool.tick_array_address(pool, arr["start"]), address)
+            binary, _bump = solana_tx.find_program_address(
+                [b"tick_array", raw_pool, int(arr["start"]).to_bytes(4, "little", signed=True)], program,
             )
-            self.assertNotEqual(solana_tx.b58encode(string_seed), requested)
-        self.assertTrue(snap["tick_arrays_match_current_tick"])
-        self.assertFalse(snap["tick_arrays_present"])
-        self.assertFalse(snap["adaptive_fee"])
-        self.assertEqual(snap["context_slot"], 466542559)
+            self.assertNotEqual(solana_tx.b58encode(binary), address)
+            raw = bytearray(solana_whirlpool.reference_tick_array(pool, arr["start"]))
+            for tick, net in arr["initialized"]:
+                offset = 12 + ((tick - arr["start"]) // body["tickSpacing"]) * 113
+                raw[offset] = 1
+                raw[offset + 1:offset + 17] = int(net).to_bytes(16, "little", signed=True)
+            parsed = solana_whirlpool.tick_array_state(bytes(raw))
+            self.assertEqual(parsed["start_tick_index"], arr["start"])
+            self.assertEqual(parsed["pool"], pool)
+            arrays.append(parsed)
+        quoted = solana_whirlpool_quote.quote_exact_in({
+            "sqrt_price": int(body["sqrtPrice"]),
+            "tick_current_index": body["tickCurrentIndex"],
+            "fee_rate": body["feeRate"],
+            "liquidity": int(body["liquidity"]),
+            "tick_spacing": body["tickSpacing"],
+        }, arrays, 10_000_000, True, 100, 0, body["slot"])
+        self.assertEqual(quoted["token_est_out"], 898405)
+        self.assertEqual(quoted["token_min_out"], 889420)
+        self.assertEqual(quoted["trade_fee"], 5000)
+        self.assertEqual(solana_direct_swap.SOL_USDC_SNAPSHOT["token_min_out"], 889420)
         self.assertTrue(snap["context_fresh"])
         self.assertFalse(solana_direct_swap.context_binds(466540548, 466542559))
         self.assertFalse(solana_direct_swap.context_binds(466540547, 466542559))

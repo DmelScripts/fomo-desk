@@ -61,8 +61,7 @@ const { PublicKey } = require('@solana/web3.js');
 const pool = new PublicKey('%s');
 const program = new PublicKey('%s');
 const [oracle] = PublicKey.findProgramAddressSync([Buffer.from('oracle'), pool.toBuffer()], program);
-const start = Buffer.alloc(4); start.writeInt32LE(-704);
-const [tick] = PublicKey.findProgramAddressSync([Buffer.from('tick_array'), pool.toBuffer(), start], program);
+const [tick] = PublicKey.findProgramAddressSync([Buffer.from('tick_array'), pool.toBuffer(), Buffer.from('-704')], program);
 console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
 """ % (pool, solana_whirlpool.PROGRAM_ID)], text=True)
         found = json.loads(node)

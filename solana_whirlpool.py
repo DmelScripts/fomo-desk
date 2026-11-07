@@ -4,7 +4,7 @@ Pool fields are programs/whirlpool/src/state/whirlpool.rs. Swap account order,
 the oracle seed, and the user token-authority are
 programs/whirlpool/src/instructions/swap.rs. Tick arrays are
 programs/whirlpool/src/state/fixed_tick_array.rs and tick.rs: 88 ticks, PDA
-["tick_array", whirlpool, start_tick_index], and the current array must
+["tick_array", whirlpool, start_tick_index.to_string().as_bytes()], and the current array must
 contain tick_current_index. route_v2's published signer is the user, not a
 Jupiter PDA. The pinned Jupiter IDL does not name a whirlpool signer seed.
 """
@@ -135,13 +135,13 @@ def oracle_address(pool: str) -> str:
 
 
 def tick_array_address(pool: str, start: int) -> str:
-    """Program PDA. Fixed and dynamic init both seed this with a little-endian i32.
+    """PDA from the Rust initializer: start_tick_index.to_string().as_bytes().
 
-    @orca-so/whirlpools-client@7.0.0 getTickArrayAddress instead uses the
-    decimal string of the start index. That helper is a different address.
+    initialize_tick_array.rs:16 and initialize_dynamic_tick_array.rs:20 at
+    2509ad9d use that string. The generated client i32 seed does not.
     """
     derived, _bump = solana_tx.find_program_address(
-        [b"tick_array", solana_tx.b58decode(pool), int(start).to_bytes(4, "little", signed=True)],
+        [b"tick_array", solana_tx.b58decode(pool), str(int(start)).encode("ascii")],
         solana_tx.b58decode(PROGRAM_ID),
     )
     return solana_tx.b58encode(derived)

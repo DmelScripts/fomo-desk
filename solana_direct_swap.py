@@ -42,9 +42,10 @@ SOL_USDC_SNAPSHOT = {
     "method": "getMultipleAccounts",
     "commitment": "confirmed",
     "min_context_slot": MIN_CONTEXT_SLOT,
-    "context_slot": 466542559,
-    "tick_current_index": -24095,
-    "sqrt_price": 5530304198687055712,
+    "context_slot": 466545251,
+    "min_context_slot_used": 466542559,
+    "tick_current_index": -24094,
+    "sqrt_price": 5530517110832706924,
     "liquidity": 576950119138,
     "fee_rate": 500,
     "protocol_fee_rate": 1300,
@@ -60,17 +61,28 @@ SOL_USDC_SNAPSHOT = {
     "wsol_decimals": 9,
     "usdc_decimals": 6,
     "tick_array_starts": (-24640, -25344, -26048),
-    "tick_arrays_present": False,
+    "tick_array_addresses": (
+        "7nDppuGeG1KBH6hY6Tctg4G2aVoaQYka4A7cFiY3RcNF",
+        "4nyKDVYimL5pFkjZg5TtuxYjecVqaCEBHnqHVJk7bRWs",
+        "62AC6bi6g4DSUdKcXQYEM4EzWm53zgZg66CWHJrbxeqy",
+    ),
+    "tick_arrays_present": True,
     "tick_arrays_match_current_tick": True,
-    "program_pda_matches_batch": True,
-    "string_helper_pda_matches_batch": False,
-    "fixed_and_dynamic_same_program_pda": True,
-    "quote": "not_computed",
-    "quote_reason": "program_tick_array_accounts_absent",
+    "tick_array_layout": "fixed",
+    "tick_array_discriminator": "4561bdbe6e0742bb",
+    "i32_seed_accounts_present": False,
+    "quote": "computed",
+    "token_est_out": 898405,
+    "token_min_out": 889420,
+    "trade_fee": 5000,
+    "quote_reason": None,
     "specified_slippage_bps": 100,
     "rent_exemption_165": RENT_EXEMPTION_165,
     "sdk_package": "@orca-so/whirlpools-core@3.1.1",
-    "sdk_live_result": "tick_sequence_empty",
+    "sdk_token_est_out": 898405,
+    "sdk_token_min_out": 889420,
+    "sdk_trade_fee": 5000,
+    "wallet_observed_slot": 466542559,
 }
 SOL_USDC_OBSERVATION = {
     "context_slot": 466540548,
@@ -116,7 +128,7 @@ def status() -> dict:
         "output_computed_from_pool": False,
         "adaptive_fee_extra_account": "classic_no_tail" if SOL_USDC_OBSERVATION["adaptive_fee"] is False else "oracle_only",
         "wrapped_sol_setup": "create_transfer_sync_close",
-        "live_quote": "program_tick_array_accounts_absent",
+        "live_quote": "computed",
         "specified_slippage_bps": 100,
         "chat_conditional_live_approval": "not_a_control",
         "recorded_live_applied": False,
@@ -160,7 +172,7 @@ def close_allowed(account_exists: bool) -> bool:
 
 
 def snapshot_status() -> dict:
-    """The one batch. Missing tick arrays stop the quote; there is no second fetch."""
+    """String-seed tick arrays were present. The route is still not mounted."""
     snap = SOL_USDC_SNAPSHOT
     fresh = context_binds(snap["context_slot"], snap["context_slot"]) and snap["context_slot"] >= snap["min_context_slot"]
     return {
