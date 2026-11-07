@@ -96,6 +96,7 @@ def _dispatch(event_id: str, line: str, url: str) -> dict:
         "failed": result["failed"],
         "removed": result["removed"],
         "skipped": result["skipped"],
+        "errors": result.get("errors") or [],
     }
     if result.get("reason"):
         payload["reason"] = result["reason"]

@@ -101,11 +101,116 @@ class TestWebPush(unittest.TestCase):
         for call in self.calls:
             self.assertEqual(call["vapid_private_key"], PRIVATE)
             self.assertFalse(call["verbose"])
+            self.assertGreater(call["ttl"], 0)
+            self.assertEqual(call["vapid_claims"]["sub"], "mailto:desk@localhost")
             payload = json.loads(call["data"])
             self.assertEqual(payload["title"], "Grok Bot · now")
             self.assertEqual(payload["body"], "Sold FIX · +$5")
             self.assertEqual(payload["url"], url)
             self.assertIn("r=savipww", payload["url"])
+
+    def test_provider_failure_keeps_status_and_drops_the_body(self):
+        class Response:
+            def __init__(self, status, text):
+                self.status_code = status
+                self.text = text
+                self.reason = "Bad Request"
+                self.headers = {}
+
+        def fail(**kwargs):
+            self.calls.append(kwargs)
+            raise pywebpush.WebPushException(
+                "Push failed: 400 Bad Request\nResponse body:" + Response(400, "").text,
+                response=Response(400, '{"reason":"BadTtl","leak":"endpoint-secret"}'),
+            )
+
+        pywebpush.webpush = fail
+        self._sub(OK)
+        with self.assertLogs("webpush", level="WARNING") as caught:
+            result = webpush.deliver("Test push", "https://example.test/page")
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errors"], [{"status": 400, "reason": "BadTtl"}])
+        blob = json.dumps(result)
+        self.assertNotIn("endpoint-secret", blob)
+        self.assertNotIn(OK, blob)
+        self.assertNotIn(PRIVATE, blob)
+        logged = "\n".join(caught.output)
+        self.assertIn("status=400", logged)
+        self.assertIn("reason=BadTtl", logged)
+        self.assertNotIn("endpoint-secret", logged)
+        self.assertNotIn(OK, logged)
+        library = pywebpush.WebPushException(
+            "hidden",
+            response=Response(403, '{"reason":"VapidPkHashMismatch","endpoint":"https://push.example/secret"}'),
+        )
+        self.assertEqual(library.status_code, 403)
+        self.assertIn("https://push.example/secret", str(library))
+        prepared = pywebpush.WebPusher({"endpoint": "https://push.example/phone"})._prepare_send_data(
+            data=None, ttl=0,
+        )
+        self.assertEqual(prepared["headers"]["ttl"], "0")
+        positive = pywebpush.WebPusher({"endpoint": "https://push.example/phone"})._prepare_send_data(
+            data=None, ttl=webpush._TTL_S,
+        )
+        self.assertEqual(positive["headers"]["ttl"], str(webpush._TTL_S))
+        import py_vapid
+        self.assertTrue(py_vapid._check_sub("mailto:desk@localhost"))
+
+    def test_key_match_is_boolean_and_does_not_echo_material(self):
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        from py_vapid import Vapid
+        from py_vapid.utils import b64urlencode
+
+        vapid = Vapid()
+        vapid.generate_keys()
+        private = b64urlencode(vapid.private_key.private_numbers().private_value.to_bytes(32, "big"))
+        public = b64urlencode(vapid.public_key.public_bytes(
+            Encoding.X962, PublicFormat.UncompressedPoint,
+        ))
+        os.environ["VAPID_PRIVATE_KEY"] = private
+        original = webpush._public
+        webpush._public = lambda: public
+        self.addCleanup(lambda: setattr(webpush, "_public", original))
+        state = webpush.status()
+        self.assertTrue(state["keys_match"])
+        self.assertTrue(state["contact_is_mailto"])
+        self.assertFalse(state["contact_host_public"])
+        blob = json.dumps(state)
+        self.assertNotIn(private, blob)
+        self.assertNotIn(public, blob)
+        self.assertNotIn("desk@localhost", blob)
+        webpush._public = lambda: b64urlencode(b"\x04" + (b"\x01" * 64))
+        self.assertFalse(webpush.status()["keys_match"])
+
+    def test_test_push_reports_a_provider_failure(self):
+        import server
+
+        class Response:
+            status_code = 400
+            text = '{"reason":"BadTtl","leak":"do-not-show"}'
+            reason = "Bad Request"
+            headers = {}
+
+        def fail(**_kwargs):
+            raise pywebpush.WebPushException("Push failed", response=Response())
+
+        pywebpush.webpush = fail
+        self._sub(OK)
+        client = TestClient(server.app)
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        sent = client.post("/api/push/test", headers=AUTH)
+        self.assertEqual(sent.status_code, 200)
+        body = sent.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["sent"], 0)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(body["errors"], [{"status": 400, "reason": "BadTtl"}])
+        self.assertNotIn("do-not-show", sent.text)
+        self.assertNotIn(OK, sent.text)
+        self.assertNotIn(PRIVATE, sent.text)
 
     def test_unconfigured_does_not_call_pywebpush(self):
         os.environ.pop("VAPID_PRIVATE_KEY")

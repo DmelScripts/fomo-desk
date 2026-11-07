@@ -898,9 +898,21 @@
   function sendTestPush() {
     call("/api/push/test", { method: "POST", body: {} }).then(function (body) {
       var sent = body && body.sent ? body.sent : 0;
-      var note = sent ? "Test push sent to " + sent + (sent === 1 ? " phone." : " phones.") : "No phone is subscribed, so nothing was sent.";
-      if (body && body.removed) note += " " + body.removed + " expired subscription" + (body.removed === 1 ? " was" : "s were") + " removed.";
-      if (body && body.failed) note += " " + body.failed + " did not accept it.";
+      var failed = body && body.failed ? body.failed : 0;
+      var removed = body && body.removed ? body.removed : 0;
+      var note;
+      if (failed) {
+        note = "Test push failed for " + failed + (failed === 1 ? " phone." : " phones.");
+        if (sent) note += " " + sent + (sent === 1 ? " accepted it." : " accepted it.");
+        var err = body.errors && body.errors[0];
+        if (err && typeof err.status === "number") note += " Provider status " + err.status + ".";
+        if (err && err.reason && /^[A-Za-z]{1,40}$/.test(err.reason)) note += " Reason " + err.reason + ".";
+      } else if (sent) {
+        note = "Test push sent to " + sent + (sent === 1 ? " phone." : " phones.");
+      } else {
+        note = "No phone is subscribed, so nothing was sent.";
+      }
+      if (removed) note += " " + removed + " expired subscription" + (removed === 1 ? " was" : "s were") + " removed.";
       $("account-note").textContent = note;
     }).catch(noteError);
   }

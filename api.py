@@ -1025,10 +1025,12 @@ def push_test(request: Request) -> dict:
         raise HTTPException(status_code=409, detail="web push is not configured")
     result = webpush.deliver("Test push", links.SIGNUP_URL)
     return {
-        "ok": True,
+        "ok": bool(result.get("ok")) and result["failed"] == 0 and result["sent"] > 0,
         "sent": result["sent"],
         "removed": result["removed"],
         "failed": result["failed"],
+        "errors": result.get("errors") or [],
+        "reason": result.get("reason"),
     }
 
 
