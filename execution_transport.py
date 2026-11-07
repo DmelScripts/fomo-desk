@@ -245,6 +245,7 @@ def activation_status() -> dict:
     Ready is false while any criterion fails. This function changes nothing.
     """
     consent = _consent()
+    recorded = _read(_CONSENT)
     policy = exit_policy.view()
     checks = {
         "mode_still_paper": db.get_setting("mode", "PAPER") == "PAPER",
@@ -270,6 +271,9 @@ def activation_status() -> dict:
         "fee_policy": "not_approved",
         "aggregate_loss_policy": False,
         "live_ready": False,
+        "chat_conditional_live_approval": "not_a_control",
+        "recorded_live_applied": isinstance(recorded, dict) and recorded.get("applied") is True,
+        "live_applicable": False,
     }
 
 

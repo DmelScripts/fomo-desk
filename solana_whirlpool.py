@@ -196,6 +196,10 @@ def _token_identity(accounts: dict[str, tuple[str, bytes]], address: str, mint: 
     record = accounts.get(address)
     if record is None or record[1] is None:
         raise WhirlpoolError("whirlpool token account was not read", "account_unread")
+    if record[0] == solana_tx.TOKEN_2022:
+        raise WhirlpoolError("token-2022 transfer extensions are not supported", "token_2022_unsupported")
+    if record[0] != solana_tx.TOKEN_PROGRAM:
+        raise WhirlpoolError("whirlpool token account is not owned by the SPL token program", category)
     fields = solana_tx.token_account_fields(record[1])
     if fields is None or fields[0] != mint or (owner is not None and fields[1] != owner):
         raise WhirlpoolError("whirlpool token account mint or owner does not match", category)

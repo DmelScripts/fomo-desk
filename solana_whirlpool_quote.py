@@ -50,6 +50,22 @@ def quote_exact_in(pool: dict, tick_arrays: list[dict], amount: int, a_to_b: boo
         raise QuoteError("quote_context_missing")
     if isinstance(sqrt_price_limit, bool) or not isinstance(sqrt_price_limit, int) or sqrt_price_limit < 0:
         raise QuoteError("sqrt_price_limit")
+    fee_rate = pool.get("fee_rate")
+    if isinstance(fee_rate, bool) or not isinstance(fee_rate, int) or not 0 <= fee_rate <= FEE_RATE_DENOMINATOR:
+        raise QuoteError("fee_unbound")
+    if pool.get("liquidity") == 0:
+        return {
+            "token_in": amount,
+            "token_est_out": 0,
+            "token_min_out": 0,
+            "trade_fee": amount,
+            "sqrt_price_before": pool.get("sqrt_price"),
+            "sqrt_price_after": pool.get("sqrt_price"),
+            "context_slot": context_slot,
+            "slippage_bps": slippage_bps,
+            "output_computed_from_pool": True,
+            "zero_liquidity": True,
+        }
     result = _compute_swap(amount, sqrt_price_limit, pool, tick_arrays, a_to_b, True)
     token_est_out = result["token_b"] if a_to_b else result["token_a"]
     return {

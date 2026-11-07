@@ -58,6 +58,19 @@ class ExecutionTransportTest(unittest.TestCase):
         self.assertIn("swap_path_verified", status["unmet"])
         self.assertIn("signer_enabled", status["unmet"])
         self.assertFalse(status["live_ready"])
+        self.assertEqual(status["chat_conditional_live_approval"], "not_a_control")
+        self.assertFalse(status["recorded_live_applied"])
+        self.assertFalse(status["live_applicable"])
+        db.execute(
+            "INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)",
+            (execution_transport._CONSENT, json.dumps({"applied": True, "statement": "chat"}), time.time()),
+        )
+        forced = execution_transport.activation_status()
+        self.assertTrue(forced["recorded_live_applied"])
+        self.assertFalse(forced["live_applicable"])
+        self.assertFalse(forced["ready"])
+        self.assertIn("fee_policy_approved", forced["unmet"])
+        self.assertEqual(forced["chat_conditional_live_approval"], "not_a_control")
         self.assertEqual(len(status["swap_blockers"]), 2)
         self.assertEqual(db.get_setting("mode"), "PAPER")
         self.assertEqual(db.get_setting("agents_enabled"), "0")

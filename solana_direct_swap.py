@@ -36,6 +36,38 @@ import solana_whirlpool_quote
 # program. One confirmed getAccountInfo was read after that match.
 SOL_USDC_POOL = "7qbRF6YsyGuLUVs6Y1q64bdVrfe4ZcUUz1JRdoVNUJnm"
 SOL_USDC_CONFIG = "2LecshUwdy9xi7meFgHtFJQNSKk4KdTrcpvaB56dP2NQ"
+MIN_CONTEXT_SLOT = 466540548
+RENT_EXEMPTION_165 = 1488440
+SOL_USDC_SNAPSHOT = {
+    "method": "getMultipleAccounts",
+    "commitment": "confirmed",
+    "min_context_slot": MIN_CONTEXT_SLOT,
+    "context_slot": 466542559,
+    "tick_current_index": -24095,
+    "sqrt_price": 5530304198687055712,
+    "liquidity": 576950119138,
+    "fee_rate": 500,
+    "protocol_fee_rate": 1300,
+    "tick_spacing": 8,
+    "fee_tier_seed": 8,
+    "adaptive_fee": False,
+    "discriminator_ok": True,
+    "vault_a_amount": 1098598783628,
+    "vault_b_amount": 103302777808,
+    "wallet_wsol_ata_exists": False,
+    "wallet_usdc_ata_amount": 188718141,
+    "wallet_usdc_ata_lamports": 1488440,
+    "wsol_decimals": 9,
+    "usdc_decimals": 6,
+    "tick_array_starts": (-24640, -25344, -26048),
+    "tick_arrays_present": False,
+    "tick_arrays_match_current_tick": True,
+    "quote": "not_computed",
+    "quote_reason": "tick_arrays_absent",
+    "rent_exemption_165": RENT_EXEMPTION_165,
+    "sdk_package": "@orca-so/whirlpools-core@3.1.1",
+    "sdk_live_result": "tick_sequence_empty",
+}
 SOL_USDC_OBSERVATION = {
     "context_slot": 466540548,
     "tick_spacing": 8,
@@ -80,7 +112,9 @@ def status() -> dict:
         "output_computed_from_pool": False,
         "adaptive_fee_extra_account": "classic_no_tail" if SOL_USDC_OBSERVATION["adaptive_fee"] is False else "oracle_only",
         "wrapped_sol_setup": "create_transfer_sync_close",
-        "live_quote": "blocked_tick_arrays_not_read",
+        "live_quote": "blocked_tick_arrays_absent",
+        "chat_conditional_live_approval": "not_a_control",
+        "recorded_live_applied": False,
         "sol_usdc_pool": SOL_USDC_POOL,
         "observed_context_slot": SOL_USDC_OBSERVATION["context_slot"],
     }
@@ -99,6 +133,63 @@ def derived_sol_usdc_pool(tick_spacing: int = 8) -> tuple[str, int]:
         solana_tx.b58decode(solana_whirlpool.PROGRAM_ID),
     )
     return solana_tx.b58encode(derived), bump
+
+
+def context_binds(slot: int, snapshot_slot: int | None = None) -> bool:
+    """A quote slot has to clear the floor and, when a snapshot exists, equal it."""
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < MIN_CONTEXT_SLOT:
+        return False
+    if snapshot_slot is not None and slot != snapshot_slot:
+        return False
+    return True
+
+
+def explicit_rent_allowed(lamports: int) -> bool:
+    """An explicit rent figure cannot exceed the rent-exempt read. It is not spent."""
+    return isinstance(lamports, int) and not isinstance(lamports, bool) and 0 <= lamports <= RENT_EXEMPTION_165
+
+
+def close_allowed(account_exists: bool) -> bool:
+    """CloseAccount refunds the whole lamport balance. An existing ATA is not closed."""
+    return account_exists is False
+
+
+def snapshot_status() -> dict:
+    """The one batch. Missing tick arrays stop the quote; there is no second fetch."""
+    snap = SOL_USDC_SNAPSHOT
+    fresh = context_binds(snap["context_slot"], snap["context_slot"]) and snap["context_slot"] >= snap["min_context_slot"]
+    return {
+        "quote": snap["quote"],
+        "reason": snap["quote_reason"],
+        "context_slot": snap["context_slot"],
+        "context_fresh": fresh,
+        "adaptive_fee": snap["adaptive_fee"],
+        "tick_arrays_present": snap["tick_arrays_present"],
+        "tick_arrays_match_current_tick": snap["tick_arrays_match_current_tick"],
+        "wsol_ata_exists": snap["wallet_wsol_ata_exists"],
+        "close_wsol": close_allowed(snap["wallet_wsol_ata_exists"]),
+        "close_usdc": False,
+        "usdc_ata_amount": snap["wallet_usdc_ata_amount"],
+        "rent_exemption_165": snap["rent_exemption_165"],
+        "enabled": False,
+        "mounted": False,
+        "live_ready": False,
+        "five_agents": False,
+    }
+
+
+def paper_lifecycle() -> dict:
+    """No position is opened or closed. The missing quote is not an entry."""
+    snap = snapshot_status()
+    return {
+        "entry_opened": False,
+        "exit_armed": False,
+        "position_written": False,
+        "reason": snap["reason"],
+        "chat_conditional_live_approval": "not_a_control",
+        "recorded_live_applied": False,
+        "five_agents": False,
+    }
 
 
 def exact_in_min_out(amount_out: int, slippage_bps: int) -> int:
@@ -241,7 +332,7 @@ def transaction_from_fields(pool: str, pool_data: bytes, source: str, dest: str,
     return solana_tx.encode_legacy(authority, keys, len(readonly), instructions, blockhash, required=len(signers))
 
 
-def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, context_slot: int) -> dict:
+def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: int, context_slot: int, *, wsol_existed: bool = False) -> dict:
     """Read the wrapped swap. The minimum output is recomputed from the accounts."""
     body = {
         "enabled": False,
@@ -273,6 +364,9 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         return body
     body["blockhash"] = decoded.blockhash
     body["context_slot"] = context_slot
+    if wsol_existed or not close_allowed(wsol_existed):
+        body["error_category"] = "preexisting_wsol"
+        return body
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
         body["error_category"] = "transaction_shape"
         return body
@@ -329,6 +423,9 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         return body
     except solana_whirlpool_quote.QuoteError as error:
         body["error_category"] = error.category
+        return body
+    if quote.get("zero_liquidity") or quote["token_est_out"] <= 0 or quote["token_min_out"] <= 0:
+        body["error_category"] = "zero_output"
         return body
     if quote["token_in"] != INPUT_LAMPORTS or quote["token_min_out"] != parsed["other_amount_threshold"]:
         body["error_category"] = "slippage_unbound"
