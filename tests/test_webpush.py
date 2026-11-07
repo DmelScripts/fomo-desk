@@ -114,7 +114,7 @@ class TestWebPush(unittest.TestCase):
             self.assertNotIn(self.signing_key, str(call["vapid_claims"]))
             self.assertFalse(call["verbose"])
             self.assertGreater(call["ttl"], 0)
-            self.assertEqual(call["vapid_claims"]["sub"], "mailto:desk@localhost")
+            self.assertEqual(call["vapid_claims"]["sub"], "https://fomo-desk-nb3d.onrender.com")
             payload = json.loads(call["data"])
             self.assertEqual(payload["title"], "Grok Bot · now")
             self.assertEqual(payload["body"], "Sold FIX · +$5")
@@ -168,7 +168,7 @@ class TestWebPush(unittest.TestCase):
         )
         self.assertEqual(positive["headers"]["ttl"], str(webpush._TTL_S))
         import py_vapid
-        self.assertTrue(py_vapid._check_sub("mailto:desk@localhost"))
+        self.assertTrue(py_vapid._check_sub("https://fomo-desk-nb3d.onrender.com"))
 
     def test_key_match_is_boolean_and_does_not_echo_material(self):
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -187,9 +187,9 @@ class TestWebPush(unittest.TestCase):
         self.addCleanup(lambda: setattr(webpush, "_public", original))
         state = webpush.status()
         self.assertTrue(state["keys_match"])
-        self.assertTrue(state["contact_is_mailto"])
-        self.assertFalse(state["contact_is_https"])
-        self.assertFalse(state["contact_host_public"])
+        self.assertFalse(state["contact_is_mailto"])
+        self.assertTrue(state["contact_is_https"])
+        self.assertTrue(state["contact_host_public"])
         blob = json.dumps(state)
         self.assertNotIn(private, blob)
         self.assertNotIn(public, blob)
@@ -205,8 +205,13 @@ class TestWebPush(unittest.TestCase):
         from py_vapid.utils import b64urlencode
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-        self.assertEqual(webpush._CONTACT, "mailto:desk@localhost")
-        proposed = "https://fomo-desk-nb3d.onrender.com"
+        self.assertEqual(webpush._CONTACT, "https://fomo-desk-nb3d.onrender.com")
+        self.assertFalse(webpush._CONTACT.endswith("/"))
+        self.assertNotIn("desk@localhost", webpush._CONTACT)
+        source = (Path(__file__).resolve().parents[1] / "webpush.py").read_text(encoding="utf-8")
+        self.assertNotIn("desk@localhost", source)
+        self.assertEqual(source.count("https://fomo-desk-nb3d.onrender.com"), 1)
+        proposed = webpush._CONTACT
         self.assertTrue(_check_sub(proposed))
         self.assertFalse(_check_sub(proposed + "/"))
         vapid = Vapid()
@@ -262,7 +267,7 @@ class TestWebPush(unittest.TestCase):
         pem = vapid.private_pem().decode()
         self.assertRaises(Exception, Vapid.from_string, pem)
         loaded = webpush._load_private(pem)
-        signed = loaded.sign({"sub": "mailto:desk@localhost", "aud": "https://web.push.apple.com"})
+        signed = loaded.sign({"sub": webpush._CONTACT, "aud": "https://web.push.apple.com"})
         self.assertTrue(signed["Authorization"].startswith("vapid "))
         self.assertNotIn(raw, signed["Authorization"])
         self.assertNotIn("BEGIN", signed["Authorization"])
@@ -273,7 +278,7 @@ class TestWebPush(unittest.TestCase):
             },
             data="hello",
             vapid_private_key=loaded,
-            vapid_claims={"sub": "mailto:desk@localhost"},
+            vapid_claims={"sub": webpush._CONTACT},
             ttl=webpush._TTL_S,
             curl=True,
         )

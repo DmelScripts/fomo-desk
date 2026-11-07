@@ -17,7 +17,7 @@ log = logging.getLogger("webpush")
 _PUBLIC_PATH = DESK_ROOT / "web" / "vapid_public.txt"
 _LEASE_S = 120
 _TTL_S = 12 * 60 * 60
-_CONTACT = "mailto:desk@localhost"
+_CONTACT = "https://fomo-desk-nb3d.onrender.com"
 _REASONS = frozenset({
     "BadTtl",
     "BadUrgency",
