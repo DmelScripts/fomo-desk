@@ -284,9 +284,26 @@ def _preflight(text: str, code: int) -> dict:
         "blockhash_slot": inspected.get("blockhash_slot"),
         "simulation_slot": inspected.get("simulation_slot"),
         "debited_lamports": inspected.get("debited_lamports"),
+        "observed_mint": inspected.get("observed_mint"),
+        "observed_owner": inspected.get("observed_owner"),
+        "expected_mints": inspected.get("expected_mints"),
+        "quoted_out_amount": inspected.get("quoted_out_amount"),
+        "slippage_bps": inspected.get("slippage_bps"),
+        "slippage_verified": inspected.get("slippage_verified", False),
         "quote_id": _find_quote_id(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else None),
         "buy_amount": _buy_base(cleaned.get("quoteResponse") if isinstance(cleaned, dict) else {}),
     })
+    base["intent_verified"] = bool(
+        inspected.get("chain_ok")
+        and base.get("buy_amount")
+        and inspected.get("quoted_out_amount") == base["buy_amount"]
+        and inspected.get("slippage_verified") is True
+    )
+    base["spend_verified"] = False
+    base["execution_allowed"] = False
+    base["send"] = False
+    base["executable"] = False
+    base["live_ready"] = False
     return base
 
 

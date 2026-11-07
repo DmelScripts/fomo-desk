@@ -30,6 +30,7 @@ class Instruction:
     account_indexes: list[int]
     data: bytes
     program_id: str = ""
+    parsed: dict | None = None
 
 
 @dataclass

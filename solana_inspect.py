@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 
 import phantom_transport
+import solana_jupiter
 import solana_tx
 
 _METHODS = {
@@ -79,7 +80,7 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         program_ids = _programs(decoded, keys, rpc, commitment)
         debited = _debits(decoded, keys)
     except GateError as exc:
-        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag)
+        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag, exc.observed_mint, exc.observed_owner)
     except (ValueError, RpcError) as exc:
         return _rejected(str(exc), "not_usable")
     if decoded.signers != [phantom_transport.REQUIRED_WALLET]:
@@ -88,6 +89,19 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         return _rejected("fee payer is not the allowlisted wallet", "wallet_unbound", program_ids)
     if debited is None or debited > max_lamports:
         return _rejected("debit is not bound", "amount_unbound", program_ids)
+    jupiter = [item.parsed for item in decoded.instructions if item.parsed]
+    if len(jupiter) > 1:
+        return _rejected("more than one jupiter route", "unsupported_route", program_ids)
+    quoted_out = None
+    slippage_bps = None
+    slippage_verified = False
+    if jupiter:
+        route = jupiter[0]
+        if route["in_amount"] != debited:
+            return _rejected("jupiter input does not match the SOL debit", "amount_unbound", program_ids)
+        quoted_out = route["quoted_out_amount"]
+        slippage_bps = route["slippage_bps"]
+        slippage_verified = True
     try:
         validity = rpc.call("isBlockhashValid", [decoded.blockhash, {"commitment": commitment}])
         slot = _slot(validity)
@@ -106,7 +120,7 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         if sim_slot < slot:
             return _rejected("slot is inconsistent", "slot_inconsistent", program_ids)
     except GateError as exc:
-        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag)
+        return _rejected(exc.reason, exc.category, exc.program_ids, exc.index, exc.tag, exc.observed_mint, exc.observed_owner)
     except (ValueError, RpcError) as exc:
         return _rejected(str(exc), "not_usable", program_ids)
     return {
@@ -120,7 +134,9 @@ def inspect(tx_b64: str, rpc: RpcClient, commitment: str = "confirmed", max_lamp
         "simulation_slot": sim_slot,
         "debited_lamports": debited,
         "program_ids": sorted({item.program_id for item in decoded.instructions}),
-        "slippage_verified": False,
+        "quoted_out_amount": quoted_out,
+        "slippage_bps": slippage_bps,
+        "slippage_verified": slippage_verified,
         "spend_verified": False,
         "intent_verified": False,
         "provider_expiry": None,
@@ -148,7 +164,6 @@ def preflight_transaction(tx_b64: str, rpc: RpcClient) -> dict:
     result["mainnet"] = True
     result["freshness_guarantee"] = False
     result["provider_expiry"] = None
-    result["slippage_verified"] = False
     result["spend_verified"] = False
     result["intent_verified"] = False
     result["execution_allowed"] = False
@@ -223,6 +238,9 @@ def _programs(decoded: solana_tx.Decoded, keys: list[str], rpc: RpcClient, commi
 def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> None:
     program = instruction.program_id
     tag = instruction.data[0] if instruction.data else None
+    if program == solana_jupiter.PROGRAM_ID:
+        solana_jupiter.check_instruction(index, instruction, keys, program_ids)
+        return
     if program not in solana_tx.ALLOWED_PROGRAMS:
         raise GateError("program is not verified", "unverified_program", program_ids, index, tag)
     if program == solana_tx.COMPUTE_BUDGET:
@@ -366,7 +384,7 @@ def _check_associated(index: int, instruction: solana_tx.Instruction, keys: list
     if mint not in solana_tx.BOUND_MINTS:
         raise GateError(
             f"associated token instruction {index} tag {tag} mint is not bound",
-            "token_mint_unbound", program_ids, index, tag,
+            "token_mint_unbound", program_ids, index, tag, mint, owner,
         )
 
 
@@ -486,16 +504,18 @@ def _slot(result: dict) -> int:
 
 
 class GateError(Exception):
-    def __init__(self, reason: str, category: str, program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None):
+    def __init__(self, reason: str, category: str, program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None, observed_mint: str | None = None, observed_owner: str | None = None):
         self.reason = reason
         self.category = category
         self.program_ids = program_ids or []
         self.index = index
         self.tag = tag
+        self.observed_mint = observed_mint
+        self.observed_owner = observed_owner
 
 
-def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None) -> dict:
-    return {
+def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] | None = None, index: int | None = None, tag: int | None = None, observed_mint: str | None = None, observed_owner: str | None = None) -> dict:
+    body = {
         "stage": "rejected",
         "chain_ok": False,
         "reason": reason,
@@ -513,3 +533,9 @@ def _rejected(reason: str, category: str = "not_usable", program_ids: list[str] 
         "executable": False,
         "live_ready": False,
     }
+    if observed_mint is not None:
+        body["observed_mint"] = observed_mint
+        body["expected_mints"] = sorted(solana_tx.BOUND_MINTS)
+    if observed_owner is not None:
+        body["observed_owner"] = observed_owner
+    return body

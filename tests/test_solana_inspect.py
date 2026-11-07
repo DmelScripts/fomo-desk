@@ -6,6 +6,7 @@ from pathlib import Path
 
 import phantom_transport
 import solana_inspect
+import solana_jupiter
 import solana_tx
 
 def _native_account() -> bytes:
@@ -13,6 +14,18 @@ def _native_account() -> bytes:
     raw[0:32] = solana_tx.b58decode(solana_tx.NATIVE_MINT)
     raw[32:64] = solana_tx.b58decode(phantom_transport.REQUIRED_WALLET)
     return bytes(raw)
+
+
+def _jupiter_route(quoted: int, slippage_bps: int) -> bytes:
+    disc = solana_jupiter._SHARED
+    plan = (1).to_bytes(4, "little") + bytes([7, 100, 0, 1])
+    return (
+        disc + bytes([1]) + plan
+        + (10_000_000).to_bytes(8, "little")
+        + quoted.to_bytes(8, "little")
+        + slippage_bps.to_bytes(2, "little")
+        + bytes([0])
+    )
 
 
 WALLET = phantom_transport.REQUIRED_WALLET
@@ -200,3 +213,48 @@ class TestSolanaInspect(unittest.TestCase):
         self.assertEqual(bad_mint["error_category"], "token_mint_unbound")
         self.assertEqual(bad_mint["instruction_tag"], 12)
         self.assertFalse(bad_mint["execution_allowed"])
+        other_mint = solana_tx.b58encode(b"\x55" * 32)
+        ata = solana_tx.ASSOCIATED_TOKEN
+        jupiter = solana_jupiter.PROGRAM_ID
+        created = solana_tx.encode_legacy(WALLET, [WALLET, DEST, other_mint, ata, jupiter], 3, [
+            (3, [0, 1, 0, 2], bytes([1])),
+            (4, [0], b"\x00" * 8),
+        ], BLOCK)
+        mismatch = solana_inspect.inspect(created, solana_inspect.RpcClient(FakeRpc()))
+        self.assertEqual(mismatch["error_category"], "token_mint_unbound")
+        self.assertEqual(mismatch["instruction_index"], 0)
+        self.assertEqual(mismatch["instruction_tag"], 1)
+        self.assertEqual(mismatch["observed_mint"], other_mint)
+        self.assertEqual(mismatch["observed_owner"], WALLET)
+        self.assertEqual(set(mismatch["expected_mints"]), {solana_tx.NATIVE_MINT, solana_tx.USDC_MINT})
+        self.assertIn(jupiter, mismatch["program_ids"])
+        self.assertFalse(mismatch["slippage_verified"])
+        route = _jupiter_route(898162, 100)
+        keys = [
+            WALLET, solana_tx.b58encode(b"\x44" * 32), DEST, solana_tx.b58encode(b"\x46" * 32),
+            solana_tx.b58encode(b"\x47" * 32), solana_tx.b58encode(b"\x48" * 32),
+            solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, solana_tx.TOKEN_PROGRAM,
+            solana_tx.SYSTEM_PROGRAM, jupiter,
+        ]
+        swap = solana_tx.encode_legacy(WALLET, keys, 5, [
+            (9, [0, 0], (2).to_bytes(4, "little") + (10_000_000).to_bytes(8, "little")),
+            (10, [8, 1, 0, 2, 3, 4, 5, 6, 7], route),
+        ], BLOCK)
+        checked = solana_inspect.inspect(swap, solana_inspect.RpcClient(FakeRpc()))
+        self.assertTrue(checked["chain_ok"])
+        self.assertTrue(checked["slippage_verified"])
+        self.assertEqual(checked["quoted_out_amount"], "898162")
+        self.assertEqual(checked["slippage_bps"], 100)
+        self.assertFalse(checked["spend_verified"])
+        self.assertFalse(checked["intent_verified"])
+        self.assertFalse(checked["execution_allowed"])
+        bad_route = bytes(route)
+        bad_route = route[:8] + bytes([1]) + (1).to_bytes(4, "little") + bytes([250, 100, 0, 1]) + route[8 + 1 + 4 + 4:]
+        unsupported = solana_tx.encode_legacy(WALLET, keys, 5, [
+            (9, [0, 0], (2).to_bytes(4, "little") + (10_000_000).to_bytes(8, "little")),
+            (10, [8, 1, 0, 2, 3, 4, 5, 6, 7], bad_route),
+        ], BLOCK)
+        self.assertEqual(
+            solana_inspect.inspect(unsupported, solana_inspect.RpcClient(FakeRpc()))["error_category"],
+            "unsupported_route",
+        )
