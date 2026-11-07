@@ -65,6 +65,8 @@ def public_login() -> dict:
             body["approval_url"] = _FLOW["approval_url"]
             body["user_code"] = _FLOW["user_code"]
             body["expires_at"] = _FLOW["expires_at"]
+        if _FLOW.get("verify"):
+            body["verify"] = _FLOW["verify"]
     return body
 
 
@@ -129,9 +131,8 @@ def cancel() -> dict:
 
 def check() -> dict:
     """Ask the official addresses command. This does not start a login."""
-    if _FLOW["state"] == "pending":
-        return public_login()
-    if _FLOW["state"] not in {"approved_unverified", "observed", "mismatch", "auth_expired"}:
+    proc = _FLOW["process"]
+    if _FLOW["state"] == "pending" and proc is not None and proc.poll() is None:
         return public_login()
     _verify()
     return public_login()
@@ -213,7 +214,7 @@ def _verify() -> None:
     home = _home()
     try:
         done = subprocess.run(
-            [binary, "wallet", "addresses"],
+            [binary, "wallet", "addresses", "--format", "json"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -228,22 +229,7 @@ def _verify() -> None:
         log.info("phantom login failed")
         return
     text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
-    if done.returncode != 0 or "401" in text or "AUTH_EXPIRED" in text or "Failed to get wallet addresses" in text:
-        with _LOCK:
-            _FLOW["state"] = "auth_expired"
-            _FLOW["approval_url"] = None
-            _FLOW["user_code"] = None
-        log.info("phantom login auth_expired")
-        return
-    wallet_id, address = _identity(text)
-    with _LOCK:
-        _FLOW["observed_wallet_id"] = wallet_id
-        _FLOW["observed_wallet"] = address
-        if wallet_id == phantom_transport.REQUIRED_WALLET_ID and address == phantom_transport.REQUIRED_WALLET:
-            _FLOW["state"] = "observed"
-        else:
-            _FLOW["state"] = "mismatch"
-    log.info("phantom login %s", _FLOW["state"])
+    _apply_classification(_classify(text, done.returncode))
 
 
 def _append(raw: str, chunk: bytes) -> str:
@@ -293,23 +279,172 @@ def _fail_closed(child: subprocess.Popen) -> None:
     log.info("phantom login failed")
 
 
-def _identity(text: str) -> tuple[str | None, str | None]:
+def _apply_classification(result: dict) -> None:
+    with _LOCK:
+        _FLOW["verify"] = result["verify"]
+        _FLOW["approval_url"] = None
+        _FLOW["user_code"] = None
+        if result["state"] in {"observed", "mismatch"}:
+            _FLOW["observed_wallet_id"] = result["wallet_id"]
+            _FLOW["observed_wallet"] = result["address"]
+        else:
+            _FLOW["observed_wallet_id"] = None
+            _FLOW["observed_wallet"] = None
+        _FLOW["state"] = result["state"]
+    log.info("phantom login %s", result["state"])
+
+
+def _classify(text: str, returncode: int) -> dict:
+    """Classify addresses output. Mismatch requires both identity fields."""
+    body, shape = _payload(text)
+    if shape == "error_wrapper" or _auth_text(text) or returncode != 0:
+        return _unknown("auth_error", "error_wrapper" if shape == "error_wrapper" else "auth", body)
+    if shape == "empty":
+        return _unknown("unable_to_verify", "empty", None)
+    if body is None:
+        return _unknown("unable_to_verify", "malformed", None)
+    wallet_id, address, fields = _fields(body)
+    verify = {"error_category": None, "shape": shape, "fields": fields}
+    if fields["walletId"] != "string" or fields["solana"] != "string":
+        verify["error_category"] = "unable_to_verify"
+        return {"state": "unable_to_verify", "wallet_id": None, "address": None, "verify": verify}
+    state = "observed" if (
+        wallet_id == phantom_transport.REQUIRED_WALLET_ID
+        and address == phantom_transport.REQUIRED_WALLET
+    ) else "mismatch"
+    verify["error_category"] = state
+    return {"state": state, "wallet_id": wallet_id, "address": address, "verify": verify}
+
+
+def _unknown(state: str, shape: str, body) -> dict:
+    fields = _field_types(body) if isinstance(body, dict) else {
+        "walletId": "missing", "addresses": "missing", "solana": "missing",
+    }
+    return {
+        "state": state,
+        "wallet_id": None,
+        "address": None,
+        "verify": {"error_category": state, "shape": shape, "fields": fields},
+    }
+
+
+def _payload(text: str) -> tuple[dict | None, str]:
+    stripped = text.strip()
+    if not stripped:
+        return None, "empty"
+    parsed = _json_value(stripped)
+    if isinstance(parsed, dict):
+        if parsed.get("ok") is False or ("error" in parsed and "walletId" not in parsed and "data" not in parsed):
+            return parsed, "error_wrapper"
+        if parsed.get("ok") is True and isinstance(parsed.get("data"), dict):
+            return parsed["data"], "json_envelope"
+        if "walletId" in parsed or "addresses" in parsed:
+            return parsed, "json_schema"
+        return parsed, "malformed"
+    toon = _toon_payload(stripped)
+    if toon is not None:
+        if "code" in toon and "walletId" not in toon:
+            return toon, "error_wrapper"
+        return toon, "toon"
+    return None, "malformed"
+
+
+def _json_value(text: str):
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict):
+        return value
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
-        return None, None
+        return None
     try:
-        body = json.loads(text[start:end + 1])
+        value = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        return None, None
-    wallet_id = body.get("walletId") if isinstance(body.get("walletId"), str) else None
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _toon_payload(text: str) -> dict | None:
+    wallet_id = None
+    rows = []
+    in_addresses = False
+    saw_wallet = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("walletId:"):
+            saw_wallet = True
+            wallet_id = stripped.split(":", 1)[1].strip()
+            in_addresses = False
+            continue
+        if stripped.startswith("addresses[") and "{addressType,address}" in stripped:
+            in_addresses = True
+            continue
+        if in_addresses and "," in stripped and not stripped.endswith(":"):
+            kind, _, address = stripped.partition(",")
+            rows.append({"addressType": kind.strip(), "address": address.strip()})
+            continue
+        if stripped.endswith(":") and not stripped.startswith("addresses["):
+            in_addresses = False
+    if not saw_wallet and not rows and "code:" not in text:
+        return None
+    if "code:" in text and not saw_wallet:
+        return {"code": "present"}
+    return {"walletId": wallet_id, "addresses": rows}
+
+
+def _fields(body: dict) -> tuple[str | None, str | None, dict]:
+    fields = _field_types(body)
+    wallet_id = body.get("walletId") if fields["walletId"] == "string" else None
     address = None
-    for row in body.get("addresses") or []:
-        if isinstance(row, dict) and str(row.get("addressType", "")).lower() == "solana":
-            if isinstance(row.get("address"), str):
-                address = row["address"]
-            break
-    return wallet_id, address
+    solana = [
+        row.get("address") for row in body.get("addresses") or []
+        if isinstance(row, dict) and str(row.get("addressType", "")).lower() == "solana"
+    ]
+    if len(solana) == 1 and fields["solana"] == "string":
+        address = solana[0]
+    return wallet_id, address, fields
+
+
+def _field_types(body: dict) -> dict:
+    wallet = body.get("walletId")
+    addresses = body.get("addresses")
+    solana = []
+    if isinstance(addresses, list):
+        solana = [
+            row.get("address") for row in addresses
+            if isinstance(row, dict) and str(row.get("addressType", "")).lower() == "solana"
+        ]
+    return {
+        "walletId": "string" if _valid_wallet_id(wallet) else ("missing" if wallet is None else "invalid"),
+        "addresses": "array" if isinstance(addresses, list) else ("missing" if addresses is None else "invalid"),
+        "solana": "string" if len(solana) == 1 and _valid_solana(solana[0]) else (
+            "missing" if not solana else "invalid"
+        ),
+    }
+
+
+def _valid_wallet_id(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        value,
+    ) is not None
+
+
+def _valid_solana(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", value) is not None
+
+
+def _auth_text(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "auth_expired" in lowered
+        or "failed to get wallet addresses" in lowered
+        or "status code 401" in lowered
+        or "http 401" in lowered
+    )
 
 
 def _matches():
@@ -410,5 +545,6 @@ def reset_for_tests() -> None:
             "observed_wallet_id": None,
             "observed_wallet": None,
             "process": None,
+            "verify": None,
         })
     _kill(proc)

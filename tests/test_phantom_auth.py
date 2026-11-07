@@ -1,4 +1,5 @@
 """Device login is auth-only. The fake binary never reaches Phantom."""
+import json
 import logging
 import os
 import time
@@ -49,7 +50,14 @@ if [ "$1" = "wallet" ]; then
     exit 1
   fi
   if [ "$mode" = "mismatch" ]; then
-    echo '{"walletId":"other-wallet","addresses":[{"addressType":"Solana","address":"4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f"}]}'
+    echo '{"walletId":"11111111-2222-4333-8444-555555555555","organizationId":"org","addresses":[{"addressType":"Solana","address":"4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f"}]}'
+    exit 0
+  fi
+  if [ "$mode" = "empty" ]; then
+    exit 0
+  fi
+  if [ "$mode" = "toon" ]; then
+    printf '%s\n' 'walletId: d76451f8-288c-4ab8-b6de-1cfd84403873' 'organizationId: org_1' 'addresses[1]{addressType,address}:' '  solana,GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh'
     exit 0
   fi
   echo '{"walletId":"d76451f8-288c-4ab8-b6de-1cfd84403873","addresses":[{"addressType":"Solana","address":"GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"}]}'
@@ -147,7 +155,7 @@ exit 2
         phantom_auth.start()
         self._wait("mismatch")
         view = phantom_auth.public_login()
-        self.assertEqual(view["observed_wallet_id"], "other-wallet")
+        self.assertEqual(view["observed_wallet_id"], "11111111-2222-4333-8444-555555555555")
         self.assertFalse(view["matches_allowlist"])
         self.assertEqual(view["required_wallet_id"], phantom_transport.REQUIRED_WALLET_ID)
         self.assertEqual(phantom_transport.REQUIRED_WALLET, "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh")
@@ -173,11 +181,68 @@ exit 2
         (self.home / "calls").write_text("", encoding="utf-8")
         (self.home / "mode").write_text("auth401", encoding="utf-8")
         phantom_auth.start()
-        self._wait("auth_expired")
+        self._wait("auth_error")
         phantom_auth.check()
         self.assertEqual(self._calls().count("login"), 1)
         self.assertNotIn("buy", self._calls())
-        self.assertEqual(phantom_auth.account_view()["auth_flow"], "auth_expired")
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "auth_error")
+
+    def test_addresses_shapes_do_not_call_a_missing_identity_a_mismatch(self):
+        match = {
+            "walletId": "d76451f8-288c-4ab8-b6de-1cfd84403873",
+            "organizationId": "org_1",
+            "addresses": [
+                {"addressType": "solana", "address": "GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh"},
+                {"addressType": "ethereum", "address": "0xabc"},
+            ],
+        }
+        toon = "\n".join([
+            "walletId: d76451f8-288c-4ab8-b6de-1cfd84403873",
+            "organizationId: org_1",
+            "addresses[2]{addressType,address}:",
+            "  solana,GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh",
+            "  ethereum,0xabc",
+        ])
+        self.assertEqual(phantom_auth._classify(toon, 0)["state"], "observed")
+        self.assertEqual(phantom_auth._classify(json.dumps(match), 0)["state"], "observed")
+        self.assertEqual(phantom_auth._classify(json.dumps({"ok": True, "data": match, "meta": {"token": SECRET}}), 0)["state"], "observed")
+        different = json.dumps({
+            "ok": True,
+            "data": {
+                "walletId": "11111111-2222-4333-8444-555555555555",
+                "addresses": [{"addressType": "solana", "address": "4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f"}],
+            },
+        })
+        mismatch = phantom_auth._classify(different, 0)
+        self.assertEqual(mismatch["state"], "mismatch")
+        self.assertEqual(mismatch["wallet_id"], "11111111-2222-4333-8444-555555555555")
+        empty = phantom_auth._classify("", 0)
+        self.assertEqual(empty["state"], "unable_to_verify")
+        self.assertIsNone(empty["wallet_id"])
+        self.assertIsNone(empty["address"])
+        partial = phantom_auth._classify(json.dumps({"walletId": "d76451f8-288c-4ab8-b6de-1cfd84403873"}), 0)
+        self.assertEqual(partial["state"], "unable_to_verify")
+        self.assertIsNone(partial["wallet_id"])
+        wrapped = phantom_auth._classify(json.dumps({
+            "ok": False,
+            "error": {"code": "UNKNOWN", "message": "Failed to get wallet addresses: status code 401", "stamper": SECRET},
+        }), 1)
+        self.assertEqual(wrapped["state"], "auth_error")
+        self.assertNotIn(SECRET, json.dumps(wrapped))
+        self.assertEqual(phantom_auth._classify("code: UNKNOWN\nmessage: \"Failed to get wallet addresses: status code 401\"\n", 1)["state"], "auth_error")
+        (self.home / "mode").write_text("toon", encoding="utf-8")
+        phantom_auth.start()
+        self._wait("observed")
+        (self.home / "mode").write_text("empty", encoding="utf-8")
+        phantom_auth.reset_for_tests()
+        (self.home / "calls").write_text("", encoding="utf-8")
+        phantom_auth.start()
+        self._wait("unable_to_verify")
+        view = phantom_auth.public_login()
+        self.assertIsNone(view["observed_wallet_id"])
+        self.assertIsNone(view["observed_wallet"])
+        self.assertNotEqual(view["auth_flow"], "mismatch")
+        self.assertEqual(view["verify"]["shape"], "empty")
 
     def _calls(self) -> str:
         path = self.home / "calls"
