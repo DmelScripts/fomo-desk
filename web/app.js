@@ -19,6 +19,9 @@
     audit: null,
     unread: 0,
     retry: 5,
+    loginPending: false,
+    workerWatch: false,
+    reloaded: false,
     timer: 0,
     searchTimer: 0,
     stream: null,
@@ -52,8 +55,9 @@
     var kept = [];
     for (var i = 0; i < parts.length; i++) {
       var part = parts[i];
-      if (part.indexOf("t=") === 0) token = decodeURIComponent(part.slice(2));
-      else if (part) kept.push(part);
+      if (part.indexOf("t=") === 0) {
+        try { token = decodeURIComponent(part.slice(2)); } catch (error) { token = ""; }
+      } else if (part) kept.push(part);
     }
     return { token: token, hash: kept.length ? "#" + kept.join("&") : "" };
   }
@@ -103,10 +107,38 @@
     return null;
   }
 
+  function tokenFromPaste(raw, origin) {
+    var text = String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "");
+    if (!text) return { token: "", message: "Paste the token or the private link." };
+    if (/\s/.test(text) || text.length > 2000) {
+      return { token: "", message: "Paste only the token or one private link." };
+    }
+    if (/^(javascript|data|vbscript|blob|file):/i.test(text)) {
+      return { token: "", message: "That link was not accepted." };
+    }
+    var asLink = text.indexOf("://") !== -1 || text.indexOf("#") !== -1 || text.charAt(0) === "/" || text.indexOf("?") !== -1;
+    if (!asLink) return { token: text, message: "" };
+    var base = origin || "https://invalid.local";
+    var url;
+    try { url = new URL(text, base); } catch (error) {
+      return { token: "", message: "That link was not accepted." };
+    }
+    if (url.username || url.password || (url.protocol !== "https:" && url.protocol !== "http:")) {
+      return { token: "", message: "That link was not accepted." };
+    }
+    if (origin && url.origin !== origin) return { token: "", message: "That link is for a different desk." };
+    if (queryHasToken(url.search)) return { token: "", message: "A token in the query string is ignored." };
+    var parsed = readFragmentToken(url.hash);
+    var token = parsed.token ? parsed.token.replace(/^\s+|\s+$/g, "") : "";
+    if (!token) return { token: "", message: "That link has no private token." };
+    return { token: token, message: "" };
+  }
+
   root.Desk = {
     readFragmentToken: readFragmentToken,
     queryHasToken: queryHasToken,
     stripTokenQuery: stripTokenQuery,
+    tokenFromPaste: tokenFromPaste,
     parseSse: parseSse,
     markView: markView,
   };
@@ -176,10 +208,15 @@
     $("shell").hidden = true;
     $("gate").hidden = false;
     $("gate-text").textContent = text;
+    var form = $("gate-form");
+    if (form) form.hidden = false;
+    var field = $("gate-token");
+    if (field) field.value = "";
   }
 
   function refuse(text) {
     state.token = "";
+    state.loginPending = false;
     try { localStorage.removeItem(TOKEN_KEY); } catch (error) { /* private mode */ }
     if (state.stream && state.stream.cancel) state.stream.cancel();
     showGate(text || "This desk link was refused. Open a fresh link.");
@@ -1228,10 +1265,85 @@
     else render();
   }
 
+  function registerWorker() {
+    var worker = navigator.serviceWorker;
+    if (!worker || !worker.register) return;
+    if (!state.workerWatch && worker.addEventListener) {
+      state.workerWatch = true;
+      worker.addEventListener("controllerchange", function () {
+        if (state.reloaded || !location.reload) return;
+        state.reloaded = true;
+        location.reload();
+      });
+    }
+    worker.register("/sw.js").catch(function () {});
+  }
+
+  function openDesk() {
+    $("gate").hidden = true;
+    var form = $("gate-form");
+    if (form) form.hidden = true;
+    var field = $("gate-token");
+    if (field) field.value = "";
+    $("shell").hidden = false;
+    $("home-skel").hidden = false;
+    registerWorker();
+    bind();
+    loadAll().then(function () {
+      connectStream();
+      readRoute();
+    });
+  }
+
+  function rememberedToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (error) { return ""; }
+  }
+
+  function loginWithPaste(raw) {
+    var field = $("gate-token");
+    var value = raw == null ? (field ? field.value : "") : raw;
+    if (field) field.value = "";
+    if (state.loginPending) return;
+    var parsed = tokenFromPaste(value, location.origin);
+    if (!parsed.token) {
+      showGate(parsed.message);
+      return;
+    }
+    state.loginPending = true;
+    state.token = parsed.token;
+    call("/api/state").then(function () {
+      try { localStorage.setItem(TOKEN_KEY, parsed.token); } catch (error) { /* private mode */ }
+      state.loginPending = false;
+      openDesk();
+    }).catch(function (error) {
+      state.loginPending = false;
+      if (field) field.value = "";
+      if (error && error.auth) return;
+      state.token = rememberedToken();
+      if (error && error.status) {
+        showGate("The desk did not finish login. Paste the token and try again.");
+        return;
+      }
+      showGate("The desk could not be reached. Paste the token and try again.");
+    });
+  }
+
+  function bindGate() {
+    var form = $("gate-form");
+    if (!form || form.dataset.bound) return;
+    form.dataset.bound = "1";
+    form.addEventListener("submit", function (event) {
+      if (event && event.preventDefault) event.preventDefault();
+      loginWithPaste(null);
+    });
+  }
+
   function boot() {
     if (root.matchMedia && root.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       document.documentElement.classList.add("reduce");
     }
+    bindGate();
+    registerWorker();
     if (queryHasToken(location.search)) {
       history.replaceState(null, "", location.pathname + stripTokenQuery(location.search));
       showGate("Open the desk link that puts the token after #. A token in the query string is ignored.");
@@ -1242,23 +1354,16 @@
       try { localStorage.setItem(TOKEN_KEY, parsed.token); } catch (error) { /* private mode */ }
       history.replaceState(null, "", location.pathname + location.search + parsed.hash);
     }
-    var saved = "";
-    try { saved = localStorage.getItem(TOKEN_KEY) || ""; } catch (error) { saved = ""; }
+    var saved = rememberedToken();
     if (!saved) {
-      showGate("Open the desk link on this phone. It ends with #t= and the token is saved only on this device.");
+      showGate("This phone keeps its own login. Paste the token, or the private link that ends with #t=. It is saved only on this device.");
       return;
     }
     state.token = saved;
-    $("gate").hidden = true;
-    $("shell").hidden = false;
-    $("home-skel").hidden = false;
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {});
-    bind();
-    loadAll().then(function () {
-      connectStream();
-      readRoute();
-    });
+    openDesk();
   }
+
+  root.Desk.loginWithPaste = loginWithPaste;
 
   function bind() {
     if (state.bound) return;

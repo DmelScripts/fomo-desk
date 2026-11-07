@@ -241,7 +241,7 @@ html { scroll-padding-top: 64px; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
 .stat { background: var(--card); border-radius: 14px; padding: 12px; }
 .stat span { display: block; color: var(--secondary); font-size: 13px; }
-.fomo-btn, #live-go, .key-row button, #enable-push {
+.fomo-btn, #live-go, .key-row button, #enable-push, #gate-submit {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -262,6 +262,18 @@ html { scroll-padding-top: 64px; }
 }
 .gate h1 { font-size: 40px; margin: 0; }
 .gate p, .note { color: var(--secondary); line-height: 1.4; }
+.gate form { display: grid; gap: 8px; }
+.gate label { color: var(--secondary); font-size: 13px; }
+.gate input {
+  width: 100%;
+  min-height: 48px;
+  font-size: 16px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--text);
+  padding: 0 14px;
+}
 .skel { background: var(--card); border-radius: 16px; margin-bottom: 12px; animation: pulse 1.2s ease-in-out infinite; }
 .skel-balance { height: 72px; width: 70%; }
 .skel-chart { height: 220px; }

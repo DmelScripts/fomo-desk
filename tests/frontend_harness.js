@@ -20,7 +20,7 @@ function load(file, sandbox) {
 }
 
 function pureDesk() {
-  const sandbox = { console: console, URLSearchParams: URLSearchParams };
+  const sandbox = { console: console, URLSearchParams: URLSearchParams, URL: URL };
   sandbox.globalThis = sandbox;
   load("web/app.js", sandbox);
   if (!sandbox.Desk || typeof sandbox.Desk.readFragmentToken !== "function") fail("Desk helpers missing");
@@ -86,7 +86,7 @@ function makeEl(id) {
 
 function browser(search, hash) {
   const els = {};
-  const location = { pathname: "/", search: search, hash: hash };
+  const location = { pathname: "/", search: search, hash: hash, origin: "https://desk.test" };
   const urls = [];
   const calls = [];
   const document = {
@@ -120,6 +120,10 @@ function browser(search, hash) {
     navigator: { serviceWorker: { register() { return Promise.resolve(); } }, standalone: false },
     fetch(url, options) {
       calls.push({ url: String(url), options: options || {} });
+      if (sandbox.networkFails > 0) {
+        sandbox.networkFails -= 1;
+        return Promise.reject(new TypeError("offline"));
+      }
       if (String(url).indexOf("/api/stream") === 0) {
         const stream = new ReadableStream({
           start(controller) {
@@ -135,7 +139,7 @@ function browser(search, hash) {
         "/api/account": emptyAccount(),
         "/api/settings": { groups: {} },
       };
-      const status = mode === "auth401" ? 401 : 200;
+      const status = mode === "auth401" || mode === "paste-401" ? 401 : mode === "paste-500" ? 500 : 200;
       const body = status === 401 ? { detail: "unauthorized" } : (table[String(url)] || {});
       return Promise.resolve({
         ok: status === 200,
@@ -144,6 +148,7 @@ function browser(search, hash) {
         body: null,
       });
     },
+    URL: URL,
     URLSearchParams: URLSearchParams,
     TextDecoder: TextDecoder,
     TextEncoder: TextEncoder,
@@ -160,6 +165,7 @@ function browser(search, hash) {
     matchMedia() { return { matches: false }; },
     addEventListener() {},
   };
+  sandbox.networkFails = mode === "paste-network" ? 1 : 0;
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
   load("web/app.js", sandbox);
@@ -207,6 +213,21 @@ if (mode === "pure") {
   if (parsed.hash !== "") fail("fragment was not consumed");
   if (!Desk.queryHasToken("?token=" + TOKEN)) fail("query token was not detected");
   if (Desk.stripTokenQuery("?token=" + TOKEN + "&range=LIVE") !== "?range=LIVE") fail("query token was not stripped");
+  const origin = "https://desk.test";
+  const pasted = Desk.tokenFromPaste("  " + TOKEN + "  ", origin);
+  if (pasted.token !== TOKEN || pasted.message) fail("trimmed token was rejected");
+  const linked = Desk.tokenFromPaste(origin + "/#t=" + encodeURIComponent(TOKEN), origin);
+  if (linked.token !== TOKEN) fail("same-origin link was not read");
+  const foreign = Desk.tokenFromPaste("https://evil.example/desk#t=" + encodeURIComponent(TOKEN), origin);
+  if (foreign.token) fail("foreign link was accepted");
+  if (foreign.message.indexOf(TOKEN) !== -1 || foreign.message.indexOf("evil.example") !== -1) fail("foreign link leaked into the message");
+  const queried = Desk.tokenFromPaste(origin + "/?token=" + encodeURIComponent(TOKEN) + "#t=other-token", origin);
+  if (queried.token) fail("query token link was accepted");
+  if (queried.message.indexOf(TOKEN) !== -1) fail("query link leaked into the message");
+  const spaced = Desk.tokenFromPaste(TOKEN + " extra", origin);
+  if (spaced.token) fail("spaced paste was accepted");
+  const scripted = Desk.tokenFromPaste("javascript:alert(1)", origin);
+  if (scripted.token) fail("script link was accepted");
   const sse = Desk.parseSse('event: balance\ndata: {"value":1}\n\nleftover');
   if (sse.events.length !== 1 || sse.events[0].event !== "balance" || sse.events[0].data.value !== 1) fail("sse parse failed");
   if (sse.rest !== "leftover") fail("sse rest failed");
@@ -274,20 +295,108 @@ if (mode === "sse") {
   }, 40);
 }
 
+function pastedLeak(page) {
+  const gate = page.els["gate-text"] ? page.els["gate-text"].textContent : "";
+  if (gate.indexOf(TOKEN) !== -1) fail("gate shows the token");
+  page.urls.forEach(function (url) {
+    if (String(url).indexOf(TOKEN) !== -1) fail("token stayed in the address");
+  });
+  page.calls.forEach(function (call) {
+    if (String(call.url).indexOf(TOKEN) !== -1) fail("token stayed in the request path");
+  });
+  const field = page.els["gate-token"];
+  if (field && field.value) fail("token stayed in the field");
+}
+
+if (mode === "paste-ok" || mode === "paste-401" || mode === "paste-500") {
+  const page = browser("", "");
+  page.localStorage.setItem("desk.token", "already-saved");
+  setTimeout(function () {
+    page.sandbox.Desk.loginWithPaste("  " + TOKEN + " ");
+    setTimeout(function () {
+      pastedLeak(page);
+      const stored = page.localStorage.getItem("desk.token");
+      if (mode === "paste-ok") {
+        if (stored !== TOKEN) fail("accepted token was not stored");
+        if (page.els.shell.hidden !== false) fail("desk did not open");
+        if (page.els.gate.hidden !== true) fail("gate stayed open");
+        const authed = page.calls.some(function (call) {
+          return call.url === "/api/state" && call.options.headers && call.options.headers.Authorization === "Bearer " + TOKEN;
+        });
+        if (!authed) fail("paste did not call state with the bearer token");
+      } else if (mode === "paste-401") {
+        if (stored) fail("401 kept a credential");
+        if (page.els.shell.hidden === false) fail("401 opened the desk");
+        if (page.els["gate-text"].textContent.indexOf("refused") === -1) fail("401 did not refuse");
+      } else {
+        if (stored !== "already-saved") fail("server error changed the saved credential");
+        if (page.els.shell.hidden === false) fail("server error opened the desk");
+        if (page.els["gate-text"].textContent.indexOf("did not finish") === -1) fail("server error was not retryable");
+      }
+      process.exit(0);
+    }, 40);
+  }, 20);
+}
+
+if (mode === "paste-network") {
+  const page = browser("", "");
+  page.localStorage.setItem("desk.token", "already-saved");
+  setTimeout(function () {
+    page.sandbox.Desk.loginWithPaste(TOKEN);
+    setTimeout(function () {
+      pastedLeak(page);
+      if (page.localStorage.getItem("desk.token") !== "already-saved") fail("network error changed the saved credential");
+      if (page.els["gate-text"].textContent.indexOf("could not be reached") === -1) fail("offline message missing");
+      page.sandbox.Desk.loginWithPaste("https://desk.test/#t=" + encodeURIComponent(TOKEN));
+      setTimeout(function () {
+        pastedLeak(page);
+        if (page.localStorage.getItem("desk.token") !== TOKEN) fail("retry after offline did not save");
+        if (page.els.gate.hidden !== true) fail("retry left the gate open");
+        process.exit(0);
+      }, 40);
+    }, 30);
+  }, 20);
+}
+
+if (mode === "paste-reject") {
+  const page = browser("", "");
+  setTimeout(function () {
+    page.sandbox.Desk.loginWithPaste("https://evil.example/#t=" + encodeURIComponent(TOKEN));
+    page.sandbox.Desk.loginWithPaste("https://desk.test/?token=" + encodeURIComponent(TOKEN));
+    pastedLeak(page);
+    if (page.localStorage.getItem("desk.token")) fail("rejected paste was stored");
+    if (page.calls.length) fail("rejected paste called the desk");
+    const gate = page.els["gate-text"].textContent;
+    if (gate.indexOf("different desk") === -1 && gate.indexOf("query string") === -1) fail("rejection was not explained");
+    process.exit(0);
+  }, 20);
+}
+
 if (mode === "sw") {
   const opened = [];
+  const deleted = [];
+  const listeners = {};
+  let claimed = false;
   const sandbox = {
     console: console,
     URL: URL,
     fetch() { return Promise.resolve({ ok: true, clone() { return this; } }); },
-    caches: { open(name) { opened.push(name); return Promise.resolve({ put() {} }); }, match() { return Promise.resolve(undefined); } },
+    caches: {
+      open(name) { opened.push(name); return Promise.resolve({ put() {} }); },
+      match() { return Promise.resolve(undefined); },
+      keys() { return Promise.resolve(["desk-shell-v1", "desk-shell-v2"]); },
+      delete(name) { deleted.push(name); return Promise.resolve(true); },
+    },
     self: null,
   };
   sandbox.self = {
     location: { origin: "https://desk.test" },
-    addEventListener() {},
+    addEventListener(name, fn) { listeners[name] = fn; },
     skipWaiting() {},
-    clients: { claim() { return Promise.resolve(); }, openWindow() { return Promise.resolve(); } },
+    clients: {
+      claim() { claimed = true; return Promise.resolve(); },
+      openWindow() { return Promise.resolve(); },
+    },
     registration: { showNotification() { return Promise.resolve(); } },
   };
   sandbox.globalThis = sandbox;
@@ -308,5 +417,16 @@ if (mode === "sw") {
   if (allow(request("https://desk.test/vapid_public.txt"))) fail("push key is cacheable");
   if (!allow(request("https://desk.test/app.css"))) fail("stylesheet was refused");
   if (opened.length) fail("cache opened during the check");
-  process.exit(0);
+  const activate = listeners.activate;
+  if (typeof activate !== "function") fail("activate hook missing");
+  let waited = null;
+  activate({ waitUntil(work) { waited = work; } });
+  Promise.resolve(waited).then(function () {
+    if (deleted.indexOf("desk-shell-v1") === -1) fail("old shell cache was kept");
+    if (deleted.indexOf("desk-shell-v2") !== -1) fail("current shell cache was deleted");
+    if (!claimed) fail("new worker did not claim the page");
+    process.exit(0);
+  }).catch(function (error) {
+    fail(error && error.message ? error.message : "activate failed");
+  });
 }

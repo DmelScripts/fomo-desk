@@ -18,6 +18,7 @@ from db import agents_enabled, db_status, heartbeat_ages, init_db
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 _INDEX_PATHS = {"/", "/index.html"}
+_SHELL_ASSETS = {"/app.js", "/app.css", "/chart.js", "/sw.js", "/manifest.json"}
 
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
@@ -73,6 +74,8 @@ class SecurityHeaders:
                         headers.append((name, value))
                 if path in _INDEX_PATHS and b"cache-control" not in names:
                     headers.append((b"cache-control", b"no-store"))
+                elif path in _SHELL_ASSETS and b"cache-control" not in names:
+                    headers.append((b"cache-control", b"no-cache"))
                 message["headers"] = headers
             await send(message)
 

@@ -1,5 +1,5 @@
 /* App shell only. Authenticated responses and token URLs are never cached. */
-var SHELL = "desk-shell-v1";
+var SHELL = "desk-shell-v2";
 
 function deskCacheAllowed(request) {
   var url;
@@ -29,7 +29,14 @@ self.addEventListener("install", function () {
 });
 
 self.addEventListener("activate", function (event) {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(caches.keys().then(function (keys) {
+    return Promise.all(keys.map(function (key) {
+      if (key === SHELL) return Promise.resolve(false);
+      return caches.delete(key);
+    }));
+  }).then(function () {
+    return self.clients.claim();
+  }));
 });
 
 self.addEventListener("fetch", function (event) {
@@ -39,7 +46,7 @@ self.addEventListener("fetch", function (event) {
     return;
   }
   event.respondWith(
-    fetch(request).then(function (response) {
+    fetch(request, { cache: "no-cache" }).then(function (response) {
       if (response && response.ok) {
         var copy = response.clone();
         caches.open(SHELL).then(function (cache) {
