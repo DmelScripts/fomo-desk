@@ -145,6 +145,44 @@ class TestWebPush(unittest.TestCase):
         self.assertEqual(db.get_setting("agents_enabled"), "0")
         self.assertEqual(db.get_setting("mode"), "PAPER")
 
+    def test_push_save_accepts_the_phone_json_shape(self):
+        import server
+        client = TestClient(server.app)
+        client.__enter__()
+        self.addCleanup(client.__exit__, None, None, None)
+        payload = json.dumps({
+            "endpoint": "https://push.example/phone",
+            "p256dh": "pub-key",
+            "auth": "auth-key",
+        })
+        plain = client.post(
+            "/api/push",
+            content=payload,
+            headers={**AUTH, "content-type": "text/plain;charset=UTF-8"},
+        )
+        self.assertEqual(plain.status_code, 200)
+        self.assertEqual(plain.json(), {"ok": True})
+        self.assertNotIn("pub-key", plain.text)
+        self.assertNotIn("auth-key", plain.text)
+        self.assertNotIn("https://push.example/phone", plain.text)
+        labeled = client.post(
+            "/api/push",
+            content=payload,
+            headers={**AUTH, "content-type": "application/json"},
+        )
+        self.assertEqual(labeled.status_code, 200)
+        rows = db.query("SELECT endpoint, p256dh, auth FROM push_subs")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["endpoint"], "https://push.example/phone")
+        self.assertEqual(rows[0]["p256dh"], "pub-key")
+        self.assertEqual(rows[0]["auth"], "auth-key")
+        self.assertEqual(client.post("/api/push", content=payload).status_code, 401)
+        refused = client.post("/api/push", content="not-json", headers={**AUTH, "content-type": "text/plain"})
+        self.assertEqual(refused.status_code, 400)
+        self.assertNotIn("not-json", refused.text)
+        self.assertEqual(db.get_setting("agents_enabled"), "0")
+        self.assertEqual(db.get_setting("mode"), "PAPER")
+
     def test_api_test_push_is_authenticated_and_mock_only(self):
         import server
         client = TestClient(server.app)

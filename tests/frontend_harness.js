@@ -7,6 +7,16 @@ const vm = require("vm");
 const root = path.resolve(__dirname, "..");
 const TOKEN = "dummy-fragment-token";
 const mode = process.argv[2];
+const PUSH_ENDPOINT = "https://push.example/phone";
+
+function dummyVapid() {
+  const bytes = new Uint8Array(65);
+  bytes[0] = 4;
+  for (let i = 1; i < bytes.length; i += 1) bytes[i] = 7;
+  let binary = "";
+  bytes.forEach(function (byte) { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
 
 function fail(message) {
   process.stderr.write(message + "\n");
@@ -120,6 +130,28 @@ function browser(search, hash) {
     navigator: { serviceWorker: { register() { return Promise.resolve(); } }, standalone: false },
     fetch(url, options) {
       calls.push({ url: String(url), options: options || {} });
+      if (String(url) === "/vapid_public.txt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text() { return Promise.resolve(dummyVapid()); },
+        });
+      }
+      if (String(url) === "/api/push") {
+        if (mode === "push-http") {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json() { return Promise.resolve({ detail: "endpoint, p256dh, and auth are required" }); },
+          });
+        }
+        if (mode === "push-offline") return Promise.reject(new TypeError("offline"));
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json() { return Promise.resolve({ ok: true }); },
+        });
+      }
       if (sandbox.networkFails > 0) {
         sandbox.networkFails -= 1;
         return Promise.reject(new TypeError("offline"));
@@ -160,12 +192,16 @@ function browser(search, hash) {
     clearInterval: clearInterval,
     requestAnimationFrame(fn) { fn(); return 1; },
     atob: atob,
+    btoa: btoa,
+    Uint8Array: Uint8Array,
     confirm() { return false; },
     innerWidth: 390,
     matchMedia() { return { matches: false }; },
     addEventListener() {},
   };
   sandbox.networkFails = mode === "paste-network" ? 1 : 0;
+  sandbox.pushOrder = [];
+  if (mode.indexOf("push-") === 0) installPushMocks(sandbox);
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
   load("web/app.js", sandbox);
@@ -372,6 +408,107 @@ if (mode === "paste-reject") {
   }, 20);
 }
 
+function installPushMocks(sandbox) {
+  const registration = {
+    pushManager: {
+      getSubscription() {
+        sandbox.pushOrder.push("getSubscription");
+        return Promise.resolve(null);
+      },
+      subscribe(opts) {
+        sandbox.pushOrder.push("subscribe");
+        if (!opts || opts.userVisibleOnly !== true) fail("subscribe was not visible");
+        const key = opts.applicationServerKey;
+        if (!key || key.length !== 65 || key[0] !== 4) fail("applicationServerKey was not a public point");
+        if (mode === "push-blocked") {
+          const error = new Error("blocked");
+          error.name = "NotAllowedError";
+          error.message = PUSH_ENDPOINT;
+          return Promise.reject(error);
+        }
+        return Promise.resolve({
+          endpoint: PUSH_ENDPOINT,
+          toJSON() {
+            return { endpoint: PUSH_ENDPOINT, keys: { p256dh: "p256-dummy", auth: "auth-dummy" } };
+          },
+          getKey() { return null; },
+        });
+      },
+    },
+  };
+  sandbox.PushManager = function PushManager() {};
+  sandbox.Notification = {
+    permission: "default",
+    requestPermission() {
+      sandbox.pushOrder.push("requestPermission");
+      if (mode === "push-denied") return Promise.resolve("denied");
+      this.permission = "granted";
+      return Promise.resolve("granted");
+    },
+  };
+  sandbox.navigator.standalone = true;
+  sandbox.navigator.serviceWorker = {
+    register() {
+      sandbox.pushOrder.push("register");
+      return Promise.resolve(registration);
+    },
+    ready: Promise.resolve(registration),
+    addEventListener() {},
+  };
+}
+
+function noteHasSecret(text) {
+  return text.indexOf(PUSH_ENDPOINT) !== -1 || text.indexOf("p256-dummy") !== -1 || text.indexOf("auth-dummy") !== -1;
+}
+
+if (mode.indexOf("push-") === 0) {
+  const page = browser("", "");
+  setTimeout(function () {
+    page.sandbox.Desk.loadPushKey();
+    setTimeout(function () {
+      page.sandbox.pushOrder = [];
+      page.calls.length = 0;
+      page.sandbox.Desk.enablePush();
+      if (mode !== "push-denied" && mode !== "push-save" && mode !== "push-blocked" && mode !== "push-http" && mode !== "push-offline") {
+        fail("unknown push mode");
+      }
+      if (page.sandbox.pushOrder[0] !== "requestPermission") fail("permission was not requested on the tap");
+      setTimeout(function () {
+        const note = page.els["account-note"] ? page.els["account-note"].textContent : "";
+        if (noteHasSecret(note)) fail("subscription secret leaked into the note");
+        const post = page.calls.find(function (call) { return call.url === "/api/push"; });
+        if (mode === "push-denied") {
+          if (page.sandbox.pushOrder.indexOf("subscribe") !== -1) fail("denied permission still subscribed");
+          if (post) fail("denied permission still saved");
+          if (note.indexOf("blocked") === -1) fail("denied permission was not explained");
+        }
+        if (mode === "push-blocked") {
+          if (post) fail("blocked subscribe still saved");
+          if (note.indexOf("blocked") === -1) fail("subscribe refusal was not explained");
+        }
+        if (mode === "push-save") {
+          if (!post) fail("subscription was not posted");
+          const type = post.options.headers && post.options.headers["Content-Type"];
+          if (!type || type.indexOf("application/json") !== 0) fail("subscription was not sent as json");
+          const body = JSON.parse(post.options.body);
+          if (body.endpoint !== PUSH_ENDPOINT || body.p256dh !== "p256-dummy" || body.auth !== "auth-dummy") fail("subscription shape");
+          if (body.keys) fail("subscription nested the keys");
+          if (note.indexOf("Subscription saved.") === -1) fail("save was not confirmed");
+        }
+        if (mode === "push-http") {
+          if (!post) fail("http failure never posted");
+          if (note.indexOf("HTTP 400") === -1 || note.indexOf("did not save") === -1) fail("http save failure was not explained");
+        }
+        if (mode === "push-offline") {
+          if (note.indexOf("could not be reached") === -1) fail("offline save was not explained");
+          if (note.indexOf("did not create") !== -1) fail("offline save looked like a phone failure");
+        }
+        process.exit(0);
+      }, 40);
+    }, 20);
+  }, 20);
+}
+
 if (mode === "sw") {
   const opened = [];
   const deleted = [];
@@ -384,7 +521,7 @@ if (mode === "sw") {
     caches: {
       open(name) { opened.push(name); return Promise.resolve({ put() {} }); },
       match() { return Promise.resolve(undefined); },
-      keys() { return Promise.resolve(["desk-shell-v1", "desk-shell-v2"]); },
+      keys() { return Promise.resolve(["desk-shell-v1", "desk-shell-v2", "desk-shell-v3"]); },
       delete(name) { deleted.push(name); return Promise.resolve(true); },
     },
     self: null,
@@ -422,8 +559,8 @@ if (mode === "sw") {
   let waited = null;
   activate({ waitUntil(work) { waited = work; } });
   Promise.resolve(waited).then(function () {
-    if (deleted.indexOf("desk-shell-v1") === -1) fail("old shell cache was kept");
-    if (deleted.indexOf("desk-shell-v2") !== -1) fail("current shell cache was deleted");
+    if (deleted.indexOf("desk-shell-v1") === -1 || deleted.indexOf("desk-shell-v2") === -1) fail("old shell cache was kept");
+    if (deleted.indexOf("desk-shell-v3") !== -1) fail("current shell cache was deleted");
     if (!claimed) fail("new worker did not claim the page");
     process.exit(0);
   }).catch(function (error) {

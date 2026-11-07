@@ -1,5 +1,5 @@
 /* App shell only. Authenticated responses and token URLs are never cached. */
-var SHELL = "desk-shell-v2";
+var SHELL = "desk-shell-v3";
 
 function deskCacheAllowed(request) {
   var url;

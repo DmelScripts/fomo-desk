@@ -22,6 +22,9 @@
     loginPending: false,
     workerWatch: false,
     reloaded: false,
+    pushBusy: false,
+    pushKey: null,
+    pushKeyLoading: false,
     timer: 0,
     searchTimer: 0,
     stream: null,
@@ -247,6 +250,7 @@
   function call(path, options) {
     var opts = options || {};
     var headers = { Accept: "application/json" };
+    if (opts.body) headers["Content-Type"] = "application/json";
     if (state.token) headers.Authorization = "Bearer " + state.token;
     return fetch(path, {
       method: opts.method || "GET",
@@ -952,48 +956,179 @@
     button.type = "button";
     button.addEventListener("click", enablePush);
     node.appendChild(button);
-    node.appendChild(el("p", "Saving a subscription does not send notifications yet.", "muted"));
+    node.appendChild(el("p", "Tap once. This phone will ask to allow notifications.", "muted"));
+    loadPushKey();
+  }
+
+  function loadPushKey() {
+    if (state.pushKey || state.pushKeyLoading) return;
+    state.pushKeyLoading = true;
+    fetch("/vapid_public.txt", { cache: "no-store" }).then(function (res) {
+      if (!res.ok) throw new Error("http");
+      return res.text();
+    }).then(function (raw) {
+      var key = urlBase64ToUint8Array(String(raw || "").replace(/^\s+|\s+$/g, ""));
+      if (key.length !== 65 || key[0] !== 4) throw new Error("shape");
+      state.pushKey = key;
+    }).catch(function () {
+      state.pushKey = null;
+      if ($("account-note")) $("account-note").textContent = "This desk has no usable notification key.";
+    }).then(function () {
+      state.pushKeyLoading = false;
+    });
   }
 
   function enablePush() {
-    if (!("serviceWorker" in navigator) || !("PushManager" in root)) {
+    if (state.pushBusy) return;
+    if (!("serviceWorker" in navigator) || !("PushManager" in root) || !root.Notification) {
       $("account-note").textContent = "This browser cannot subscribe to notifications.";
       return;
     }
-    navigator.serviceWorker.register("/sw.js").then(function () {
-      return Notification.requestPermission();
-    }).then(function (permission) {
+    if (!state.pushKey) {
+      $("account-note").textContent = "The notification key is not on this phone yet. Tap Enable once more.";
+      loadPushKey();
+      return;
+    }
+    state.pushBusy = true;
+    var permissionNow = root.Notification.permission;
+    var asked = permissionNow === "granted"
+      ? Promise.resolve("granted")
+      : root.Notification.requestPermission();
+    var ready = workerReady();
+    asked.then(function (permission) {
       if (permission !== "granted") {
-        $("account-note").textContent = "Notifications are blocked.";
+        state.pushBusy = false;
+        $("account-note").textContent = permission === "denied"
+          ? "Notifications are blocked."
+          : "Notifications were not allowed.";
         return null;
       }
-      return fetch("/vapid_public.txt", { cache: "no-store" }).then(function (res) { return res.text(); });
-    }).then(function (raw) {
-      if (!raw) return null;
-      var key = urlBase64ToUint8Array(raw.trim());
-      return navigator.serviceWorker.ready.then(function (reg) {
-        return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      return ready;
+    }).then(function (reg) {
+      if (!reg) return null;
+      return reg.pushManager.getSubscription().then(function (existing) {
+        if (existing) return existing;
+        return reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: state.pushKey,
+        });
       });
     }).then(function (sub) {
       if (!sub) return null;
-      var json = sub.toJSON();
-      return call("/api/push", {
-        method: "POST",
-        body: {
-          endpoint: json.endpoint,
-          p256dh: json.keys && json.keys.p256dh,
-          auth: json.keys && json.keys.auth,
-        },
+      var keys = subscriptionKeys(sub);
+      if (!keys.endpoint || !keys.p256dh || !keys.auth) {
+        var shape = new Error("shape");
+        shape.name = "DataError";
+        throw shape;
+      }
+      return call("/api/push", { method: "POST", body: keys }).then(function (body) {
+        return body;
+      }).catch(function (error) {
+        if (error) error.stage = "save";
+        throw error;
       });
     }).then(function (body) {
-      if (body && body.ok) {
-        var ready = state.account && state.account.integrations && state.account.integrations.web_push && state.account.integrations.web_push.ready;
-        $("account-note").textContent = ready ? "Subscription saved." : "Subscription saved. Sending stays off until web push is configured.";
-      }
+      state.pushBusy = false;
+      if (!body || !body.ok) return;
+      var known = state.account && state.account.integrations && state.account.integrations.web_push;
+      $("account-note").textContent = known && !known.ready
+        ? "Subscription saved. Sending stays off until web push is configured."
+        : "Subscription saved.";
     }).catch(function (error) {
-      if (error && error.auth) return;
-      $("account-note").textContent = "The subscription was not saved.";
+      state.pushBusy = false;
+      pushNote(error);
     });
+  }
+
+  function workerReady() {
+    return new Promise(function (resolve, reject) {
+      var worker = navigator.serviceWorker;
+      if (!worker || !worker.ready) {
+        var missing = new Error("worker");
+        missing.name = "InvalidStateError";
+        reject(missing);
+        return;
+      }
+      var settled = false;
+      var timer = root.setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        var late = new Error("worker");
+        late.name = "InvalidStateError";
+        reject(late);
+      }, 4000);
+      worker.ready.then(function (reg) {
+        if (settled) return;
+        settled = true;
+        root.clearTimeout(timer);
+        resolve(reg);
+      }).catch(function () {
+        if (settled) return;
+        settled = true;
+        root.clearTimeout(timer);
+        var failed = new Error("worker");
+        failed.name = "InvalidStateError";
+        reject(failed);
+      });
+    });
+  }
+
+  function subscriptionKeys(sub) {
+    var json = {};
+    try { json = sub && sub.toJSON ? sub.toJSON() : {}; } catch (error) { json = {}; }
+    var endpoint = (json && json.endpoint) || (sub && sub.endpoint) || "";
+    var p256dh = json && json.keys ? json.keys.p256dh : "";
+    var auth = json && json.keys ? json.keys.auth : "";
+    if ((!p256dh || !auth) && sub && sub.getKey) {
+      try {
+        var pub = sub.getKey("p256dh");
+        var secret = sub.getKey("auth");
+        if (pub) p256dh = bytesToUrlBase64(pub);
+        if (secret) auth = bytesToUrlBase64(secret);
+      } catch (error) { /* keep the json keys */ }
+    }
+    return { endpoint: String(endpoint || ""), p256dh: String(p256dh || ""), auth: String(auth || "") };
+  }
+
+  function bytesToUrlBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = "";
+    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return root.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function pushNote(error) {
+    if (!error || error.auth) return;
+    if (error.stage === "save") {
+      if (typeof error.status === "number") {
+        $("account-note").textContent = "The phone created a subscription, but the desk did not save it (HTTP " + error.status + ").";
+        return;
+      }
+      $("account-note").textContent = "The phone created a subscription, but the desk could not be reached.";
+      return;
+    }
+    var name = error.name && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "";
+    if (name === "NotAllowedError") {
+      $("account-note").textContent = "Notifications are blocked. Tap Enable once from this home screen app.";
+      return;
+    }
+    if (name === "InvalidStateError") {
+      $("account-note").textContent = "The notification worker is not active yet. Leave the app, open the icon, and tap Enable once.";
+      return;
+    }
+    if (name === "AbortError") {
+      $("account-note").textContent = "The phone cancelled the subscription. Tap Enable once more.";
+      return;
+    }
+    if (name === "InvalidAccessError" || name === "DataError") {
+      $("account-note").textContent = "The phone rejected the notification key.";
+      return;
+    }
+    if (name) {
+      $("account-note").textContent = "The phone did not create a subscription (" + name + ").";
+      return;
+    }
+    $("account-note").textContent = "The subscription was not saved.";
   }
 
   function urlBase64ToUint8Array(value) {
@@ -1364,6 +1499,9 @@
   }
 
   root.Desk.loginWithPaste = loginWithPaste;
+  root.Desk.loadPushKey = loadPushKey;
+  root.Desk.enablePush = enablePush;
+  root.Desk.subscriptionKeys = subscriptionKeys;
 
   function bind() {
     if (state.bound) return;

@@ -962,8 +962,18 @@ def mode(request: Request, body: dict) -> dict:
 
 
 @router.post("/api/push")
-def push(request: Request, body: dict) -> dict:
+async def push(request: Request) -> dict:
+    """Save one phone. The body is a JSON object even if the browser labeled it text."""
     require_app_token(request)
+    raw = await request.body()
+    if len(raw) > 4000:
+        raise HTTPException(status_code=400, detail="endpoint, p256dh, and auth are required")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="endpoint, p256dh, and auth are required")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="endpoint, p256dh, and auth are required")
     endpoint = str(body.get("endpoint") or "")
     p256dh = body.get("p256dh")
     auth = body.get("auth")

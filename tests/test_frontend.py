@@ -67,9 +67,10 @@ class TestFrontend(unittest.TestCase):
         self.assertNotIn("dummy-app-token", script.text)
         worker = client.get("/sw.js")
         self.assertEqual(worker.headers.get("cache-control"), "no-cache")
-        self.assertIn("desk-shell-v2", worker.text)
+        self.assertIn("desk-shell-v3", worker.text)
         self.assertIn("caches.delete", worker.text)
         self.assertNotIn("desk-shell-v1", worker.text)
+        self.assertNotIn("desk-shell-v2", worker.text)
         manifest = client.get("/manifest.json")
         self.assertEqual(manifest.status_code, 200)
         self.assertEqual(manifest.headers.get("cache-control"), "no-cache")
@@ -87,6 +88,11 @@ class TestFrontend(unittest.TestCase):
         self._node("paste-500")
         self._node("paste-network")
         self._node("paste-reject")
+        self._node("push-save")
+        self._node("push-denied")
+        self._node("push-blocked")
+        self._node("push-http")
+        self._node("push-offline")
 
     def _node(self, mode: str):
         binary = NODE if NODE and Path(NODE).exists() else shutil.which("node")
