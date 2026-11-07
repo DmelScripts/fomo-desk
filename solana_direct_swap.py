@@ -692,17 +692,32 @@ def apply_read_tail(public: dict, tail: dict) -> dict:
     )
     pool_ok = bool(public.get("byte_checks_passed") and fees["pool_fee_within_micro_cap"] and fees["pool_exposure_within_micro_cap"] and height_ok)
     public["technical_ok"] = pool_ok
-    public["usd_cap_ok"] = False
-    public["usd_source"] = "unapproved"
-    public["fee_cap_ok"] = False
-    public["exposure_cap_ok"] = False
-    public["ok"] = False
+    import spend_policy
+    import usdc_valuation
+    source = spend_policy.usd_source()
+    limits = usdc_valuation.within_limits(
+        fees["fee_micro_usdc"], fees["marginal_micro_usdc"], fees["exposure_micro_usdc"], source,
+    ) if source.get("approved") else {"ok": False, "reason": source.get("reason")}
+    public["usd_source"] = source.get("source")
+    public["usd_reason"] = source.get("reason")
+    public["accepted_band"] = None
+    public["usd_cap_ok"] = limits.get("ok") is True
+    public["fee_cap_ok"] = limits.get("fee_ok") is True
+    public["exposure_cap_ok"] = limits.get("exposure_ok") is True and limits.get("ticket_ok") is True
+    public["fee_usd"] = limits.get("fee_usd")
+    public["ticket_usd_ceiling"] = limits.get("ticket_usd")
+    public["exposure_usd_ceiling"] = limits.get("exposure_usd")
+    public["ok"] = pool_ok and public["usd_cap_ok"]
     if not height_ok:
         public["reason"] = "blockhash_expired"
     elif not fees["pool_fee_within_micro_cap"] or not fees["pool_exposure_within_micro_cap"]:
         public["reason"] = "cap"
-    elif pool_ok:
-        public["reason"] = "usd_source_unapproved"
+    elif not source.get("approved"):
+        public["reason"] = source.get("reason") or "usd_source_unapproved"
+    elif not public["usd_cap_ok"]:
+        public["reason"] = "cap"
+    else:
+        public["reason"] = None
     return public
 
 

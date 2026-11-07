@@ -94,7 +94,7 @@ class FakeTransport:
         self.valid = valid
         self.sim_err = sim_err
         self.drop = drop
-        self.tip = slot if tip is None else tip
+        self.tip = slot + 1 if tip is None else tip
         self.payloads = []
         self.statuses = None
         self.transaction = None

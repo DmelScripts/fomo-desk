@@ -23,7 +23,7 @@ SIZE = Decimal("8.00")
 FX_MAX_AGE_S = 120
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 OBSERVED_QUOTE_ID = "e09cf162-9f00-40fa-9c36-0714a7c5fa94"
-_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown", "confirmed"}
+_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown", "confirmed", "exit_planned"}
 MANUAL_STATEMENT = "Manually reconcile this unknown chain submit without resubmitting."
 CHAIN_STATUS = None
 _DONE = {"sim_closed", "released", "rejected", "halted"}
@@ -325,7 +325,8 @@ def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: 
     stored["chain_submit"] = True
     stored["confirmed"] = True
     stored["acquired_raw"] = choice["exit_raw"]
-    stored["exit_raw"] = choice["exit_raw"]
+    stored["exit_raw"] = None
+    stored["ata_balance"] = proof.get("ata_balance")
     stored["signature"] = signature
     stored["block_height"] = block_height
     stored["fill"] = "chain_status"
@@ -356,7 +357,7 @@ def _proof_matches(proof, block_height: int) -> bool:
         return False
     if proof.get("err") is not None or proof.get("confirmation_status") != "finalized":
         return False
-    if proof.get("block_height") != block_height:
+    if proof.get("block_height") is not None and proof.get("block_height") != block_height:
         return False
     if proof.get("network") != "solana:mainnet":
         return False

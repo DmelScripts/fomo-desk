@@ -41,6 +41,9 @@ def target() -> dict:
         "daily_reset": False,
         "refill": False,
         "guaranteed_loss_limit": False,
+        "new_entries_stop_once_realized_reaches": format(MAX_CUMULATIVE_LOSS_USD, "f"),
+        "open_exposure_is_not_realized_loss": True,
+        "an_open_trade_can_realize_past_the_stop": True,
         "recorded": False,
         "approved": False,
     }
@@ -112,13 +115,20 @@ def store_aggregate_loss(max_loss_usd: str) -> dict:
 
 
 def usd_source() -> dict:
-    """Pool micro-USDC is not an approved USD quote. No band is invented here."""
+    """USDC/USD only when a configured quote is usable. Pool micro-USDC is not USD."""
+    import usdc_valuation
+    quote = usdc_valuation.current()
     return {
-        "approved": False,
-        "source": None,
+        "approved": quote.get("approved") is True,
+        "usable": quote.get("usable") is True,
+        "source": quote.get("source"),
         "accepted_band": None,
-        "reason": "usd_source_unapproved",
+        "reason": quote.get("reason"),
         "pool_micro_usdc_is_usd": False,
+        "confidence": quote.get("confidence"),
+        "feed_id": quote.get("feed_id"),
+        "upper": quote.get("upper"),
+        "lower": quote.get("lower"),
     }
 
 

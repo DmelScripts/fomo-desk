@@ -172,13 +172,22 @@ def load_bundle(rpc: ReadRpc, expected_slot: int | None = None) -> dict:
         tip = rpc.call("getSlot", [{"commitment": "confirmed", "minContextSlot": slot}])
     except RpcError as exc:
         return failed | {"reason": exc.reason, "context_slot": slot}
-    if isinstance(tip, bool) or not isinstance(tip, int) or tip != slot:
-        return failed | {"reason": "slot_lag", "context_slot": slot, "tip_slot": tip if isinstance(tip, int) else None, "fetched": True}
+    # 150 slots is the protocol recent-blockhash lifetime, not a price band.
+    # tip == batch from this same node is an echo, not proof the slot advanced.
+    if isinstance(tip, bool) or not isinstance(tip, int):
+        return failed | {"reason": "slot_unproven", "context_slot": slot, "fetched": True, "independent_slot_time_proven": False}
+    lag = tip - slot
+    if lag == 0:
+        return failed | {"reason": "slot_echo", "context_slot": slot, "tip_slot": tip, "fetched": True, "independent_slot_time_proven": False}
+    if lag < 0 or lag > 150:
+        return failed | {"reason": "slot_lag", "context_slot": slot, "tip_slot": tip, "fetched": True, "independent_slot_time_proven": False}
     fetched["rent_lamports"] = rent
     fetched["genesis"] = genesis
     fetched["fetched_at"] = fetched_at
     fetched["tip_slot"] = tip
+    fetched["slot_lag"] = lag
     fetched["slot_is_ttl"] = False
+    fetched["independent_slot_time_proven"] = False
     return fetched
 
 
@@ -296,12 +305,12 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
 
 
 def _usdc_delta(meta: dict, decoded) -> int | None:
-    """Post minus pre for the wallet's USDC. The post balance itself is not the fill."""
+    """Post minus pre. A missing pre row is not treated as a zero starting balance."""
     pre = _token_amount(meta.get("preTokenBalances"), decoded, solana_tx.USDC_MINT)
     post = _token_amount(meta.get("postTokenBalances"), decoded, solana_tx.USDC_MINT)
-    if post is None:
+    if pre is None or post is None:
         return None
-    return post - (pre or 0)
+    return post - pre
 
 
 def _token_amount(rows, decoded, mint: str) -> int | None:

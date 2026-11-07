@@ -141,3 +141,6 @@ class ReadRpcTests(unittest.TestCase):
         self.assertNotEqual(wrong["network_fee_lamports"], prepared["network_fee_lamports"])
         missing_owner = solana_read_rpc._bind_receipt(signature, status, transaction(6000, pre + acquired, owner=None))
         self.assertIsNone(missing_owner["acquired_raw"])
+        no_pre = transaction(6000, pre + acquired)
+        no_pre["meta"]["preTokenBalances"] = []
+        self.assertIsNone(solana_read_rpc._bind_receipt(signature, status, no_pre)["acquired_raw"])
