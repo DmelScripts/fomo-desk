@@ -36,13 +36,18 @@ _BLOCKED = {
 
 
 def public_status() -> dict:
+    auth = _auth_view()
     return {
         "authority": "PAPER",
         "live_ready": False,
         "send": False,
         "executable": False,
         "transport": phantom_transport.TRANSPORT,
-        "auth": _auth_label(),
+        "auth": auth["auth_flow"],
+        "auth_evidence": auth["evidence"],
+        "cached_match": auth["cached_match"],
+        "execution_transport": "unimplemented",
+        "readonly_quote_is_execution": False,
         "package": phantom_transport.PINNED_PACKAGE,
         "cli": phantom_transport.PINNED_CLI,
         "bankroll_usd": "100.00",
@@ -62,9 +67,9 @@ def public_status() -> dict:
     }
 
 
-def _auth_label() -> str:
+def _auth_view() -> dict:
     import phantom_auth
-    return phantom_auth.account_view()["auth_flow"]
+    return phantom_auth.account_view()
 
 
 def halted() -> bool:

@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import db
+import phantom_auth
 import phantom_runner
 import phantom_transport
 from tests.support import temp_desk_env
@@ -55,6 +56,8 @@ class TestPhantomRunner(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
         self.addCleanup(lambda: os.environ.pop("DESK_PHANTOM_PAPER", None))
         db.init_db()
+        phantom_auth.reset_for_tests()
+        self.addCleanup(phantom_auth.reset_for_tests)
         db.set_setting("mode", "PAPER", "test")
         db.set_setting("agents_enabled", "0", "test")
         phantom_runner.set_halt({"halted": False})

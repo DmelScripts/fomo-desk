@@ -31,6 +31,9 @@ APPROVAL_PATH = "/device-connect"
 _URL = re.compile(r"https://[^\s\x1b\"'<>]+")
 _CODE = re.compile(r"Code:\s*([A-Za-z0-9-]{4,64})")
 _LOCK = threading.Lock()
+_IDENTITY = {"observed", "mismatch", "auth_error", "unable_to_verify"}
+_SOURCES = {"addresses", "balance", "quote"}
+_EVIDENCE_KEY = "auth_evidence"
 _FLOW: dict = {
     "state": "idle",
     "approval_url": None,
@@ -39,23 +42,67 @@ _FLOW: dict = {
     "observed_wallet_id": None,
     "observed_wallet": None,
     "process": None,
+    "evidence_fresh": False,
 }
 
 
 def account_view() -> dict:
+    """Report auth evidence. A cached match is not a fresh check or live authority."""
     with _LOCK:
         state = _FLOW["state"]
+        observed_id = _FLOW["observed_wallet_id"]
+        observed_wallet = _FLOW["observed_wallet"]
+        matches = _matches()
+    cached = _cached_evidence() if state == "idle" else None
+    if state == "idle" and cached:
+        auth_flow = "cached_" + cached["state"]
+        evidence = "cached"
+        cached_match = cached["state"] == "observed"
+        matches = None
+        observed_id = None
+        observed_wallet = None
+    elif state == "idle":
+        auth_flow = phantom_transport.AUTH
+        evidence = "none"
+        cached_match = None
+    else:
+        auth_flow = state
+        evidence = "fresh" if state in _IDENTITY else "process"
+        cached_match = None
     return {
-        "auth_flow": state if state != "idle" else phantom_transport.AUTH,
+        "auth_flow": auth_flow,
+        "evidence": evidence,
+        "cached_match": cached_match,
         "live_ready": False,
         "executable": False,
         "send": False,
-        "observed_wallet_id": _FLOW["observed_wallet_id"],
-        "observed_wallet": _FLOW["observed_wallet"],
-        "matches_allowlist": _matches(),
+        "transport": phantom_transport.TRANSPORT,
+        "execution_transport": "unimplemented",
+        "observed_wallet_id": observed_id,
+        "observed_wallet": observed_wallet,
+        "matches_allowlist": matches,
         "required_wallet_id": phantom_transport.REQUIRED_WALLET_ID,
         "required_wallet": phantom_transport.REQUIRED_WALLET,
     }
+
+
+def note_evidence(state: str, source: str) -> None:
+    """Remember a read-only identity result. This does not start a login."""
+    if state not in {"observed", "mismatch", "auth_error"} or source not in {"balance", "quote"}:
+        return
+    with _LOCK:
+        _FLOW["state"] = state
+        _FLOW["evidence_fresh"] = True
+        _FLOW["approval_url"] = None
+        _FLOW["user_code"] = None
+        _FLOW["verify"] = None
+        if state == "observed":
+            _FLOW["observed_wallet_id"] = phantom_transport.REQUIRED_WALLET_ID
+            _FLOW["observed_wallet"] = phantom_transport.REQUIRED_WALLET
+        else:
+            _FLOW["observed_wallet_id"] = None
+            _FLOW["observed_wallet"] = None
+    _persist_evidence(state, source)
 
 
 def public_login() -> dict:
@@ -291,6 +338,9 @@ def _apply_classification(result: dict) -> None:
             _FLOW["observed_wallet_id"] = None
             _FLOW["observed_wallet"] = None
         _FLOW["state"] = result["state"]
+        _FLOW["evidence_fresh"] = result["state"] in _IDENTITY
+    if result["state"] in _IDENTITY:
+        _persist_evidence(result["state"], "addresses")
     log.info("phantom login %s", result["state"])
 
 
@@ -447,6 +497,39 @@ def _auth_text(text: str) -> bool:
     )
 
 
+def _persist_evidence(state: str, source: str) -> None:
+    if state not in _IDENTITY or source not in _SOURCES:
+        return
+    payload = json.dumps(
+        {"state": state, "source": source, "at": round(time.time(), 3)},
+        separators=(",", ":"),
+    )
+    db.execute(
+        """
+        INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (_EVIDENCE_KEY, payload, time.time()),
+    )
+
+
+def _cached_evidence() -> dict | None:
+    rows = db.query("SELECT value FROM phantom_control WHERE key = ?", (_EVIDENCE_KEY,))
+    if not rows:
+        return None
+    try:
+        body = json.loads(rows[0]["value"])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict) or set(body) != {"state", "source", "at"}:
+        return None
+    if body["state"] not in _IDENTITY or body["source"] not in _SOURCES:
+        return None
+    if isinstance(body["at"], bool) or not isinstance(body["at"], (int, float)):
+        return None
+    return {"state": body["state"], "source": body["source"], "at": body["at"]}
+
+
 def _matches():
     if _FLOW["state"] not in {"observed", "mismatch"}:
         return None
@@ -546,5 +629,6 @@ def reset_for_tests() -> None:
             "observed_wallet": None,
             "process": None,
             "verify": None,
+            "evidence_fresh": False,
         })
     _kill(proc)

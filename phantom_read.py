@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
+from decimal import Decimal
 
 import phantom_auth
 import phantom_transport
@@ -26,11 +28,14 @@ _DROP = {
     "accesstoken", "logouri",
 }
 _EXPIRY = {"expiry", "expiresAt", "expires_at", "validUntil", "valid_until"}
+_DECIMAL = re.compile(r"^(?:0|[1-9][0-9]{0,39})(?:\.[0-9]{1,20})?$")
 
 
 def balance() -> dict:
     text, code = _run(["wallet", "balances", "--networks", "solana", "--format", "json"])
-    return _balance(text, code)
+    result = _balance(text, code)
+    _remember(result["status"], "balance")
+    return result
 
 
 def quote() -> dict:
@@ -51,7 +56,9 @@ def quote() -> dict:
         "--wallet-id", phantom_transport.REQUIRED_WALLET_ID,
         "--format", "json",
     ])
-    return _quote(text, code)
+    result = _quote(text, code)
+    _remember(result["status"], "quote")
+    return result
 
 
 def _run(args: list[str]) -> tuple[str, int]:
@@ -113,12 +120,14 @@ def _balance(text: str, code: int) -> dict:
             ),
             None,
         )
-        if isinstance(matched, str) and matched:
-            own.append({
-                "symbol": cleaned.get("symbol") if isinstance(cleaned.get("symbol"), str) else None,
-                "total_quantity": matched[:40],
-                "spam_status": cleaned.get("spamStatus") if isinstance(cleaned.get("spamStatus"), str) else None,
-            })
+        if phantom_transport.REQUIRED_WALLET in addresses:
+            quantity = _exact_amount(matched)
+            if quantity:
+                own.append({
+                    "symbol": cleaned.get("symbol") if isinstance(cleaned.get("symbol"), str) else None,
+                    "total_quantity": quantity,
+                    "spam_status": cleaned.get("spamStatus") if isinstance(cleaned.get("spamStatus"), str) else None,
+                })
         elif addresses:
             other = True
     if not own and other:
@@ -194,8 +203,39 @@ def _quote(text: str, code: int) -> dict:
     base["sell"] = "native"
     base["buy_mint"] = USDC
     base["sell_amount"] = SELL_AMOUNT
+    base["buy_amount"] = _buy_base(response)
     base["buy_decimals"] = decimals
     return base
+
+
+def _remember(status: str, source: str) -> None:
+    if status in {"observed", "mismatch", "auth_error"}:
+        phantom_auth.note_evidence(status, source)
+
+
+def _exact_amount(value) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, int) and not isinstance(value, bool):
+        text = str(value)
+    else:
+        return None
+    if not _DECIMAL.fullmatch(text):
+        return None
+    try:
+        number = Decimal(text)
+    except Exception:
+        return None
+    if not number.is_finite() or number <= 0:
+        return None
+    return text
+
+
+def _buy_base(response: dict) -> str | None:
+    quotes = response.get("quotes")
+    if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
+        return None
+    return _exact_amount(quotes[0].get("buyAmount"))
 
 
 def _base() -> dict:

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import db
+import phantom_auth
 import phantom_read
 import phantom_transport
 from tests.support import temp_desk_env
@@ -39,6 +40,10 @@ if [ "$1" = "wallet" ]; then
     echo "Failed to get wallet addresses: status code 401" >&2
     exit 1
   fi
+  if [ "$mode" = "empty" ]; then
+    echo '{"items":[]}'
+    exit 0
+  fi
   if [ "$mode" = "other" ]; then
     echo '{"items":[{"symbol":"SOL","totalQuantityString":"1","spamStatus":"VERIFIED","logoUri":"https://cdn.example/secret","queriedWalletBalances":[{"address":"GLmLe3gpVw87nSeA8YY93megzW6gDSeavHys3BKQ61fh","quantityString":"1"}]}]}'
     exit 0
@@ -59,7 +64,7 @@ if [ "$1" = "buy" ]; then
     echo "upstream unavailable" >&2
     exit 1
   fi
-  echo '{"quoteRequest":{"taker":{"chainId":"solana:101","resourceType":"address","address":"'"$WALLET"'"},"buyToken":{"chainId":"solana:101","resourceType":"address","address":"'"$USDC"'"},"sellToken":{"chainId":"solana:101","resourceType":"nativeToken","slip44":"501"},"sellAmount":"10000000","base64EncodedTx":false,"execute":false},"quoteResponse":{"quotes":[{"quoteId":"pq-new","sellAmount":"10000000","buyAmount":"1","transactionData":"TXDATA-DO-NOT-STORE"}]}}'
+  echo '{"quoteRequest":{"taker":{"chainId":"solana:101","resourceType":"address","address":"'"$WALLET"'"},"buyToken":{"chainId":"solana:101","resourceType":"address","address":"'"$USDC"'"},"sellToken":{"chainId":"solana:101","resourceType":"nativeToken","slip44":"501"},"sellAmount":"10000000","base64EncodedTx":false,"execute":false},"quoteResponse":{"quotes":[{"quoteId":"pq-new","sellAmount":"10000000","buyAmount":"891179","fees":[{"amount":"7640"}],"transactionData":"TXDATA-DO-NOT-STORE"}]}}'
   exit 0
 fi
 exit 2
@@ -75,6 +80,8 @@ exit 2
         self.addCleanup(lambda: os.environ.pop("DESK_PHANTOM_BIN", None))
         self.addCleanup(lambda: os.environ.pop("DESK_PHANTOM_HOME", None))
         db.init_db()
+        phantom_auth.reset_for_tests()
+        self.addCleanup(phantom_auth.reset_for_tests)
         db.set_setting("mode", "PAPER", "test")
         db.set_setting("agents_enabled", "0", "test")
         import server
@@ -133,7 +140,10 @@ exit 2
         self.assertEqual(body["sell"], "native")
         self.assertEqual(body["buy_mint"], USDC)
         self.assertEqual(body["sell_amount"], "10000000")
+        self.assertEqual(body["buy_amount"], "891179")
         self.assertIsNone(body["buy_decimals"])
+        self.assertNotIn("usd", shown.text.lower())
+        self.assertNotIn("7640", shown.text)
         self.assertTrue(body["transaction_material_omitted"])
         self.assertNotIn("TXDATA-DO-NOT-STORE", shown.text)
         args = self._args().splitlines()
@@ -241,6 +251,101 @@ exit 2
         self.assertEqual(down["status"], "unable_to_verify")
         self.assertNotIn("upstream", json.dumps(down))
         self.assertNotIn("login", self._args())
+
+    def test_restart_keeps_cached_auth_and_failures_stay_closed(self):
+        shown = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(shown["items"][0]["total_quantity"], "1000000000")
+        self.assertIsInstance(shown["items"][0]["total_quantity"], str)
+        account = self.client.get("/api/account", headers=AUTH).json()["phantom"]
+        self.assertEqual(account["auth"], "observed")
+        self.assertEqual(account["auth_evidence"], "fresh")
+        self.assertTrue(account["cached_match"] is None)
+        self.assertEqual(account["transport"], "BLOCKED")
+        self.assertEqual(account["execution_transport"], "unimplemented")
+        self.assertFalse(account["readonly_quote_is_execution"])
+        self.assertFalse(account["live_ready"])
+        self.assertFalse(account["executable"])
+        self.assertFalse(account["send"])
+        self.assertEqual(account["loss_policy"], "not_approved")
+        stored = self._evidence()
+        self.assertEqual(set(stored), {"state", "source", "at"})
+        self.assertEqual(stored["state"], "observed")
+        self.assertEqual(stored["source"], "balance")
+        self.assertNotIn("1000000000", json.dumps(stored))
+        (self.home / "mode").write_text("empty", encoding="utf-8")
+        empty = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(empty["status"], "unable_to_verify")
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "observed")
+        phantom_auth.reset_for_tests()
+        restarted = self.client.get("/api/account", headers=AUTH).json()["phantom"]
+        self.assertEqual(restarted["auth"], "cached_observed")
+        self.assertEqual(restarted["auth_evidence"], "cached")
+        self.assertTrue(restarted["cached_match"])
+        self.assertFalse(restarted["live_ready"])
+        self.assertEqual(restarted["transport"], "BLOCKED")
+        self.assertEqual(restarted["execution_transport"], "unimplemented")
+        self.assertNotEqual(restarted["auth"], "AWAITING_OWNER_AUTH_PROCEDURE")
+        (self.home / "mode").write_text("auth", encoding="utf-8")
+        failed = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(failed["status"], "auth_error")
+        self.assertNotIn("login", self._args())
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "auth_error")
+        self.assertFalse(phantom_auth.account_view()["matches_allowlist"])
+        phantom_auth.reset_for_tests()
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "cached_auth_error")
+        self.assertFalse(phantom_auth.account_view()["cached_match"])
+        (self.home / "mode").write_text("other", encoding="utf-8")
+        other = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(other["status"], "mismatch")
+        self.assertEqual(phantom_transport.REQUIRED_WALLET, WALLET)
+        self.assertNotIn(OLD, self._evidence_text())
+        phantom_auth.reset_for_tests()
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "cached_mismatch")
+        self.assertIsNone(phantom_auth.account_view()["observed_wallet"])
+        missing = phantom_auth._classify(json.dumps({"walletId": WALLET_ID}), 0)
+        phantom_auth._apply_classification(missing)
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "unable_to_verify")
+        self.assertNotEqual(phantom_auth.account_view()["auth_flow"], "mismatch")
+        phantom_auth.reset_for_tests()
+        self.assertEqual(phantom_auth.account_view()["auth_flow"], "cached_unable_to_verify")
+        floated = phantom_read._balance(json.dumps({
+            "items": [{
+                "symbol": "SOL",
+                "spamStatus": "VERIFIED",
+                "totalQuantity": 1.5,
+                "queriedWalletBalances": [{"address": WALLET, "quantity": 1.5, "quantityString": "1.50"}],
+            }],
+        }), 0)
+        self.assertEqual(floated["items"][0]["total_quantity"], "1.50")
+        dropped = phantom_read._balance(json.dumps({
+            "items": [{
+                "symbol": "SOL",
+                "spamStatus": "VERIFIED",
+                "queriedWalletBalances": [{"address": WALLET, "quantity": 1.25}],
+            }],
+        }), 0)
+        self.assertEqual(dropped["status"], "unable_to_verify")
+        priced = phantom_read._quote(json.dumps({
+            "quoteRequest": self._request(),
+            "quoteResponse": {"quotes": [{
+                "quoteId": "pq-amt",
+                "sellAmount": "10000000",
+                "buyAmount": 1.25,
+                "fees": [{"amount": "7640"}],
+            }]},
+        }), 0)
+        self.assertEqual(priced["status"], "observed")
+        self.assertIsNone(priced["buy_amount"])
+        self.assertNotIn("7640", json.dumps(priced))
+        self.assertIsNone(priced["buy_decimals"])
+        self.assertFalse(priced["executable"])
+
+    def _evidence(self) -> dict:
+        return json.loads(self._evidence_text())
+
+    def _evidence_text(self) -> str:
+        rows = db.query("SELECT value FROM phantom_control WHERE key = 'auth_evidence'")
+        return rows[0]["value"]
 
     def _request(self, buy=USDC, decimals=None, base64=False):
         token = {"chainId": "solana:101", "resourceType": "address", "address": buy}
