@@ -89,18 +89,33 @@ class Supervisor:
         self.tasks[name] = asyncio.create_task(self.factories[name]())
         down_min = None if age is None else max(2, int(round(age / 60.0)))
         span = "unknown" if down_min is None else str(down_min)
+        push_text = f"Restarted {name}, down {span} min"
+        event_id = _restart_id(name, now)
+        db.execute(
+            """
+            INSERT INTO restart_events (event_id, agent, down_min, push_text, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (event_id, name, down_min, push_text, now),
+        )
         return {
             "ok": True,
             "restarted": True,
             "agent": name,
             "intended": intended,
             "down_min": down_min,
-            "push_text": f"Restarted {name}, down {span} min",
+            "event_id": event_id,
+            "push_text": push_text,
             "sent": False,
         }
 
 
 supervisor = Supervisor()
+
+
+def _restart_id(name: str, now: float) -> str:
+    import secrets
+    return f"restart-{name}-{int(now)}-{secrets.token_hex(4)}"
 
 
 def _age(name: str, now: float):

@@ -163,6 +163,22 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX IF NOT EXISTS idx_ws_events_ts ON ws_events (ts);
 
+CREATE TABLE IF NOT EXISTS push_outbox (
+    event_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (event_id, endpoint)
+);
+
+CREATE TABLE IF NOT EXISTS restart_events (
+    event_id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    down_min INTEGER,
+    push_text TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_scans_mint_ts ON scans (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_audits_mint_ts ON audits (mint, ts);
@@ -262,6 +278,8 @@ def init_db() -> None:
             conn.execute("PRAGMA user_version=4")
         if version < 5:
             conn.execute("PRAGMA user_version=5")
+        if version < 6:
+            conn.execute("PRAGMA user_version=6")
         conn.commit()
     finally:
         conn.close()

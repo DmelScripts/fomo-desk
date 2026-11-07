@@ -997,6 +997,14 @@ def command(request: Request, body: dict) -> dict:
     return commands.run(text)
 
 
+@router.post("/api/notify")
+def notify(request: Request, body: dict) -> dict:
+    """Owner delivery for a saved report, a verified restart, or one labelled check."""
+    require_app_token(request)
+    from notify import send
+    return send(body)
+
+
 @router.post("/api/push/test")
 def push_test(request: Request) -> dict:
     """Owner action. Sends only when web push is configured. The key is not returned."""
