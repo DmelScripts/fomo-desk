@@ -30,6 +30,7 @@ DEX_URL = "https://api.dexscreener.com/tokens/v1/solana/"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 # Bracketed in the agent text, not given their own STEP 10 names.
 WS_SILENT_S = 120
+WS_PING_S = 10
 DEX_BACKOFF_S = 30
 RETRY_GAP_S = 2
 
@@ -397,6 +398,24 @@ class Scanner:
         return await self.desk.http.post_json(db.get_setting("rpc_url"), body)
 
 
+async def migration_silence(ws) -> str:
+    """A quiet socket that answers a ping stays up. A failed ping is a reconnect.
+
+    Only the reconnect is counted toward the hourly alert. Trade streams are
+    not subscribed.
+    """
+    try:
+        pong = await ws.ping()
+        await asyncio.wait_for(pong, timeout=WS_PING_S)
+    except Exception:
+        log.warning("pumpportal ping failed; reconnecting")
+        db.note_ws_reconnect(kind="reconnect")
+        return "reconnect"
+    log.info("pumpportal quiet for %ss; socket still open", WS_SILENT_S)
+    db.note_ws_reconnect(kind="silent")
+    return "stay"
+
+
 async def pumpportal_loop(scanner: Scanner) -> None:
     """One PumpPortal socket for the desk. Trade streams are not subscribed."""
     import websockets
@@ -412,9 +431,9 @@ async def pumpportal_loop(scanner: Scanner) -> None:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=WS_SILENT_S)
                     except asyncio.TimeoutError:
-                        log.warning("pumpportal silent for %ss; reconnecting", WS_SILENT_S)
-                        db.note_ws_reconnect(kind="reconnect")
-                        break
+                        if await migration_silence(ws) == "reconnect":
+                            break
+                        continue
                     try:
                         message = json.loads(raw)
                     except json.JSONDecodeError:

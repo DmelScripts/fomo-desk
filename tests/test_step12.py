@@ -3,6 +3,7 @@ import asyncio
 import os
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -97,6 +98,48 @@ class TestStep12(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(db.get_setting("agents_enabled"), "1")
         db.set_setting("agents_enabled", "0", "test")
+
+    def test_quiet_socket_is_not_a_reconnect(self):
+        import asyncio
+        from agents.scanner import migration_silence
+
+        class Quiet:
+            def __init__(self, ok):
+                self.ok = ok
+                self.pings = 0
+
+            async def ping(self):
+                self.pings += 1
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+                if self.ok:
+                    future.set_result(0.01)
+                else:
+                    future.set_exception(ConnectionError("dead"))
+                return future
+
+        now = 3_000_000.0
+
+        async def run():
+            quiet = Quiet(True)
+            self.assertEqual(await migration_silence(quiet), "stay")
+            self.assertEqual(quiet.pings, 1)
+            dead = Quiet(False)
+            self.assertEqual(await migration_silence(dead), "reconnect")
+
+        asyncio.run(run())
+        db.execute("UPDATE ws_events SET ts = ? WHERE kind = 'silent'", (now,))
+        db.execute("UPDATE ws_events SET ts = ? WHERE kind = 'reconnect'", (now,))
+        body = diagnose(now)
+        self.assertEqual(body["websocket"]["reconnects_trailing_hour"], 1)
+        self.assertFalse(body["websocket"]["alert"])
+        for _ in range(11):
+            db.note_ws_reconnect(now, kind="silent")
+        self.assertFalse(diagnose(now)["websocket"]["alert"])
+        source = (Path(__file__).resolve().parents[1] / "agents" / "scanner.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("subscribeMigration"), 1)
+        self.assertNotIn("subscribeTokenTrade", source)
+        self.assertNotIn("subscribeAccountTrade", source)
 
     def test_reconnects_count_only_the_trailing_hour(self):
         now = 2_000_000.0
