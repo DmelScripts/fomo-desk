@@ -155,8 +155,8 @@ class TestPhantomRunner(unittest.TestCase):
         self.assertFalse(unknown["resubmit"])
         reconciled = self.client.post("/api/phantom/reconcile", headers=AUTH, json={"intent_id": "unknown"})
         self.assertEqual(reconciled.status_code, 200)
-        self.assertEqual(reconciled.json()["reason"], "reconciled_without_resubmit")
-        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'unknown'")[0]["status"], "released")
+        self.assertEqual(reconciled.json()["reason"], "chain_reconciliation_required")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'unknown'")[0]["status"], "submit_unknown")
         os.environ["DESK_PHANTOM_PAPER"] = "0"
         phantom_runner.set_halt({"halted": False})
         auth = phantom_runner.run_intent(self._intent("auth"))
@@ -195,8 +195,10 @@ class TestPhantomRunner(unittest.TestCase):
             (WALLET_ID, WALLET, now, now, now),
         )
         reconciled = phantom_runner.reconcile_unknown({"intent_id": "halt-unknown"})
-        self.assertEqual(reconciled["reason"], "reconciled_without_resubmit")
-        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'halt-unknown'")[0]["status"], "released")
+        self.assertEqual(reconciled["reason"], "chain_reconciliation_required")
+        self.assertFalse(reconciled["reconciled"])
+        self.assertEqual(db.query("SELECT status, reserved_usd FROM phantom_reservations WHERE intent_id = 'halt-unknown'")[0]["status"], "submit_unknown")
+        self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'halt-unknown'")[0]["reserved_usd"], "8.20")
         self.assertTrue(phantom_runner.halted())
 
     def test_cap_survives_restart_and_is_not_daily_turnover(self):
@@ -412,8 +414,12 @@ class TestPhantomRunner(unittest.TestCase):
         blocked = phantom_runner.run_intent(self._intent("needs-room", fee="50.00"))
         self.assertEqual(blocked["reason"], "bankroll")
         phantom_runner.reconcile_unknown({"intent_id": "held-unknown"})
-        self.assertEqual(phantom_runner.allocation()["available_usd"], "95.80")
-        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'held-unknown'")[0]["status"], "released")
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "55.80")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'held-unknown'")[0]["status"], "submit_unknown")
+        db.init_db()
+        repeated = self.client.post("/api/phantom/reconcile", headers=AUTH, json={"intent_id": "held-unknown"})
+        self.assertFalse(repeated.json()["reconciled"])
+        self.assertEqual(phantom_runner.allocation()["available_usd"], "55.80")
 
 class ExitBlocked(phantom_runner.PaperRuntime):
     def quote(self, spec):

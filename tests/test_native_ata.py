@@ -33,7 +33,7 @@ class NativeAtaTests(unittest.TestCase):
     def test_address_matches_the_spl_derivation(self):
         node = subprocess.check_output(["node", "--input-type=module", "-e", """
 import { createRequire } from 'module';
-const require = createRequire('/tmp/phantom-pin/node_modules/@solana/web3.js/package.json');
+const require = createRequire(process.cwd() + '/package.json');
 const { PublicKey } = require('@solana/web3.js');
 const [ata] = PublicKey.findProgramAddressSync([
   new PublicKey('%s').toBuffer(),

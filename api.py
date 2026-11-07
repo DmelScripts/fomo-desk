@@ -1051,6 +1051,32 @@ def phantom_exit_policy_view(request: Request) -> JSONResponse:
     return JSONResponse(view(), headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/phantom/risk-limits")
+def phantom_risk_limits_view(request: Request) -> JSONResponse:
+    """Read separately approved fee/loss limits; this cannot activate trading."""
+    require_app_token(request)
+    from risk_limits import view
+    return JSONResponse(view(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/risk-limits")
+def phantom_risk_limits_set(request: Request, body: dict | None = None) -> JSONResponse:
+    require_app_token(request)
+    from risk_limits import approve, clear
+    if isinstance(body, dict) and set(body) == {"approved"} and body["approved"] is False:
+        result = clear()
+    elif isinstance(body, dict) and body.get("approved") is True and set(body) == {
+        "approved", "max_total_loss_usd", "max_round_trip_fee_usd",
+    }:
+        try:
+            result = approve({key: value for key, value in body.items() if key != "approved"})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        raise HTTPException(status_code=400, detail="explicit approval and both limits are required")
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/phantom/exit-policy")
 def phantom_exit_policy_set(request: Request, body: dict | None = None) -> JSONResponse:
     """Approve or revoke only the stated exit rules. Thresholds are not editable here."""
@@ -1116,7 +1142,7 @@ def phantom_halt(request: Request, body: dict) -> dict:
 
 @router.post("/api/phantom/reconcile")
 def phantom_reconcile(request: Request, body: dict) -> dict:
-    """Close an unknown submit without quoting or sending again."""
+    """Report an unknown submit; retain its funds pending chain evidence."""
     require_app_token(request)
     from phantom_runner import reconcile_unknown
     return reconcile_unknown(body)

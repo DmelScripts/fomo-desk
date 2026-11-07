@@ -35,7 +35,7 @@ def min_amount(amount: int, slippage_bps: int) -> int:
         raise QuoteError("slippage_unbound")
     if not isinstance(amount, int) or not isinstance(slippage_bps, int):
         raise QuoteError("slippage_unbound")
-    if amount <= 0 or not 0 <= slippage_bps <= BPS_DENOMINATOR:
+    if not 0 < amount < 2**64 or not 0 <= slippage_bps <= BPS_DENOMINATOR:
         raise QuoteError("slippage_unbound")
     product = BPS_DENOMINATOR - slippage_bps
     minimum = _mul_div(amount, product, BPS_DENOMINATOR, False)
@@ -74,6 +74,7 @@ def sdk_fixture(amount: int, specified_token_a: bool, slippage_bps: int, suffici
         "fee_rate": 3000,
         "liquidity": 100_000_000 if sufficient_liquidity else 265_000,
         "tick_spacing": 2,
+        "adaptive_fee": False,
     }
     arrays = []
     for start in (0, 176, 352, -176, -352):
@@ -133,12 +134,26 @@ def _quote_exact_out(pool: dict, arrays: list[dict], amount: int, specified_toke
 
 
 def _compute_swap(amount: int, sqrt_price_limit: int, pool: dict, arrays: list[dict], a_to_b: bool, specified_input: bool) -> dict:
-    if amount == 0:
+    if type(amount) is not int or not 0 < amount < 2**64:
         raise QuoteError("spend_unbound")
+    if type(a_to_b) is not bool or type(specified_input) is not bool:
+        raise QuoteError("direction_unbound")
+    if not isinstance(pool, dict) or pool.get("adaptive_fee") is not False:
+        # This implementation has no oracle/time/volatility fee manager. Never
+        # silently price an adaptive pool using only its base fee.
+        raise QuoteError("adaptive_fee_unsupported")
+    for field, minimum, maximum in (
+        ("fee_rate", 0, 65535), ("liquidity", 0, (1 << 128) - 1),
+        ("tick_spacing", 1, 65535), ("tick_current_index", MIN_TICK_INDEX, MAX_TICK_INDEX),
+        ("sqrt_price", MIN_SQRT_PRICE, MAX_SQRT_PRICE),
+    ):
+        value = pool.get(field)
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise QuoteError("pool_state_unbound")
     limit = MIN_SQRT_PRICE if a_to_b and sqrt_price_limit == 0 else MAX_SQRT_PRICE if sqrt_price_limit == 0 else sqrt_price_limit
     if not MIN_SQRT_PRICE <= limit <= MAX_SQRT_PRICE:
         raise QuoteError("sqrt_price_limit")
-    if a_to_b and limit > pool["sqrt_price"] or not a_to_b and limit < pool["sqrt_price"]:
+    if a_to_b and limit >= pool["sqrt_price"] or not a_to_b and limit <= pool["sqrt_price"]:
         raise QuoteError("sqrt_price_limit")
     sequence = _sequence(arrays, pool["tick_spacing"])
     remaining = amount
@@ -152,7 +167,7 @@ def _compute_swap(amount: int, sqrt_price_limit: int, pool: dict, arrays: list[d
         steps += 1
         if steps > 512:
             raise QuoteError("quote_unbounded")
-        initialized, next_index = _prev_tick(sequence, tick) if a_to_b else _next_tick(sequence, tick)
+        initialized, next_index = _prev_tick(sequence, tick, pool["tick_spacing"]) if a_to_b else _next_tick(sequence, tick, pool["tick_spacing"])
         next_price = sqrt_price_from_tick(next_index)
         target = max(next_price, limit) if a_to_b else min(next_price, limit)
         step = _swap_step(remaining, pool["fee_rate"], liquidity, price, target, a_to_b, specified_input)
@@ -163,6 +178,8 @@ def _compute_swap(amount: int, sqrt_price_limit: int, pool: dict, arrays: list[d
         else:
             remaining -= step["amount_out"]
             calculated += step["amount_in"] + step["fee_amount"]
+        if not 0 <= remaining < 2**64 or not 0 <= calculated < 2**64 or not 0 <= fee < 2**64:
+            raise QuoteError("amount_exceeds_u64")
         if step["next_sqrt_price"] == next_price:
             liquidity = _next_liquidity(liquidity, initialized, a_to_b)
             tick = next_index - 1 if a_to_b else next_index
@@ -293,6 +310,8 @@ def _max_amount(amount: int, slippage_bps: int) -> int:
 
 
 def _mul_div(amount: int, product: int, denominator: int, round_up: bool) -> int:
+    if any(type(value) is not int for value in (amount, product, denominator)) or amount < 0 or product < 0 or denominator <= 0:
+        raise QuoteError("quote_unusable")
     if amount == 0 or product == 0:
         return 0
     numerator = amount * product
@@ -310,14 +329,27 @@ def _next_liquidity(liquidity: int, tick: dict | None, a_to_b: bool) -> int:
         updated = liquidity + size if net < 0 else liquidity - size
     else:
         updated = liquidity - size if net < 0 else liquidity + size
-    if updated < 0:
+    if not 0 <= updated < 2**128:
         raise QuoteError("liquidity_unbound")
     return updated
 
 
 def _sequence(arrays: list[dict], spacing: int) -> list[dict]:
-    ordered = sorted(arrays, key=lambda item: item["start_tick_index"])
+    if not isinstance(arrays, list) or not 1 <= len(arrays) <= 5:
+        raise QuoteError("tick_array_unbound")
     gap = TICK_ARRAY_SIZE * spacing
+    for array in arrays:
+        if not isinstance(array, dict):
+            raise QuoteError("tick_array_unbound")
+        start, ticks = array.get("start_tick_index"), array.get("ticks")
+        if type(start) is not int or start % gap or not MIN_TICK_INDEX // gap * gap <= start <= MAX_TICK_INDEX:
+            raise QuoteError("tick_array_unbound")
+        if not isinstance(ticks, list) or len(ticks) != TICK_ARRAY_SIZE:
+            raise QuoteError("tick_array_unbound")
+        for tick in ticks:
+            if not isinstance(tick, dict) or type(tick.get("initialized")) is not bool or type(tick.get("liquidity_net")) is not int or not -(1 << 127) <= tick["liquidity_net"] < 1 << 127:
+                raise QuoteError("tick_array_unbound")
+    ordered = sorted(arrays, key=lambda item: item["start_tick_index"])
     for left, right in zip(ordered, ordered[1:]):
         if right["start_tick_index"] - left["start_tick_index"] != gap:
             raise QuoteError("tick_array_unbound")
@@ -335,9 +367,10 @@ def _tick(sequence: list[dict], index: int, spacing: int) -> dict:
     return array["ticks"][offset]
 
 
-def _prev_tick(sequence: list[dict], index: int) -> tuple[dict | None, int]:
-    spacing = _spacing(sequence)
+def _prev_tick(sequence: list[dict], index: int, spacing: int) -> tuple[dict | None, int]:
     start = max(sequence[0]["start_tick_index"], MIN_TICK_INDEX)
+    if index < start:
+        raise QuoteError("tick_array_unbound")
     previous = _initializable(index, spacing, False)
     while True:
         if previous < start:
@@ -348,9 +381,10 @@ def _prev_tick(sequence: list[dict], index: int) -> tuple[dict | None, int]:
         previous = _previous_initializable(previous, spacing)
 
 
-def _next_tick(sequence: list[dict], index: int) -> tuple[dict | None, int]:
-    spacing = _spacing(sequence)
+def _next_tick(sequence: list[dict], index: int, spacing: int) -> tuple[dict | None, int]:
     end = min(sequence[-1]["start_tick_index"] + TICK_ARRAY_SIZE * spacing - 1, MAX_TICK_INDEX)
+    if index >= end:
+        raise QuoteError("tick_array_unbound")
     nxt = index
     while True:
         nxt = _following_initializable(nxt, spacing)
@@ -359,10 +393,6 @@ def _next_tick(sequence: list[dict], index: int) -> tuple[dict | None, int]:
         tick = _tick(sequence, nxt, spacing)
         if tick["initialized"]:
             return tick, nxt
-
-
-def _spacing(sequence: list[dict]) -> int:
-    return (sequence[1]["start_tick_index"] - sequence[0]["start_tick_index"]) // TICK_ARRAY_SIZE
 
 
 def _initializable(index: int, spacing: int, round_up: bool) -> int:

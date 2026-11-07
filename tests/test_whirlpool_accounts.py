@@ -42,8 +42,8 @@ def _keys(**replace):
         values["pool"]: (solana_whirlpool.PROGRAM_ID, pool_data),
         values["source"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(NATIVE, WALLET)),
         values["dest"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(USDC, WALLET)),
-        values["vault_a"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(NATIVE, solana_tx.b58encode(b"\x91" * 32))),
-        values["vault_b"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(USDC, solana_tx.b58encode(b"\x92" * 32))),
+        values["vault_a"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(NATIVE, values["pool"])),
+        values["vault_b"]: (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(USDC, values["pool"])),
     }
     for address, start in zip(values["ticks"], values["starts"]):
         accounts[address] = (solana_whirlpool.PROGRAM_ID, solana_whirlpool.reference_tick_array(values["pool"], start))
@@ -56,12 +56,12 @@ class WhirlpoolAccountTests(unittest.TestCase):
         pool = solana_tx.b58encode(b"\x21" * 32)
         node = subprocess.check_output(["node", "--input-type=module", "-e", """
 import { createRequire } from 'module';
-const require = createRequire('/tmp/phantom-pin/node_modules/@solana/web3.js/package.json');
+const require = createRequire(process.cwd() + '/package.json');
 const { PublicKey } = require('@solana/web3.js');
 const pool = new PublicKey('%s');
 const program = new PublicKey('%s');
 const [oracle] = PublicKey.findProgramAddressSync([Buffer.from('oracle'), pool.toBuffer()], program);
-const start = Buffer.alloc(4); start.writeInt32LE(-704);
+const start = Buffer.from('-704'); // Published Orca seed is a decimal string.
 const [tick] = PublicKey.findProgramAddressSync([Buffer.from('tick_array'), pool.toBuffer(), start], program);
 console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
 """ % (pool, solana_whirlpool.PROGRAM_ID)], text=True)
@@ -72,6 +72,44 @@ console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
     def test_reference_layout_is_accepted(self):
         keys, remaining, accounts, _values = _keys()
         solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+
+    def test_tick_array_pda_does_not_use_binary_integer_seed(self):
+        pool = solana_tx.b58encode(b"\x21" * 32)
+        wrong, _ = solana_tx.find_program_address(
+            [b"tick_array", solana_tx.b58decode(pool), (-704).to_bytes(4, "little", signed=True)],
+            solana_tx.b58decode(solana_whirlpool.PROGRAM_ID),
+        )
+        self.assertNotEqual(solana_whirlpool.tick_array_address(pool, -704), solana_tx.b58encode(wrong))
+
+    def test_truncated_pool_and_wrong_token_program_owner_are_rejected(self):
+        keys, remaining, accounts, values = _keys()
+        pool_owner, pool_data = accounts[values["pool"]]
+        accounts[values["pool"]] = (pool_owner, pool_data[:269])
+        with self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+            solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+        self.assertEqual(caught.exception.category, "whirlpool_pool_unbound")
+        accounts[values["pool"]] = (pool_owner, pool_data)
+        accounts[values["source"]] = (solana_tx.SYSTEM_PROGRAM, accounts[values["source"]][1])
+        with self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+            solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+        self.assertEqual(caught.exception.category, "whirlpool_owner_unbound")
+
+    def test_vault_authority_and_token_state_are_not_ignored(self):
+        for target, offset, value, category in (("vault_a", 32, 0x91, "whirlpool_vault_unbound"), ("source", 108, 0, "whirlpool_owner_unbound"), ("dest", 108, 2, "whirlpool_owner_unbound")):
+            keys, remaining, accounts, values = _keys()
+            owner, data = accounts[values[target]]
+            data = bytearray(data)
+            data[offset] = value
+            accounts[values[target]] = (owner, bytes(data))
+            with self.subTest(target=target), self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+                solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
+            self.assertEqual(caught.exception.category, category)
+
+    def test_lowest_tick_array_start_uses_floor_division_once(self):
+        spacing = 8
+        lowest = solana_whirlpool.MIN_TICK_INDEX // (88 * spacing) * (88 * spacing)
+        self.assertTrue(solana_whirlpool._valid_start(lowest, spacing))
+        self.assertFalse(solana_whirlpool._valid_start(lowest - 88 * spacing, spacing))
 
     def test_substituted_vault_is_rejected(self):
         keys, remaining, accounts, values = _keys()

@@ -16,9 +16,9 @@ Sources used for the bytes:
 
 The quoted output is computed from the pool fee, liquidity, sqrt price, and
 the tick arrays' liquidity_net fields. It is not a caller-supplied number.
-A passing byte check is still not a live quote of the mainnet pool: its tick
-arrays were not read. Wrapping SOL is the create, transfer, sync, and close
-sequence around that swap. The route stays disabled.
+A passing byte check does not bind snapshot provenance, freshness or blockhash
+validity for live execution. Wrapping SOL uses create, transfer and sync instructions;
+the wallet's token accounts remain open. The route stays disabled.
 """
 
 from __future__ import annotations
@@ -79,8 +79,8 @@ def status() -> dict:
         "live_ready": False,
         "output_computed_from_pool": False,
         "adaptive_fee_extra_account": "classic_no_tail" if SOL_USDC_OBSERVATION["adaptive_fee"] is False else "oracle_only",
-        "wrapped_sol_setup": "create_transfer_sync_close",
-        "live_quote": "blocked_tick_arrays_not_read",
+        "wrapped_sol_setup": "create_transfer_sync_preserve_accounts",
+        "live_quote": "blocked_fresh_snapshot_not_bound",
         "sol_usdc_pool": SOL_USDC_POOL,
         "observed_context_slot": SOL_USDC_OBSERVATION["context_slot"],
     }
@@ -113,6 +113,10 @@ def encode_swap_data(amount: int, threshold: int, sqrt_price_limit: int, specifi
     """42-byte swap args: discriminator, u64, u64, u128, two booleans."""
     if DISC != PUBLISHED_DISC:
         raise RuntimeError("swap discriminator drifted")
+    if any(type(value) is not int for value in (amount, threshold, sqrt_price_limit)):
+        raise ValueError("swap amounts must be integers")
+    if type(specified_input) is not bool or type(a_to_b) is not bool:
+        raise ValueError("swap direction flags must be booleans")
     if not 0 < amount < 2**64 or not 0 <= threshold < 2**64:
         raise ValueError("swap amount is not usable")
     if not 0 <= sqrt_price_limit < 2**128:
@@ -146,7 +150,7 @@ def build(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], s
     """Unsigned wrapped swap. The threshold is the quote of these account bytes."""
     direction = _direction(pool_data)
     state = solana_whirlpool.pool_state(pool_data)
-    if state is None:
+    if state is None or accounts.get(pool) != (solana_whirlpool.PROGRAM_ID, pool_data):
         raise ValueError("pool is not usable")
     _require_limit(direction, sqrt_price_limit, state["sqrt_price"])
     source = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
@@ -178,7 +182,11 @@ def transaction_from_fields(pool: str, pool_data: bytes, source: str, dest: str,
     ticks = [solana_whirlpool.tick_array_address(pool, start) for start in starts]
     oracle = solana_whirlpool.oracle_address(pool)
     writable = [pool, owner_a, vault_a, owner_b, vault_b, *ticks]
-    readonly = [solana_tx.TOKEN_PROGRAM, oracle, solana_whirlpool.PROGRAM_ID]
+    readonly = [solana_tx.TOKEN_PROGRAM, solana_whirlpool.PROGRAM_ID]
+    if solana_whirlpool.pool_uses_adaptive_fees(pool_data):
+        writable.append(oracle)
+    else:
+        readonly.insert(1, oracle)
     signer = authority if token_authority is None else token_authority
     signers = [authority] if signer == authority else [authority, signer]
     keys = [*signers, *writable, *readonly]
@@ -236,7 +244,6 @@ def transaction_from_fields(pool: str, pool_data: bytes, source: str, dest: str,
         (index(solana_tx.SYSTEM_PROGRAM), [index(authority), index(wsol)], transfer),
         (index(solana_tx.TOKEN_PROGRAM), [index(wsol)], bytes([17])),
         *[(index(solana_whirlpool.PROGRAM_ID), swap_accounts, data)] * copies,
-        (index(solana_tx.TOKEN_PROGRAM), [index(wsol), index(authority), index(authority)], bytes([9])),
     ]
     return solana_tx.encode_legacy(authority, keys, len(readonly), instructions, blockhash, required=len(signers))
 
@@ -254,6 +261,10 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         "output_computed_from_pool": False,
         "spend_verified": False,
         "slippage_verified": False,
+        "threshold_matches_quote": False,
+        "quote_verified": False,
+        "snapshot_verified": False,
+        "quote_freshness": "unverified",
         "wallet_verified": False,
         "wrap_verified": False,
         "min_out": None,
@@ -273,7 +284,18 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         return body
     body["blockhash"] = decoded.blockhash
     body["context_slot"] = context_slot
-    if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
+    if (
+        decoded.version != "legacy" or decoded.lookups
+        or decoded.fee_payer != phantom_transport.REQUIRED_WALLET
+        or len(set(decoded.static_keys)) != len(decoded.static_keys)
+    ):
+        body["error_category"] = "transaction_shape"
+        return body
+    if decoded.signers != [phantom_transport.REQUIRED_WALLET]:
+        body["error_category"] = "whirlpool_authority_unbound"
+        return body
+    used = {index for item in decoded.instructions for index in [item.program_index, *item.account_indexes]}
+    if used != set(range(len(decoded.static_keys))):
         body["error_category"] = "transaction_shape"
         return body
     plan = _wrap_plan(decoded)
@@ -282,6 +304,9 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         return body
     instruction = plan["swap"]
     parsed = decode_swap_data(instruction.data)
+    if parsed is None or len(instruction.account_indexes) < 11:
+        body["error_category"] = "swap_data_unbound"
+        return body
     pool = decoded.static_keys[instruction.account_indexes[2]]
     record = accounts.get(pool)
     if parsed is None or record is None:
@@ -292,9 +317,20 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
     if state is None:
         body["error_category"] = "whirlpool_pool_unbound"
         return body
+    if state["adaptive_fee"]:
+        body["error_category"] = "adaptive_fee_unsupported"
+        return body
     tail = _tail_ok(decoded.static_keys, instruction.account_indexes, state["adaptive_fee"])
     if tail is not None:
         body["error_category"] = tail
+        return body
+    if (
+        len(set(instruction.account_indexes)) != 11
+        or not all(decoded.is_writable(index) for index in instruction.account_indexes[2:10])
+        or decoded.is_writable(instruction.account_indexes[0])
+        or instruction.account_indexes[1] != 0
+    ):
+        body["error_category"] = "whirlpool_account_permissions"
         return body
     body["min_out"] = parsed["other_amount_threshold"]
     if not parsed["amount_specified_is_input"] or parsed["amount"] != INPUT_LAMPORTS or plan["lamports"] != INPUT_LAMPORTS:
@@ -324,6 +360,10 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         quote = solana_whirlpool_quote.quote_exact_in(
             state, arrays, INPUT_LAMPORTS, direction, slippage_bps, parsed["sqrt_price_limit"], context_slot,
         )
+        solana_whirlpool.check_oracle_account(
+            pool, pool_data, accounts,
+            decoded.is_writable(instruction.account_indexes[10]),
+        )
     except solana_whirlpool.WhirlpoolError as error:
         body["error_category"] = error.category
         return body
@@ -335,7 +375,7 @@ def inspect(tx_b64: str, accounts: dict[str, tuple[str, bytes]], slippage_bps: i
         body["min_out"] = parsed["other_amount_threshold"]
         return body
     body["spend_verified"] = True
-    body["slippage_verified"] = True
+    body["threshold_matches_quote"] = True
     body["wallet_verified"] = True
     body["wrap_verified"] = True
     body["output_computed_from_pool"] = True
@@ -356,7 +396,7 @@ def _quote_arrays(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, by
     for start in starts:
         address = solana_whirlpool.tick_array_address(pool, start)
         record = accounts.get(address)
-        parsed = None if record is None else solana_whirlpool.tick_array_state(record[1])
+        parsed = None if record is None or record[0] != solana_whirlpool.PROGRAM_ID else solana_whirlpool.tick_array_state(record[1])
         if parsed is None or parsed["pool"] != pool or parsed["start_tick_index"] != start:
             raise solana_whirlpool_quote.QuoteError("whirlpool_tick_array_unbound")
         arrays.append(parsed)
@@ -364,14 +404,10 @@ def _quote_arrays(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, by
 
 
 def _tail_ok(keys: list[str], indexes: list[int], adaptive: bool) -> str | None:
-    """Classic pools have the 11-account swap. Adaptive pools add only their oracle."""
-    if not adaptive:
-        return None if len(indexes) == 11 else "adaptive_tail"
-    if len(indexes) != 12 or keys[indexes[11]] != keys[indexes[10]]:
-        return "adaptive_tail"
-    if keys[indexes[10]] != solana_whirlpool.oracle_address(keys[indexes[2]]):
-        return "whirlpool_oracle_unbound"
-    return None
+    """This quote implementation supports only the fixed-fee 11-account swap."""
+    if adaptive:
+        return "adaptive_fee_unsupported"
+    return None if len(indexes) == 11 else "adaptive_tail"
 
 
 def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
@@ -381,11 +417,12 @@ def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
     creates = []
     transfer = None
     sync = False
-    close = False
     swap = None
     for instruction in decoded.instructions:
         program = decoded.static_keys[instruction.program_index]
         keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        if decoded.is_writable(instruction.program_index):
+            return {"error": "whirlpool_account_permissions"}
         if program == solana_tx.ASSOCIATED_TOKEN and instruction.data == bytes([1]) and len(keys) == 6:
             payer, ata, owner, mint, system, token_program = keys
             if payer != wallet or owner != wallet or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
@@ -394,29 +431,36 @@ def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
                 return {"error": "wrap_unbound"}
             if mint not in {solana_tx.NATIVE_MINT, solana_tx.USDC_MINT}:
                 return {"error": "token_mint_unbound"}
+            if not all(decoded.is_writable(instruction.account_indexes[i]) for i in (0, 1)) or any(decoded.is_writable(instruction.account_indexes[i]) for i in (3, 4, 5)):
+                return {"error": "whirlpool_account_permissions"}
             creates.append(mint)
             continue
         if program == solana_tx.SYSTEM_PROGRAM and solana_tx.system_transfer(instruction.data) is not None and len(keys) == 2:
             if transfer is not None or keys[0] != wallet or keys[1] != wsol:
                 return {"error": "spend_unbound"}
+            if not all(decoded.is_writable(index) for index in instruction.account_indexes):
+                return {"error": "whirlpool_account_permissions"}
             transfer = solana_tx.system_transfer(instruction.data)
             continue
         if program == solana_tx.TOKEN_PROGRAM and instruction.data == bytes([17]) and keys == [wsol]:
+            if not decoded.is_writable(instruction.account_indexes[0]):
+                return {"error": "whirlpool_account_permissions"}
             sync = True
             continue
         if program == solana_tx.TOKEN_PROGRAM and instruction.data == bytes([9]) and keys == [wsol, wallet, wallet]:
-            close = True
-            continue
+            # An idempotent ATA creation does not prove this transaction created
+            # the account. Closing it could close the user's preexisting WSOL ATA.
+            return {"error": "existing_account_close_forbidden"}
         if program == solana_whirlpool.PROGRAM_ID and swap is None:
             swap = instruction
             continue
         return {"error": "transaction_shape"}
     if creates.count(solana_tx.NATIVE_MINT) != 1 or creates.count(solana_tx.USDC_MINT) != 1:
         return {"error": "wrap_unbound"}
-    if transfer is None or not sync or swap is None or not close:
+    if transfer is None or not sync or swap is None:
         return {"error": "wrap_unbound"}
     kinds = [_kind(decoded, item) for item in decoded.instructions]
-    if kinds != ["create", "create", "transfer", "sync", "swap", "close"]:
+    if kinds != ["create", "create", "transfer", "sync", "swap"]:
         return {"error": "wrap_unbound"}
     return {"swap": swap, "lamports": transfer, "wsol": wsol, "usdc": usdc}
 

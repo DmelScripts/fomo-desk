@@ -39,6 +39,7 @@ def public_status() -> dict:
     auth = _auth_view()
     from exit_policy import view as exit_view
     from execution_stage import status as execution_status
+    from risk_limits import view as risk_limits_view
     return {
         "authority": "PAPER",
         "live_ready": False,
@@ -57,6 +58,7 @@ def public_status() -> dict:
         "size_usd": "8.00",
         "fomo_bump_applies": False,
         "loss_policy": "not_approved",
+        "risk_limits": risk_limits_view(),
         "exit_policy": exit_view(),
         "execution_stage": execution_status(),
         "intake": "qualified_signal",
@@ -140,9 +142,12 @@ def reconcile_unknown(body: dict) -> dict:
             return _stopped("missing", "unknown intent")
         if row["status"] != "submit_unknown":
             return _stopped(row["status"], "not_unknown")
-        result = _result(row, "released", "reconciled_without_resubmit")
+        # A timeout does not prove that the network rejected the transaction.
+        # Keep its entire reservation until a chain-aware reconciler can prove
+        # its final outcome. This endpoint has no such evidence.
+        result = _result(row, "submit_unknown", "chain_reconciliation_required")
         result["resubmit"] = False
-        _save(conn, intent_id, "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
+        result["reconciled"] = False
         return result
 
     return db.exclusive(work)
@@ -206,8 +211,31 @@ def _drive(conn, spec: dict, runtime) -> dict:
                 return stored
             return _exit(conn, spec, runtime, row)
         if row["status"] == "reserved":
+            # An idempotent retry cannot replace the intent that already owns
+            # this reservation, particularly its fee or amount.
+            bound = all(row[key] == spec[key] for key in (
+                "wallet_id", "wallet", "chain", "amount_usd", "fee_usd",
+            )) and row["reserved_usd"] == spec["reserved"] and row["pair_json"] == _pair(spec) and row["slippage"] == spec["slippage"]
+            if not bound:
+                return _result(row, "reserved", "intent_changed")
+            import risk_limits
+            limit_state = risk_limits.view(conn=conn)
+            if limit_state["approved"] or limit_state["approval_state"] != "not_approved":
+                limits = risk_limits.assess_existing(spec["intent_id"], conn=conn)
+                if not limits["allowed"]:
+                    return _result(row, "reserved", limits["reason"])
             return _enter(conn, spec, runtime)
         return _result(row, row["status"], "in_progress")
+    # Explicitly approved limits also apply to rehearsal. Unconfigured PAPER
+    # simulations remain available, but cannot provide LIVE policy evidence.
+    import risk_limits
+    limit_state = risk_limits.view(conn=conn)
+    if limit_state["approved"] or limit_state["approval_state"] != "not_approved":
+        limits = risk_limits.assess(spec["fee_usd"], conn=conn)
+        if not limits["allowed"]:
+            result = _result_new(spec, "rejected", limits["reason"])
+            _insert(conn, spec, "rejected", "0.00", result)
+            return result
     if _over(conn, spec["reserved"]):
         result = _result_new(spec, "rejected", "bankroll")
         _insert(conn, spec, "rejected", "0.00", result)

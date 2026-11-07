@@ -12,7 +12,6 @@ Jupiter PDA. The pinned Jupiter IDL does not name a whirlpool signer seed.
 from __future__ import annotations
 
 import hashlib
-import math
 
 import solana_tx
 
@@ -23,14 +22,17 @@ MAX_TICK_INDEX = 443636
 MIN_TICK_INDEX = -443636
 _DISC = hashlib.sha256(b"account:Whirlpool").digest()[:8]
 _TICK_DISC = hashlib.sha256(b"account:TickArray").digest()[:8]
+_ORACLE_DISC = hashlib.sha256(b"account:Oracle").digest()[:8]
+_ORACLE_LEN = 8 + 32 + 8 + 34 + 44 + 128
 _TICK_LEN = 113
 _MINT_A = 8 + 93
 _VAULT_A = 8 + 125
 _MINT_B = 8 + 173
 _VAULT_B = 8 + 205
 _TICK_SPACING = 8 + 33
+_FEE_TIER_INDEX = _TICK_SPACING + 2
 _TICK_CURRENT = 8 + 73
-_MIN_LEN = 8 + 261
+_MIN_LEN = 8 + 261 + 384
 _TICK_ARRAY_LEN = 8 + 4 + TICK_ARRAY_SIZE * _TICK_LEN + 32
 
 
@@ -63,11 +65,14 @@ def pool_state(data: bytes) -> dict | None:
         return None
     spacing = int.from_bytes(data[_TICK_SPACING:_TICK_SPACING + 2], "little")
     seed = int.from_bytes(data[_TICK_SPACING + 2:_TICK_SPACING + 4], "little")
+    current = int.from_bytes(data[_TICK_CURRENT:_TICK_CURRENT + 4], "little", signed=True)
+    if spacing == 0 or not MIN_TICK_INDEX <= current <= MAX_TICK_INDEX:
+        return None
     return {
         "fee_rate": int.from_bytes(data[_TICK_SPACING + 4:_TICK_SPACING + 6], "little"),
         "liquidity": int.from_bytes(data[_TICK_CURRENT - 32:_TICK_CURRENT - 16], "little"),
         "sqrt_price": sqrt_price(data),
-        "tick_current_index": int.from_bytes(data[_TICK_CURRENT:_TICK_CURRENT + 4], "little", signed=True),
+        "tick_current_index": current,
         "tick_spacing": spacing,
         "fee_tier_seed": seed,
         "adaptive_fee": seed != spacing,
@@ -76,11 +81,13 @@ def pool_state(data: bytes) -> dict | None:
 
 def tick_array_state(data: bytes) -> dict | None:
     """Initialized flag and liquidity_net from each published 113-byte tick."""
-    if len(data) != _TICK_ARRAY_LEN or data[:8] != _TICK_DISC:
+    if not isinstance(data, bytes) or len(data) != _TICK_ARRAY_LEN or data[:8] != _TICK_DISC:
         return None
     ticks = []
     offset = 12
     for _ in range(TICK_ARRAY_SIZE):
+        if data[offset] not in (0, 1):
+            return None
         ticks.append({
             "initialized": data[offset] == 1,
             "liquidity_net": int.from_bytes(data[offset + 1:offset + 17], "little", signed=True),
@@ -112,11 +119,12 @@ def reference_token_account(mint: str, owner: str) -> bytes:
     raw = bytearray(165)
     raw[0:32] = solana_tx.b58decode(mint)
     raw[32:64] = solana_tx.b58decode(owner)
+    raw[108] = 1  # AccountState::Initialized, not an uninitialized token account.
     return bytes(raw)
 
 
 def pool_fields(data: bytes) -> tuple[str, str, str, str] | None:
-    if len(data) < _MIN_LEN or data[:8] != _DISC:
+    if not isinstance(data, bytes) or len(data) != _MIN_LEN or data[:8] != _DISC:
         return None
     return (
         solana_tx.b58encode(data[_MINT_A:_MINT_A + 32]),
@@ -135,8 +143,10 @@ def oracle_address(pool: str) -> str:
 
 
 def tick_array_address(pool: str, start: int) -> str:
+    # initialize_tick_array.rs uses start_tick_index.to_string().as_bytes().
+    # Binary i32 bytes derive a different, nonexistent account.
     derived, _bump = solana_tx.find_program_address(
-        [b"tick_array", solana_tx.b58decode(pool), int(start).to_bytes(4, "little", signed=True)],
+        [b"tick_array", solana_tx.b58decode(pool), str(int(start)).encode("ascii")],
         solana_tx.b58decode(PROGRAM_ID),
     )
     return solana_tx.b58encode(derived)
@@ -144,7 +154,45 @@ def tick_array_address(pool: str, start: int) -> str:
 
 def start_tick_index(tick: int, spacing: int) -> int:
     span = TICK_ARRAY_SIZE * spacing
-    return math.floor(tick / span) * span
+    return tick // span * span
+
+
+def pool_uses_adaptive_fees(pool_data: bytes) -> bool:
+    """Published SDK discriminator: fee-tier index differs from tick spacing."""
+    if pool_fields(pool_data) is None:
+        raise WhirlpoolError("whirlpool pool layout is not usable", "whirlpool_pool_unbound")
+    spacing = int.from_bytes(pool_data[_TICK_SPACING:_TICK_SPACING + 2], "little")
+    fee_tier = int.from_bytes(pool_data[_FEE_TIER_INDEX:_FEE_TIER_INDEX + 2], "little")
+    return spacing != fee_tier
+
+
+def check_oracle_account(pool: str, pool_data: bytes, accounts: dict[str, tuple[str, bytes]], writable: bool, timestamp: int | None = None) -> None:
+    """Validate the oracle snapshot; this does not compute an adaptive quote.
+
+    OracleAccessor accepts a system-owned empty account for fixed-fee pools.
+    An initialized oracle must be program-owned, pool-bound and writable.
+    Timestamp must come from the same trusted snapshot used for a quote.
+    """
+    record = accounts.get(oracle_address(pool))
+    if record is None:
+        raise WhirlpoolError("whirlpool oracle was not read", "account_unread")
+    owner, data = record
+    adaptive = pool_uses_adaptive_fees(pool_data)
+    if not adaptive:
+        if owner != solana_tx.SYSTEM_PROGRAM or data != b"":
+            raise WhirlpoolError("fixed-fee oracle is not an uninitialized system account", "whirlpool_oracle_unbound")
+        return
+    if (
+        owner != PROGRAM_ID or not isinstance(data, bytes) or len(data) != _ORACLE_LEN
+        or data[:8] != _ORACLE_DISC or data[8:40] != solana_tx.b58decode(pool)
+    ):
+        raise WhirlpoolError("adaptive oracle layout, owner or pool does not match", "whirlpool_oracle_unbound")
+    if not writable:
+        raise WhirlpoolError("adaptive oracle is not writable", "whirlpool_oracle_readonly")
+    if type(timestamp) is not int or timestamp < 0:
+        raise WhirlpoolError("oracle timestamp was not bound to the quote snapshot", "whirlpool_oracle_timestamp_unbound")
+    if int.from_bytes(data[40:48], "little") > timestamp:
+        raise WhirlpoolError("whirlpool trading is not enabled at the snapshot timestamp", "whirlpool_trade_disabled")
 
 
 def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]]) -> None:
@@ -154,6 +202,8 @@ def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: s
     # prefix, so a longer tail is rejected rather than stripped.
     if len(remaining) != 11:
         raise WhirlpoolError("whirlpool swap account count is not the published swap layout", "whirlpool_accounts_unbound")
+    if any(type(index) is not int or not 0 <= index < len(keys) for index in remaining):
+        raise WhirlpoolError("whirlpool swap account index is invalid", "whirlpool_accounts_unbound")
     if keys[remaining[0]] != solana_tx.TOKEN_PROGRAM:
         raise WhirlpoolError("whirlpool token program is not the SPL token program", "token_2022_unsupported" if keys[remaining[0]] == solana_tx.TOKEN_2022 else "whirlpool_accounts_unbound")
     if keys[remaining[1]] != user_authority:
@@ -185,8 +235,8 @@ def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: s
         raise WhirlpoolError("whirlpool oracle is not the published PDA", "whirlpool_oracle_unbound")
     _token_identity(accounts, user_source, source_mint, user_authority, "whirlpool_owner_unbound")
     _token_identity(accounts, user_dest, dest_mint, user_authority, "whirlpool_owner_unbound")
-    _token_identity(accounts, vault_a, mint_a, None, "whirlpool_vault_unbound")
-    _token_identity(accounts, vault_b, mint_b, None, "whirlpool_vault_unbound")
+    _token_identity(accounts, vault_a, mint_a, pool, "whirlpool_vault_unbound")
+    _token_identity(accounts, vault_b, mint_b, pool, "whirlpool_vault_unbound")
     _tick_arrays(keys, remaining[7:10], pool, spacing, current, a_to_b, accounts)
     if input_mint != source_mint or output_mint != dest_mint:
         raise WhirlpoolError("whirlpool input mint is not the route input", "whirlpool_mint_unbound")
@@ -196,6 +246,8 @@ def _token_identity(accounts: dict[str, tuple[str, bytes]], address: str, mint: 
     record = accounts.get(address)
     if record is None or record[1] is None:
         raise WhirlpoolError("whirlpool token account was not read", "account_unread")
+    if record[0] != solana_tx.TOKEN_PROGRAM or len(record[1]) != 165 or record[1][108] != 1:
+        raise WhirlpoolError("whirlpool token account is not an initialized SPL token account", category)
     fields = solana_tx.token_account_fields(record[1])
     if fields is None or fields[0] != mint or (owner is not None and fields[1] != owner):
         raise WhirlpoolError("whirlpool token account mint or owner does not match", category)
@@ -227,7 +279,7 @@ def _valid_start(start: int, spacing: int) -> bool:
     if span <= 0:
         return False
     if start < MIN_TICK_INDEX:
-        minimum = MIN_TICK_INDEX - (MIN_TICK_INDEX % span + span)
+        minimum = MIN_TICK_INDEX // span * span
         return start == minimum
     if start > MAX_TICK_INDEX:
         return False

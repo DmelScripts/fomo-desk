@@ -64,7 +64,9 @@ def probe_stdio(command: list[str], home: str) -> dict:
         result["probe"]["reason"] = "refused_command"
         return result
     root = Path(home).resolve()
-    if not str(root).startswith("/tmp/"):
+    # /tmp resolves to /private/tmp on macOS. Compare resolved parents so
+    # the disposable-home boundary works identically on both platforms.
+    if Path("/tmp").resolve() not in root.parents:
         result["probe"]["reason"] = "refused_home"
         return result
     root.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import db
 import execution_transport
@@ -176,6 +177,7 @@ class CliBridgeTest(ExecutionTransportTest):
         })
 
     def _ready(self, intent_id):
+        phantom_runner.set_halt({"halted": False})
         self._open_reservation(intent_id)
         execution_transport.remember_review(intent_id, self.tx)
 
@@ -193,7 +195,7 @@ class CliBridgeTest(ExecutionTransportTest):
 
     def test_matching_identity_uses_explicit_network_before_send(self):
         self._ready("intent-cli")
-        body = json.dumps({"signature": SIGNATURE, "networkId": "solana:mainnet", "account": WALLET})
+        body = json.dumps({"signature": SIGNATURE, "networkId": execution_transport.CLI_MAINNET_NETWORK, "account": WALLET})
         runner = RecordingRunner(identity=(0, self._identity()), send=(0, body))
         result = execution_transport.send_after_identity("intent-cli", self.tx, runner, binary="/usr/bin/phantom")
         self.assertEqual(result["subprocess"], ["addresses", "send"])
@@ -250,7 +252,7 @@ class CliBridgeTest(ExecutionTransportTest):
 
     def test_concurrent_claim_sends_once(self):
         self._ready("intent-race")
-        body = json.dumps({"signature": SIGNATURE, "networkId": "solana:mainnet", "account": WALLET})
+        body = json.dumps({"signature": SIGNATURE, "networkId": execution_transport.CLI_MAINNET_NETWORK, "account": WALLET})
         runner = RecordingRunner(identity=(0, self._identity()), send=(0, body))
         results = []
 
@@ -265,6 +267,132 @@ class CliBridgeTest(ExecutionTransportTest):
         sends = [call for call in runner.calls if call[0][1:3] == ["solana", "send"]]
         self.assertEqual(len(sends), 1)
         self.assertEqual(sum(item.get("send") is True for item in results), 1)
+
+    def test_production_helper_cannot_bypass_closed_signer_gate(self):
+        self._ready("intent-direct-production")
+        with patch.object(execution_transport, "_spawn") as spawn:
+            result = execution_transport.send_after_identity(
+                "intent-direct-production", self.tx, execution_transport._production_runner
+            )
+            self.assertEqual(result["reason"], "signer_disabled")
+            self.assertEqual(result["subprocess"], [])
+            with self.assertRaises(PermissionError):
+                execution_transport._production_runner(["phantom"], {}, 1)
+            spawn.assert_not_called()
+        decision = execution_transport.submit("intent-direct-production", self.tx, runner=self.runner)
+        self.assertIn("signer_enabled", decision["unmet"])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_expired_future_and_malformed_reviews_make_zero_calls(self):
+        values = [time.time() - execution_transport.REVIEW_MAX_AGE_S - 1,
+                  time.time() + 60, None, True, "now", float("nan")]
+        for index, reviewed_at in enumerate(values):
+            with self.subTest(reviewed_at=reviewed_at):
+                intent = "intent-expired-review-" + str(index)
+                self._ready(intent)
+                review = execution_transport._read(execution_transport._REVIEW + intent)
+                review["reviewed_at"] = reviewed_at
+                execution_transport._write(execution_transport._REVIEW + intent, review)
+                runner = RecordingRunner(identity=(0, self._identity()))
+                result = execution_transport.send_after_identity(intent, self.tx, runner)
+                self.assertEqual(result["subprocess"], [])
+                self.assertEqual(runner.calls, [])
+
+    def test_review_or_controls_changed_during_identity_prevent_send(self):
+        def replace_review(intent):
+            review = execution_transport._read(execution_transport._REVIEW + intent)
+            review["sha256"] = "changed"
+            execution_transport._write(execution_transport._REVIEW + intent, review)
+
+        def change_reservation(intent):
+            db.execute("UPDATE phantom_reservations SET slippage = 99 WHERE intent_id = ?", (intent,))
+
+        mutations = [replace_review, change_reservation,
+                     lambda _intent: phantom_runner.set_halt({"halted": True}),
+                     lambda _intent: db.set_setting("mode", "LIVE", "test")]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                db.set_setting("mode", "PAPER", "test")
+                intent = "intent-changed-during-identity-" + str(index)
+                self._ready(intent)
+                calls = []
+
+                def runner(argv, _env, _timeout):
+                    calls.append(argv)
+                    self.assertEqual(argv[1:3], ["wallet", "addresses"])
+                    mutate(intent)
+                    return 0, self._identity()
+
+                result = execution_transport.send_after_identity(intent, self.tx, runner)
+                self.assertEqual(result["reason"], "reservation_lost")
+                self.assertEqual(result["subprocess"], ["addresses"])
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(execution_transport._reservation(intent)["status"], "sim_open")
+                self.assertNotIn(intent, execution_transport._ledger())
+
+    def test_review_expiring_during_identity_prevents_send(self):
+        intent = "intent-expires-during-identity"
+        self._ready(intent)
+        reviewed_at = execution_transport._read(execution_transport._REVIEW + intent)["reviewed_at"]
+        with patch.object(execution_transport.time, "time", side_effect=[
+            reviewed_at + 1, reviewed_at + execution_transport.REVIEW_MAX_AGE_S + 1
+        ]):
+            runner = RecordingRunner(identity=(0, self._identity()))
+            result = execution_transport.send_after_identity(intent, self.tx, runner)
+        self.assertEqual(result["reason"], "reservation_lost")
+        self.assertEqual(result["subprocess"], ["addresses"])
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_invalid_reservation_money_and_chain_refuse_before_identity(self):
+        cases = [("reserved_usd", "-1.00"), ("reserved_usd", "NaN"),
+                 ("reserved_usd", "Infinity"), ("reserved_usd", "7.00"),
+                 ("reserved_usd", "101.00"), ("fee_usd", "-0.20"),
+                 ("chain", "solana:devnet")]
+        for index, (column, value) in enumerate(cases):
+            with self.subTest(column=column, value=value):
+                intent = "intent-invalid-reservation-" + str(index)
+                self._ready(intent)
+                db.execute("UPDATE phantom_reservations SET " + column + " = ? WHERE intent_id = ?", (value, intent))
+                execution_transport.remember_review(intent, self.tx)
+                runner = RecordingRunner(identity=(0, self._identity()))
+                result = execution_transport.send_after_identity(intent, self.tx, runner)
+                self.assertEqual(result["subprocess"], [])
+                self.assertEqual(runner.calls, [])
+                self.assertIn("reservation_open", execution_transport.decide(intent, self.tx)["unmet"])
+
+    def test_submit_passes_resolved_binary_to_production_bridge(self):
+        # Exercise only dispatch, with both the decision and bridge substituted.
+        # The actual production runner remains disabled and is never invoked.
+        with patch.object(execution_transport, "decide", return_value={"unmet": []}), \
+             patch.object(phantom_auth, "_binary", return_value="/pinned/bin/phantom"), \
+             patch.object(execution_transport, "send_after_identity", return_value={"subprocess": []}) as bridge, \
+             patch.object(execution_transport, "_spawn") as spawn:
+            execution_transport.submit("intent-path", self.tx)
+            bridge.assert_called_once_with(
+                "intent-path", self.tx, execution_transport._production_runner,
+                binary="/pinned/bin/phantom"
+            )
+            spawn.assert_not_called()
+
+    def test_pinned_cli_canonical_network_output_and_other_networks(self):
+        # Actual 3.0.0 output uses normalizeNetworkId(), not the input alias.
+        output = {"signature": SIGNATURE,
+                  "networkId": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                  "account": WALLET}
+        self.assertEqual(execution_transport._signature(json.dumps(output)), SIGNATURE)
+        for network in ["solana:mainnet", "solana:101", "solana:devnet",
+                        "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "eip155:1"]:
+            with self.subTest(network=network):
+                self.assertIsNone(execution_transport._signature(json.dumps({**output, "networkId": network})))
+        self.assertIsNone(execution_transport._signature(json.dumps({**output, "account": "wrong-wallet"})))
+
+    def test_oversized_base58_signature_is_not_treated_as_submitted(self):
+        self._ready("intent-invalid-signature")
+        body = json.dumps({"signature": "z" * 88, "networkId": execution_transport.CLI_MAINNET_NETWORK, "account": WALLET})
+        runner = RecordingRunner(identity=(0, self._identity()), send=(0, body))
+        result = execution_transport.send_after_identity("intent-invalid-signature", self.tx, runner)
+        self.assertEqual(result["status"], "submit_unknown")
+        self.assertNotIn("signature", result)
 
     def test_spawn_closes_stdin_and_does_not_use_a_shell(self):
         captured = {}

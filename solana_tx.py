@@ -51,6 +51,20 @@ class Decoded:
     instructions: list[Instruction]
     lookups: list[Lookup] = field(default_factory=list)
     resolved_keys: list[str] = field(default_factory=list)
+    readonly_signed: int = 0
+    readonly_unsigned: int = 0
+
+    def is_writable(self, index: int) -> bool:
+        """Message permissions, including all loaded writables before readables."""
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            return False
+        static_count = len(self.static_keys)
+        if index < len(self.signers):
+            return index < len(self.signers) - self.readonly_signed
+        if index < static_count:
+            return index < static_count - self.readonly_unsigned
+        writable_count = sum(len(item.writable) for item in self.lookups)
+        return index < static_count + writable_count
 
 
 def b58encode(data: bytes) -> str:
@@ -92,7 +106,7 @@ def decode_transaction(raw: bytes) -> Decoded:
     count, index = _compact(raw, 0)
     if count < 1 or count > 8:
         raise ValueError("transaction is not usable")
-    index += 64 * count
+    _signatures, index = _take(raw, index, 64 * count)
     if index >= len(raw):
         raise ValueError("transaction is not usable")
     message = raw[index:]
@@ -111,45 +125,58 @@ def decode_transaction(raw: bytes) -> Decoded:
     readonly_unsigned = message[cursor + 2]
     cursor += 3
     key_count, cursor = _compact(message, cursor)
-    if required < 1 or key_count < required or readonly_signed > required:
+    if (
+        required != count or not 1 <= required <= key_count <= 256
+        or readonly_signed >= required
+        or readonly_unsigned > key_count - required
+    ):
         raise ValueError("transaction is not usable")
     keys = []
     for _ in range(key_count):
-        keys.append(b58encode(message[cursor:cursor + 32]))
-        cursor += 32
-    blockhash = b58encode(message[cursor:cursor + 32])
-    cursor += 32
+        key, cursor = _take(message, cursor, 32)
+        keys.append(b58encode(key))
+    block, cursor = _take(message, cursor, 32)
+    blockhash = b58encode(block)
     ix_count, cursor = _compact(message, cursor)
     if ix_count < 1 or ix_count > 16:
         raise ValueError("transaction is not usable")
     instructions = []
     for _ in range(ix_count):
-        program_index = message[cursor]
-        cursor += 1
+        program, cursor = _take(message, cursor, 1)
+        program_index = program[0]
         account_count, cursor = _compact(message, cursor)
-        accounts = list(message[cursor:cursor + account_count])
-        cursor += account_count
+        account_bytes, cursor = _take(message, cursor, account_count)
+        accounts = list(account_bytes)
         data_len, cursor = _compact(message, cursor)
-        data = message[cursor:cursor + data_len]
-        cursor += data_len
+        data, cursor = _take(message, cursor, data_len)
         instructions.append(Instruction(program_index, accounts, data))
     lookups = []
     if version == "v0":
         lookup_count, cursor = _compact(message, cursor)
         for _ in range(lookup_count):
-            table = b58encode(message[cursor:cursor + 32])
-            cursor += 32
+            table_bytes, cursor = _take(message, cursor, 32)
+            table = b58encode(table_bytes)
             writable_count, cursor = _compact(message, cursor)
-            writable = list(message[cursor:cursor + writable_count])
-            cursor += writable_count
+            writable_bytes, cursor = _take(message, cursor, writable_count)
+            writable = list(writable_bytes)
             readonly_count, cursor = _compact(message, cursor)
-            readonly = list(message[cursor:cursor + readonly_count])
-            cursor += readonly_count
+            readonly_bytes, cursor = _take(message, cursor, readonly_count)
+            readonly = list(readonly_bytes)
             lookups.append(Lookup(table, writable, readonly))
     if cursor != len(message):
         raise ValueError("transaction is not usable")
+    total_keys = key_count + sum(len(item.writable) + len(item.readonly) for item in lookups)
+    if total_keys > 256 or any(
+        item.program_index >= total_keys
+        or any(index >= total_keys for index in item.account_indexes)
+        for item in instructions
+    ):
+        raise ValueError("transaction is not usable")
     signers = keys[:required]
-    return Decoded(version, keys[0], signers, keys, blockhash, instructions, lookups, list(keys))
+    return Decoded(
+        version, keys[0], signers, keys, blockhash, instructions, lookups, list(keys),
+        readonly_signed=readonly_signed, readonly_unsigned=readonly_unsigned,
+    )
 
 
 def lookup_addresses(data: bytes) -> list[str]:
@@ -264,6 +291,14 @@ def _point_on_curve(point: bytes) -> bool:
     return pow(x2, (prime - 1) // 2, prime) == 1
 
 
+def _take(data: bytes, index: int, size: int) -> tuple[bytes, int]:
+    """Read an exact field, rejecting truncation before slicing or indexing."""
+    end = index + size
+    if index < 0 or size < 0 or end > len(data):
+        raise ValueError("transaction is not usable")
+    return data[index:end], end
+
+
 def _compact(data: bytes, index: int) -> tuple[int, int]:
     value = 0
     shift = 0
@@ -272,6 +307,10 @@ def _compact(data: bytes, index: int) -> tuple[int, int]:
             raise ValueError("transaction is not usable")
         byte = data[index]
         index += 1
+        # Solana short-u16 has one canonical encoding, with only two payload
+        # bits permitted in its third byte. Reject aliases and overflow.
+        if (shift and byte == 0) or (shift == 14 and byte > 3):
+            raise ValueError("transaction is not usable")
         value |= (byte & 0x7F) << shift
         if byte & 0x80 == 0:
             return value, index

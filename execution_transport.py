@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 import subprocess
 import time
@@ -20,6 +21,7 @@ import exit_policy
 import phantom_auth
 import phantom_runner
 import phantom_transport
+import risk_limits
 import solana_inspect
 
 _REVIEW = "send_review:"
@@ -33,8 +35,13 @@ SWAP_BLOCKERS = (
 
 
 NETWORK = "solana:mainnet"
+# @phantom/cli 3.0.0 normalizes the request alias before returning networkId.
+# src/actions/send-solana-transaction.ts -> src/utils/network.ts.
+CLI_MAINNET_NETWORK = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 _SIGNATURE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,88}$")
 _BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+# A review is an ephemeral local binding, never a promise of chain freshness.
+REVIEW_MAX_AGE_S = 120
 
 
 def addresses_argv(binary: str) -> list[str]:
@@ -83,7 +90,16 @@ def _spawn(argv: list[str], env: dict, timeout: float):
     return done.returncode, (done.stdout + done.stderr).decode("utf-8", "replace")[:8000]
 
 
+def _signer_enabled() -> bool:
+    """No production activation exists until route and policy proofs are wired."""
+    return False
+
+
 def _production_runner(argv: list[str], _env: dict, timeout: float):
+    # Enforce the disabled state at the process boundary as well as submit().
+    # Calling the lower-level helper must not bypass the readiness decision.
+    if not _signer_enabled():
+        raise PermissionError("production signer disabled")
     binary = phantom_auth._binary()
     home = phantom_auth._home()
     if not argv or argv[0] != binary:
@@ -122,29 +138,42 @@ def _signature(text: str) -> str | None:
         return None
     if not isinstance(body, dict):
         return None
-    if body.get("networkId") != NETWORK or body.get("account") != phantom_transport.REQUIRED_WALLET:
+    if body.get("networkId") != CLI_MAINNET_NETWORK or body.get("account") != phantom_transport.REQUIRED_WALLET:
         return None
     signature = body.get("signature")
     if isinstance(signature, str) and _SIGNATURE.fullmatch(signature):
-        return signature
+        import solana_tx
+        try:
+            decoded = solana_tx.b58decode(signature, 64)
+        except ValueError:
+            return None
+        if solana_tx.b58encode(decoded) == signature:
+            return signature
     return None
 
 
-def _claim(intent_id: str, digest: str) -> bool:
+def _claim(intent_id: str, digest: str, expected_review: dict) -> bool:
     """One transaction moves sim_open to submit_unknown and records the digest."""
 
     def work(conn):
         row = conn.execute(
-            "SELECT status, wallet, wallet_id, amount_usd FROM phantom_reservations WHERE intent_id = ?",
+            "SELECT * FROM phantom_reservations WHERE intent_id = ?",
             (intent_id,),
         ).fetchone()
-        if row is None or row["status"] != "sim_open":
+        if not _reservation_valid(row):
             return False
-        if (
-            row["wallet"] != phantom_transport.REQUIRED_WALLET
-            or row["wallet_id"] != phantom_transport.REQUIRED_WALLET_ID
-            or row["amount_usd"] != "8.00"
-        ):
+        halt = conn.execute("SELECT value FROM phantom_control WHERE key = 'halt'").fetchone()
+        mode = conn.execute("SELECT value FROM settings WHERE key = 'mode'").fetchone()
+        if halt is None or halt["value"] != "0" or mode is None or mode["value"] != "PAPER":
+            return False
+        stored_review = conn.execute(
+            "SELECT value FROM phantom_control WHERE key = ?", (_REVIEW + intent_id,)
+        ).fetchone()
+        try:
+            review = json.loads(stored_review["value"]) if stored_review is not None else None
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if review != expected_review or not _review_matches(review, digest, row):
             return False
         current = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
         ledger = {}
@@ -182,6 +211,8 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     error, or a timeout of that read does not start the send. A timeout or
     ambiguous send result stays submit_unknown and is not retried.
     """
+    if runner is _production_runner and not _signer_enabled():
+        return {"status": "refused", "reason": "signer_disabled", "send": False, "resend": False, "subprocess": []}
     if not isinstance(intent_id, str) or not intent_id:
         return {"status": "refused", "reason": "intent", "send": False, "resend": False, "subprocess": []}
     try:
@@ -192,12 +223,10 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     review = _read(_REVIEW + intent_id)
     reservation = _reservation(intent_id)
     if (
-        not isinstance(review, dict)
-        or review.get("sha256") != digest
-        or review.get("wallet") != phantom_transport.REQUIRED_WALLET
-        or review.get("network") != NETWORK
-        or reservation is None
-        or reservation["status"] != "sim_open"
+        not _reservation_valid(reservation)
+        or not _review_matches(review, digest, reservation)
+        or phantom_runner.halted()
+        or db.get_setting("mode", "PAPER") != "PAPER"
         or intent_id in _ledger()
     ):
         return {"status": "refused", "reason": "not_claimable", "send": False, "resend": False, "subprocess": []}
@@ -212,7 +241,7 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     if code != 0 or not identity["ok"]:
         reason = "auth_expired" if code != 0 or identity["reason"] == "auth_expired" else "wallet_mismatch"
         return {"status": "refused", "reason": reason, "send": False, "resend": False, "subprocess": seen}
-    if not _claim(intent_id, digest):
+    if not _claim(intent_id, digest, review):
         return {"status": "refused", "reason": "reservation_lost", "send": False, "resend": False, "subprocess": seen}
     try:
         code, text = runner(send_argv(binary, base64.b64encode(raw).decode("ascii")), env, timeout)
@@ -246,6 +275,7 @@ def activation_status() -> dict:
     """
     consent = _consent()
     policy = exit_policy.view()
+    limits = risk_limits.view()
     checks = {
         "mode_still_paper": db.get_setting("mode", "PAPER") == "PAPER",
         "agents_still_off": db.get_setting("agents_enabled", "0") == "0",
@@ -256,10 +286,12 @@ def activation_status() -> dict:
         "exit_is_not_aggregate": policy["aggregate_loss_policy"] is False and policy["loss_policy"] == "not_approved",
         "live_request_recorded": consent is not None,
         "live_request_not_applied": consent is None or consent.get("applied") is False,
-        "fee_policy_approved": False,
-        "aggregate_loss_policy_approved": False,
+        "fee_policy_approved": limits["approved"],
+        "aggregate_loss_policy_approved": limits["approved"],
+        "actual_fees_verified": False,
+        "live_ledger_verified": False,
         "swap_path_verified": False,
-        "signer_enabled": False,
+        "signer_enabled": _signer_enabled(),
     }
     return {
         "ready": all(checks.values()),
@@ -267,19 +299,25 @@ def activation_status() -> dict:
         "checks": checks,
         "unmet": [name for name, passed in checks.items() if not passed],
         "swap_blockers": list(SWAP_BLOCKERS),
-        "fee_policy": "not_approved",
-        "aggregate_loss_policy": False,
+        "fee_policy": "configured_unverified" if limits["approved"] else "not_approved",
+        "aggregate_loss_policy": limits["approved"],
+        "risk_limits": limits,
         "live_ready": False,
     }
 
 
 def remember_review(intent_id: str, tx_b64: str) -> dict:
     """Store the reviewed unsigned-byte hash. This does not send."""
+    if not isinstance(intent_id, str) or not intent_id:
+        raise ValueError("intent is not usable")
     raw = _bytes(tx_b64)
+    reservation = _reservation(intent_id)
     payload = {
         "sha256": hashlib.sha256(raw).hexdigest(),
         "wallet": phantom_transport.REQUIRED_WALLET,
-        "network": "solana:mainnet",
+        "network": NETWORK,
+        "reviewed_at": time.time(),
+        "reservation_sha256": _reservation_digest(reservation),
     }
     _write(_REVIEW + intent_id, payload)
     return payload
@@ -298,7 +336,9 @@ def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
     decision["subprocess"] = []
     if decision["unmet"]:
         return decision
-    result = send_after_identity(intent_id, tx_b64, runner or _production_runner)
+    bridge_runner = _production_runner if runner is None else runner
+    binary = phantom_auth._binary() if runner is None else "phantom"
+    result = send_after_identity(intent_id, tx_b64, bridge_runner, binary=binary)
     decision["signer_called"] = "send" in result.get("subprocess", [])
     decision["send"] = result.get("send") is True
     decision["subprocess"] = list(result.get("subprocess", []))
@@ -308,14 +348,18 @@ def submit(intent_id: str, tx_b64: str, *, runner=None, rpc=None) -> dict:
 
 
 def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
+    limits = risk_limits.view()
     checks = {
         "intent_id": isinstance(intent_id, str) and bool(intent_id),
         "mode_paper_until_activation": db.get_setting("mode", "PAPER") == "PAPER",
         "kill_switch_open": phantom_runner.halted() is False,
+        "signer_enabled": _signer_enabled(),
         "exit_tuple_effective": exit_policy.view()["effective"] is True,
         "live_request_recorded": _consent() is not None,
-        "fee_policy_approved": False,
-        "aggregate_loss_policy_approved": False,
+        "fee_policy_approved": limits["approved"],
+        "aggregate_loss_policy_approved": limits["approved"],
+        "actual_fees_verified": False,
+        "live_ledger_verified": False,
         "reservation_open": False,
         "unknown_submit_clear": False,
         "idempotent": False,
@@ -329,13 +373,7 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
     }
     reservation = _reservation(intent_id) if checks["intent_id"] else None
     if reservation is not None and reservation["status"] == "sim_open":
-        checks["reservation_open"] = (
-            reservation["wallet"] == phantom_transport.REQUIRED_WALLET
-            and reservation["wallet_id"] == phantom_transport.REQUIRED_WALLET_ID
-            and reservation["amount_usd"] == "8.00"
-            and _money(reservation["reserved_usd"]) is not None
-            and _money(reservation["reserved_usd"]) <= phantom_runner.BANKROLL
-        )
+        checks["reservation_open"] = _reservation_valid(reservation)
         checks["unknown_submit_clear"] = True
     elif reservation is not None and reservation["status"] == "submit_unknown":
         checks["unknown_submit_clear"] = False
@@ -352,8 +390,7 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
     except Exception:
         raw = b""
     digest = hashlib.sha256(raw).hexdigest() if raw else ""
-    if review and review.get("sha256") == digest and review.get("wallet") == phantom_transport.REQUIRED_WALLET and review.get("network") == "solana:mainnet":
-        checks["reviewed_binding"] = True
+    checks["reviewed_binding"] = _review_matches(review, digest, reservation)
     inspected = None
     if rpc is not None and raw:
         inspected = solana_inspect.inspect(base64.b64encode(raw).decode("ascii"), rpc)
@@ -369,8 +406,9 @@ def decide(intent_id: str, tx_b64: str, rpc=None) -> dict:
         "unmet": unmet,
         "effects_allowed": not unmet,
         "inspection_category": None if inspected is None else inspected.get("error_category"),
-        "fee_policy": "not_approved",
-        "aggregate_loss_policy": False,
+        "fee_policy": "configured_unverified" if limits["approved"] else "not_approved",
+        "aggregate_loss_policy": limits["approved"],
+        "risk_limits": limits,
         "swap_blockers": list(SWAP_BLOCKERS),
     }
 
@@ -418,11 +456,48 @@ def _money(text):
     from decimal import Decimal, InvalidOperation
     try:
         amount = Decimal(text)
-    except (InvalidOperation, TypeError):
-        return None
-    if amount != amount.quantize(Decimal("0.01")):
+        if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal("0.01")):
+            return None
+    except (InvalidOperation, TypeError, ValueError):
         return None
     return amount
+
+
+def _reservation_valid(row) -> bool:
+    if row is None:
+        return False
+    reserved = _money(row["reserved_usd"])
+    fee = _money(row["fee_usd"])
+    return (
+        row["status"] == "sim_open"
+        and row["wallet"] == phantom_transport.REQUIRED_WALLET
+        and row["wallet_id"] == phantom_transport.REQUIRED_WALLET_ID
+        and row["chain"] == NETWORK
+        and row["amount_usd"] == "8.00"
+        and reserved is not None and fee is not None
+        and reserved == phantom_runner.SIZE + fee
+        and reserved <= phantom_runner.BANKROLL
+    )
+
+
+def _reservation_digest(row) -> str | None:
+    if row is None:
+        return None
+    return hashlib.sha256(json.dumps(dict(row), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _review_matches(review, digest: str, reservation) -> bool:
+    if not isinstance(review, dict) or reservation is None or not digest:
+        return False
+    reviewed_at = review.get("reviewed_at")
+    return (
+        review.get("sha256") == digest
+        and review.get("wallet") == phantom_transport.REQUIRED_WALLET
+        and review.get("network") == NETWORK
+        and review.get("reservation_sha256") == _reservation_digest(reservation)
+        and type(reviewed_at) in (int, float) and math.isfinite(reviewed_at)
+        and 0 <= time.time() - reviewed_at <= REVIEW_MAX_AGE_S
+    )
 
 
 def _price_is_zero(raw: bytes) -> bool:
@@ -444,7 +519,10 @@ def _price_is_zero(raw: bytes) -> bool:
 def _bytes(tx_b64: str) -> bytes:
     if not isinstance(tx_b64, str):
         raise ValueError("transaction is not usable")
-    return base64.b64decode(tx_b64, validate=True)
+    raw = base64.b64decode(tx_b64, validate=True)
+    if not raw:
+        raise ValueError("transaction is not usable")
+    return raw
 
 
 def _read(key: str):
