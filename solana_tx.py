@@ -8,6 +8,7 @@ the message and is reported as base58 for isBlockhashValid.
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import dataclass, field
 
 _ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -222,6 +223,45 @@ def compute_budget_payload(data: bytes) -> tuple[int, bytes, int] | None:
         if tag in short and len(payload) == short[tag]:
             return tag, payload, len(data)
     return None
+
+
+def find_program_address(seeds: list[bytes], program: bytes) -> tuple[bytes, int]:
+    """Solana findProgramAddress. Off-curve check matches the web3.js PDA rule."""
+    for bump in range(255, -1, -1):
+        digest = hashlib.sha256(b"".join(seeds) + bytes([bump]) + program + b"ProgramDerivedAddress").digest()
+        if not _point_on_curve(digest):
+            return digest, bump
+    raise ValueError("program address is not usable")
+
+
+def associated_token_address(owner: str, mint: str, token_program: str) -> str:
+    """SPL associated-token PDA: [owner, token program, mint]."""
+    derived, _bump = find_program_address(
+        [b58decode(owner), b58decode(token_program), b58decode(mint)],
+        b58decode(ASSOCIATED_TOKEN),
+    )
+    return b58encode(derived)
+
+
+def _point_on_curve(point: bytes) -> bool:
+    if len(point) != 32:
+        return False
+    prime = (1 << 255) - 19
+    y = int.from_bytes(point, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    if y >= prime:
+        return False
+    d = (-121665 * pow(121666, prime - 2, prime)) % prime
+    y2 = y * y % prime
+    numerator = (y2 - 1) % prime
+    denominator = (d * y2 + 1) % prime
+    if denominator == 0:
+        return False
+    x2 = numerator * pow(denominator, prime - 2, prime) % prime
+    if x2 == 0:
+        return sign == 0
+    return pow(x2, (prime - 1) // 2, prime) == 1
 
 
 def _compact(data: bytes, index: int) -> tuple[int, int]:

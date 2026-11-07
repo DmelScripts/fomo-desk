@@ -314,6 +314,7 @@ def _public_diagnostics(parsed: dict) -> dict:
         "min_output_verified": False,
         "fee_policy": "not_approved",
         "fee_authorized": False,
+        "slippage_propagation": "not_published",
         "freshness_basis": "last_valid_block_height",
         "freshness_guarantee": False,
         "provider_expiry": None,

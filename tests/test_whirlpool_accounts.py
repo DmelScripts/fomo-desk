@@ -130,6 +130,18 @@ console.log(JSON.stringify({oracle: oracle.toBase58(), tick: tick.toBase58()}));
             solana_whirlpool.check_swap_accounts(keys, remaining, WALLET, keys[3], keys[5], NATIVE, USDC, True, accounts)
         self.assertEqual(caught.exception.category, "whirlpool_authority_unbound")
 
+    def test_program_id_prefix_is_not_stripped(self):
+        keys, remaining, accounts, _values = _keys()
+        prefixed = [0] + [index + 1 for index in remaining]
+        keys = [solana_whirlpool.PROGRAM_ID] + keys
+        shifted = {}
+        for key, record in list(accounts.items()):
+            shifted[key] = record
+        with self.assertRaises(solana_whirlpool.WhirlpoolError) as caught:
+            solana_whirlpool.check_swap_accounts(keys, prefixed, WALLET, keys[4], keys[6], NATIVE, USDC, True, shifted)
+        self.assertEqual(caught.exception.category, "whirlpool_accounts_unbound")
+        self.assertEqual(len(prefixed), 12)
+
     def test_bad_oracle_pda_is_rejected(self):
         keys, remaining, accounts, _values = _keys()
         keys[10] = solana_tx.b58encode(b"\x58" * 32)
@@ -191,6 +203,7 @@ class WhirlpoolRouteTests(unittest.TestCase):
         self.assertTrue(shown["dex_accounts_verified"])
         self.assertFalse(shown["slippage_verified"])
         self.assertFalse(shown["min_output_verified"])
+        self.assertEqual(shown["slippage_propagation"], "not_published")
         self.assertTrue(shown["threshold_matches_ceil"])
         self.assertFalse(shown["spend_verified"])
         self.assertFalse(shown["execution_allowed"])

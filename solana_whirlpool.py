@@ -80,7 +80,7 @@ def pool_fields(data: bytes) -> tuple[str, str, str, str] | None:
 
 
 def oracle_address(pool: str) -> str:
-    derived, _bump = _find_program_address(
+    derived, _bump = solana_tx.find_program_address(
         [b"oracle", solana_tx.b58decode(pool)],
         solana_tx.b58decode(PROGRAM_ID),
     )
@@ -88,7 +88,7 @@ def oracle_address(pool: str) -> str:
 
 
 def tick_array_address(pool: str, start: int) -> str:
-    derived, _bump = _find_program_address(
+    derived, _bump = solana_tx.find_program_address(
         [b"tick_array", solana_tx.b58decode(pool), int(start).to_bytes(4, "little", signed=True)],
         solana_tx.b58decode(PROGRAM_ID),
     )
@@ -102,6 +102,9 @@ def start_tick_index(tick: int, spacing: int) -> int:
 
 def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]]) -> None:
     """Check one Orca swap account list. route_v2's signer is the user."""
+    # Orca's swap struct is 11 accounts. A live Jupiter route_v2 had 12 remaining
+    # accounts. No published Jupiter layout says the extra one is a program-id
+    # prefix, so a longer tail is rejected rather than stripped.
     if len(remaining) != 11:
         raise WhirlpoolError("whirlpool swap account count is not the published swap layout", "whirlpool_accounts_unbound")
     if keys[remaining[0]] != solana_tx.TOKEN_PROGRAM:
@@ -184,31 +187,3 @@ def _valid_start(start: int, spacing: int) -> bool:
     return start % span == 0
 
 
-def _find_program_address(seeds: list[bytes], program: bytes) -> tuple[bytes, int]:
-    for bump in range(255, -1, -1):
-        digest = hashlib.sha256(b"".join(seeds) + bytes([bump]) + program + b"ProgramDerivedAddress").digest()
-        if not _on_curve(digest):
-            return digest, bump
-    raise WhirlpoolError("whirlpool oracle PDA cannot be derived", "whirlpool_oracle_unbound")
-
-
-def _on_curve(point: bytes) -> bool:
-    """Edwards25519 membership, the same check web3.js uses for PDAs."""
-    if len(point) != 32:
-        return False
-    prime = (1 << 255) - 19
-    y = int.from_bytes(point, "little")
-    sign = y >> 255
-    y &= (1 << 255) - 1
-    if y >= prime:
-        return False
-    d = (-121665 * pow(121666, prime - 2, prime)) % prime
-    y2 = y * y % prime
-    numerator = (y2 - 1) % prime
-    denominator = (d * y2 + 1) % prime
-    if denominator == 0:
-        return False
-    x2 = numerator * pow(denominator, prime - 2, prime) % prime
-    if x2 == 0:
-        return sign == 0
-    return pow(x2, (prime - 1) // 2, prime) == 1

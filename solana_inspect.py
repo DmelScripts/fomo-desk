@@ -295,7 +295,7 @@ def _check_instruction(index: int, instruction: solana_tx.Instruction, keys: lis
         _check_system(index, instruction, keys, program_ids, decoded, rpc, commitment)
         return
     if program in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
-        _check_token(index, instruction, keys, program_ids, rpc, commitment)
+        _check_token(index, instruction, keys, program_ids, decoded, rpc, commitment)
 
 
 def _check_compute(index: int, instruction: solana_tx.Instruction, program_ids: list[str]) -> None:
@@ -430,7 +430,7 @@ def _check_system(index: int, instruction: solana_tx.Instruction, keys: list[str
                 f"system instruction {index} tag 2 source is not the allowlisted wallet",
                 "wallet_unbound", program_ids, index, 2,
             )
-        if dest == phantom_transport.REQUIRED_WALLET or _initialized_native(dest, decoded, keys):
+        if dest == phantom_transport.REQUIRED_WALLET or _initialized_native(dest, decoded, keys) or dest in _created_native_accounts(decoded, keys, index):
             return
         _native_account(dest, rpc, commitment, program_ids, index, 2)
         return
@@ -482,7 +482,30 @@ def _check_associated(index: int, instruction: solana_tx.Instruction, keys: list
         )
 
 
-def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], rpc: RpcClient, commitment: str) -> None:
+def _created_native_accounts(decoded: solana_tx.Decoded, keys: list[str], before_index: int) -> set[str]:
+    """Native wSOL ATAs created earlier in this transaction.
+
+    The address must be the associated-token PDA for the allowlisted wallet and
+    the native mint. A later transfer, SyncNative, or close can bind that
+    address. An account created for any other owner or mint is not included.
+    """
+    created = set()
+    for index, instruction in enumerate(decoded.instructions):
+        if index >= before_index or instruction.program_id != solana_tx.ASSOCIATED_TOKEN:
+            continue
+        if instruction.data not in {b"", bytes([1])} or len(instruction.account_indexes) < 6:
+            continue
+        payer, ata, owner, mint, system, token_program = (keys[item] for item in instruction.account_indexes[:6])
+        if payer != phantom_transport.REQUIRED_WALLET or owner != phantom_transport.REQUIRED_WALLET:
+            continue
+        if mint != solana_tx.NATIVE_MINT or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
+            continue
+        if ata == solana_tx.associated_token_address(owner, mint, token_program):
+            created.add(ata)
+    return created
+
+
+def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str], program_ids: list[str], decoded: solana_tx.Decoded, rpc: RpcClient, commitment: str) -> None:
     data = instruction.data
     tag = data[0] if data else None
     accounts = instruction.account_indexes
@@ -511,7 +534,8 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
             )
         return
     if tag == 17 and data == bytes([17]) and accounts:
-        _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 17)
+        if keys[accounts[0]] not in _created_native_accounts(decoded, keys, index):
+            _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 17)
         return
     if tag == 9 and data == bytes([9]) and len(accounts) >= 3:
         if keys[accounts[2]] != phantom_transport.REQUIRED_WALLET:
@@ -524,7 +548,8 @@ def _check_token(index: int, instruction: solana_tx.Instruction, keys: list[str]
                 f"token instruction {index} tag 9 destination is not the allowlisted wallet",
                 "close_destination_unbound", program_ids, index, 9,
             )
-        _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 9)
+        if keys[accounts[0]] not in _created_native_accounts(decoded, keys, index):
+            _native_account(keys[accounts[0]], rpc, commitment, program_ids, index, 9)
         return
     if tag in {16, 18} and len(data) == 33 and len(accounts) >= 2:
         owner = solana_tx.b58encode(data[1:33])
