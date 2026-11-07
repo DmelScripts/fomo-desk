@@ -131,6 +131,8 @@ SETTING_RULES = {
     "risk.poll_s": ("number", 5, 3600),
     "risk.confirm_window_min": ("number", 1, 120),
     "fomo_handle": ("text", 1, 64),
+    # LIVE stack from the "stack N" command. Unset until the owner sets it.
+    "stack": ("number", 0, 1_000_000_000),
 }
 
 SETTING_GROUPS = {

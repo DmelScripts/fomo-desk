@@ -78,7 +78,7 @@ button { background: none; border: 0; padding: 0; }
 .fixture { color: var(--yellow); }
 .error { color: var(--red); }
 .search-panel { padding: 0 var(--gutter) 8px; }
-.search-panel input, input.stack-field, #live-text, .key-row input, .setting input[type="number"], .setting input[type="text"] {
+.search-panel input, input.stack-field, #live-text, #command-text, .key-row input, .setting input[type="number"], .setting input[type="text"] {
   width: 100%;
   min-height: 44px;
   border: 0;

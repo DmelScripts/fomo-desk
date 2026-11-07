@@ -22,7 +22,7 @@ class Notifier:
         self.pushes: list[dict] = []
         self.mode = mode
 
-    def push(self, title, body, url, buttons) -> None:
+    def push(self, title, body, url, buttons, *, activity: bool = True) -> None:
         mode = self.mode or db.get_setting("mode", "PAPER") or "PAPER"
         shown = str(title)
         if str(mode).upper() == "PAPER" and not shown.startswith("PAPER · "):
@@ -44,6 +44,8 @@ class Notifier:
         self.pushes.append(record)
         self._write_log(record)
         _fanout(shown, record["url"])
+        if not activity:
+            return
         kind = _kind_for(shown, body, record["buttons"])
         if kind is None:
             # activity.kind only allows bought|sold|stopped|rejected.

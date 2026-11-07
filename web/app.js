@@ -25,6 +25,8 @@
     offline: false,
     lastUpdate: null,
     seenBalance: "",
+    commandDraft: "",
+    commandReply: "",
   };
 
   function $(id) {
@@ -645,6 +647,44 @@
     renderIntegrations();
     renderKey();
     renderPush();
+    renderCommand();
+  }
+
+  function renderCommand() {
+    var node = $("account-command");
+    if (!node) return;
+    clear(node);
+    node.appendChild(el("h2", "Desk"));
+    node.appendChild(el("p", "Type a command. Nothing here places an order.", "muted"));
+    var input = el("input");
+    input.id = "command-text";
+    input.type = "text";
+    input.placeholder = "status";
+    input.autocomplete = "off";
+    input.value = state.commandDraft || "";
+    input.addEventListener("input", function () { state.commandDraft = input.value; });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") sendCommand(input);
+    });
+    var button = el("button", "Send", "fomo-btn");
+    button.type = "button";
+    button.addEventListener("click", function () { sendCommand(input); });
+    var reply = el("p", state.commandReply || "", "note");
+    reply.id = "command-reply";
+    node.appendChild(input);
+    node.appendChild(button);
+    node.appendChild(reply);
+  }
+
+  function sendCommand(input) {
+    var text = (input.value || "").trim();
+    if (!text) return;
+    call("/api/command", { method: "POST", body: { text: text } }).then(function (body) {
+      state.commandReply = body && body.text ? body.text : "";
+      state.commandDraft = "";
+      input.value = "";
+      renderCommand();
+    }).catch(noteError);
   }
 
   function shareInvite(url) {

@@ -343,9 +343,9 @@ def _cards() -> list[dict]:
     return cards
 
 
-def _state() -> dict:
+def _state(now: float | None = None) -> dict:
     balance = paper_balance()
-    baseline = _balance_before(_night_start())
+    baseline = _balance_before(_night_start(time.time() if now is None else now))
     today = 0.0 if baseline == 0 else (balance - baseline) / baseline * 100.0
     multiplier = 1.0 if baseline == 0 else balance / baseline
     return {
@@ -939,6 +939,19 @@ def push(request: Request, body: dict) -> dict:
         (endpoint, str(p256dh), str(auth), time.time()),
     )
     return {"ok": True}
+
+
+@router.post("/api/command")
+def command(request: Request, body: dict) -> dict:
+    """One owner command. The same text works from the Account tab or a caller."""
+    require_app_token(request)
+    text = body.get("text") if isinstance(body, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+    if len(text) > 500:
+        raise HTTPException(status_code=400, detail="text is too long")
+    import commands
+    return commands.run(text)
 
 
 @router.post("/api/push/test")

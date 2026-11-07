@@ -42,7 +42,7 @@ class TestApi(unittest.TestCase):
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
         body = health.json()
-        self.assertEqual(body["step"], 8)
+        self.assertEqual(body["step"], 9)
         self.assertFalse(body["agents_enabled"])
         self.assertNotIn("dummy-app-token", health.text)
         self.assertEqual(self.client.get("/api/state").status_code, 401)
@@ -236,7 +236,7 @@ class TestApi(unittest.TestCase):
             """,
             ("AfterMint", exactly, exactly),
         )
-        state = _state()
+        state = _state(just_after)
         self.assertEqual(state["balance"], 250.0)
         self.assertEqual(state["today_pct"], 25.0)
         self.assertEqual(state["multiplier"], 1.25)
