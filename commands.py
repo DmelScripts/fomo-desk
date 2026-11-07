@@ -138,7 +138,11 @@ def run(text: str) -> dict:
     if lower == "invite":
         return _ok(links.SIGNUP_URL)
     if lower == "report":
-        return _ok("No morning page has been written.")
+        from report import last_page
+        url = last_page()
+        if not url:
+            return _ok("No morning page has been written.")
+        return _ok(url)
     if lower == "paper":
         from agents.executor import set_mode
         set_mode("PAPER")
@@ -397,6 +401,8 @@ def _set(phrase: str, value: str) -> dict:
     note = _ticket_note(key)
     if note:
         text = f"{text}\n{note}"
+    if key == "report_time":
+        text = f"{text}\nThe server does not reschedule Grok Bot routines."
     return _ok(text)
 
 

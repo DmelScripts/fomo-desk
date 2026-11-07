@@ -916,6 +916,12 @@ def settings_post(request: Request, body: dict) -> dict:
     note = _ticket_note(key)
     if note:
         result["ticket"] = note
+    if key == "report_time":
+        result["schedule"] = {
+            "report_time": stored,
+            "timezone": "Asia/Ho_Chi_Minh",
+            "server_reschedules_routines": False,
+        }
     return result
 
 
@@ -1006,6 +1012,40 @@ def push_test(request: Request) -> dict:
         "removed": result["removed"],
         "failed": result["failed"],
     }
+
+
+@router.get("/api/health")
+def desk_health(request: Request) -> dict:
+    require_app_token(request)
+    from health import diagnose
+    return diagnose()
+
+
+@router.post("/api/health/recover")
+async def desk_recover(request: Request, body: dict) -> dict:
+    require_app_token(request)
+    name = str(body.get("agent") or "")
+    if name not in set(AGENT_NAMES) | {"process"}:
+        raise HTTPException(status_code=400, detail="unknown agent")
+    from health import supervisor
+    return await supervisor.recover(name)
+
+
+@router.get("/api/report")
+def report_get(request: Request) -> dict:
+    require_app_token(request)
+    from report import gather
+    return gather()
+
+
+@router.post("/api/report/page")
+def report_page(request: Request, body: dict) -> dict:
+    require_app_token(request)
+    from report import save_page
+    result = save_page(str(body.get("window_id") or ""), str(body.get("url") or ""))
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "not saved")
+    return result
 
 
 @router.get("/api/stream")

@@ -258,5 +258,5 @@ class TestCommands(unittest.TestCase):
         self.assertNotIn(TOKEN, ok.text)
         self.assertEqual(client.post("/api/command", headers=AUTH, json={}).status_code, 400)
         health = client.get("/health")
-        self.assertEqual(health.json()["step"], 11)
+        self.assertEqual(health.json()["step"], 12)
         self.assertFalse(health.json()["agents_enabled"])

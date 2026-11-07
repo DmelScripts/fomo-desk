@@ -147,4 +147,4 @@ class TestPaper(unittest.TestCase):
         self.assertIn("not defined", state["paper_night"]["reason"])
         self.assertEqual(state["mode"], "PAPER")
         self.assertFalse(client.get("/health").json()["agents_enabled"])
-        self.assertEqual(client.get("/health").json()["step"], 11)
+        self.assertEqual(client.get("/health").json()["step"], 12)

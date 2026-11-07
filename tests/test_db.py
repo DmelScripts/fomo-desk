@@ -44,6 +44,8 @@ TABLES = {
     "skips": ("mint", "until"),
     "heartbeats": ("agent", "ts"),
     "push_subs": ("endpoint", "p256dh", "auth", "created_at"),
+    "ws_events": ("id", "ts", "kind"),
+    "reports": ("window_id", "url", "acked_at", "skips_cleared"),
 }
 
 TIMESTAMP_COLUMNS = {
@@ -56,6 +58,7 @@ PRIMARY_KEYS = {
     "settings": "key",
     "heartbeats": "agent",
     "push_subs": "endpoint",
+    "reports": "window_id",
 }
 INDEXES = {
     "prices": ("mint", "ts"),
@@ -129,7 +132,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()

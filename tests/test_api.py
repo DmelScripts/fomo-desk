@@ -42,7 +42,7 @@ class TestApi(unittest.TestCase):
         health = self.client.get("/health")
         self.assertEqual(health.status_code, 200)
         body = health.json()
-        self.assertEqual(body["step"], 11)
+        self.assertEqual(body["step"], 12)
         self.assertFalse(body["agents_enabled"])
         self.assertNotIn("dummy-app-token", health.text)
         self.assertEqual(self.client.get("/api/state").status_code, 401)

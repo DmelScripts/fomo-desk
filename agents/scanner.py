@@ -412,6 +412,7 @@ async def pumpportal_loop(scanner: Scanner) -> None:
                         raw = await asyncio.wait_for(ws.recv(), timeout=WS_SILENT_S)
                     except asyncio.TimeoutError:
                         log.warning("pumpportal silent for %ss; reconnecting", WS_SILENT_S)
+                        db.note_ws_reconnect(kind="reconnect")
                         break
                     try:
                         message = json.loads(raw)
@@ -421,6 +422,7 @@ async def pumpportal_loop(scanner: Scanner) -> None:
                         await scanner.ingest(message)
         except Exception:
             log.warning("pumpportal closed; backoff %ss", backoff)
+            db.note_ws_reconnect(kind="reconnect")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 

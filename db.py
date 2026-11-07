@@ -148,6 +148,21 @@ CREATE TABLE IF NOT EXISTS push_subs (
     created_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS ws_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL,
+    kind TEXT
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+    window_id TEXT PRIMARY KEY,
+    url TEXT,
+    acked_at REAL,
+    skips_cleared INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_ws_events_ts ON ws_events (ts);
+
 CREATE INDEX IF NOT EXISTS idx_prices_mint_ts ON prices (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_scans_mint_ts ON scans (mint, ts);
 CREATE INDEX IF NOT EXISTS idx_audits_mint_ts ON audits (mint, ts);
@@ -245,6 +260,8 @@ def init_db() -> None:
             if "entry_fee_usd" not in have:
                 conn.execute("ALTER TABLE positions ADD COLUMN entry_fee_usd REAL")
             conn.execute("PRAGMA user_version=4")
+        if version < 5:
+            conn.execute("PRAGMA user_version=5")
         conn.commit()
     finally:
         conn.close()
@@ -344,6 +361,22 @@ def beat(agent: str, ts: float | None = None) -> None:
         """,
         (agent, now),
     )
+
+
+def note_ws_reconnect(now: float | None = None, kind: str = "reconnect") -> None:
+    """One real PumpPortal reconnect. The first connection is not an event."""
+    execute(
+        "INSERT INTO ws_events (ts, kind) VALUES (?, ?)",
+        (time.time() if now is None else now, kind),
+    )
+
+
+def ws_reconnects_since(start: float) -> int:
+    rows = query(
+        "SELECT COUNT(*) AS n FROM ws_events WHERE kind = 'reconnect' AND ts >= ?",
+        (start,),
+    )
+    return int(rows[0]["n"] or 0)
 
 
 def heartbeat_ages(now: float | None = None) -> dict:
