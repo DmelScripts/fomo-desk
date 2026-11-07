@@ -14,6 +14,10 @@ data/
 logs/*
 !logs/.gitkeep
 
+# Phantom CLI installed by scripts/install-phantom.sh. Not source.
+node_modules/
+.tools/
+
 # secrets — never commit
 .env
 .env.*

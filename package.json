@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Pinned Phantom CLI for the desk device login. Not a frontend.",
+  "dependencies": {
+    "@phantom/cli": "3.0.0",
+    "@phantom/mcp-server": "1.2.9"
+  }
+}

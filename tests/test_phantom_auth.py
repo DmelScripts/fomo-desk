@@ -32,6 +32,12 @@ if [ "$1" = "login" ]; then
   echo "Code: ABCD-EFGH" >&2
   echo "STAMPER_SECRET=do-not-leak" >&2
   mode=$(cat "$HOME/mode" 2>/dev/null || echo approve)
+  if [ "$mode" = "badurl" ]; then
+    echo "Visit: https://evil.example/device-connect?user_code=ABCD-EFGH" >&2
+    echo "Code: ABCD-EFGH" >&2
+    echo "STAMPER_SECRET=do-not-leak" >&2
+    exit 1
+  fi
   if [ "$mode" = "hang" ]; then sleep 30; fi
   if [ "$mode" = "die" ]; then exit 1; fi
   exit 0
@@ -85,6 +91,10 @@ exit 2
         self.assertEqual(started.json()["user_code"], "ABCD-EFGH")
         self.assertNotIn(SECRET, started.text)
         self.assertFalse(started.json()["live_ready"])
+        account = self.client.get("/api/account", headers=AUTH)
+        self.assertNotIn("ABCD-EFGH", account.text)
+        self.assertNotIn("device-connect", account.text)
+        self.assertEqual(self.home.stat().st_mode & 0o777, 0o700)
         self.assertFalse(started.json()["executable"])
         again = self.client.post("/api/phantom/login", headers=AUTH, json={})
         self.assertEqual(again.json()["user_code"], "ABCD-EFGH")
@@ -92,6 +102,35 @@ exit 2
         logs = self._capture(lambda: phantom_auth.public_login())
         self.assertNotIn(SECRET, logs)
         self.assertNotIn("do-not-leak", logs)
+
+    def test_bad_url_and_missing_binary_do_not_leak(self):
+        (self.home / "mode").write_text("badurl", encoding="utf-8")
+        secret_file = self.home / ".phantom-mcp"
+        secret_file.mkdir()
+        (secret_file / "session.json").write_text('{"stamper":"SESSIONFILESECRET"}', encoding="utf-8")
+        started = self.client.post("/api/phantom/login", headers=AUTH, json={})
+        self.assertEqual(started.status_code, 200, started.text)
+        self._wait("failed")
+        body = self.client.get("/api/phantom/login", headers=AUTH)
+        self.assertIsNone(body.json().get("approval_url"))
+        self.assertNotIn("evil.example", body.text)
+        self.assertNotIn("SESSIONFILESECRET", body.text)
+        self.assertNotIn(SECRET, body.text)
+        self.assertNotIn("ABCD-EFGH", body.text)
+        account = self.client.get("/api/account", headers=AUTH)
+        self.assertNotIn("ABCD-EFGH", account.text)
+        self.assertNotIn("device-connect", account.text)
+        self.assertNotIn("SESSIONFILESECRET", account.text)
+        os.environ["DESK_PHANTOM_BIN"] = "/tmp/phantom-binary-missing"
+        missing = self.client.post("/api/phantom/login", headers=AUTH, json={})
+        self.assertEqual(missing.status_code, 409)
+        self.assertEqual(missing.json()["detail"], "phantom package is not available")
+        self.assertNotIn("SESSIONFILESECRET", missing.text)
+        self.assertFalse(phantom_auth._allowed("https://evil.example/device-connect?user_code=ABCD-EFGH"))
+        self.assertFalse(phantom_auth._allowed("http://connect.phantom.app/device-connect?user_code=ABCD-EFGH"))
+        self.assertTrue(phantom_auth._allowed(
+            "https://connect.phantom.app/device-connect?user_code=ABCD-EFGH&client_id=desk&public_key=abc"
+        ))
 
     def test_expired_login_does_not_start_another(self):
         (self.home / "mode").write_text("hang", encoding="utf-8")

@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import db
 import phantom_transport
@@ -24,8 +25,11 @@ import phantom_transport
 log = logging.getLogger("phantom_auth")
 
 LOGIN_TIMEOUT_S = 600
-_URL = re.compile(r"https://[^\s\x1b\"']+/device-connect\?[^\s\x1b\"']+")
-_CODE = re.compile(r"Code:\s*([A-Za-z0-9-]+)")
+MAX_CAPTURE = 65536
+APPROVAL_ORIGIN = "https://connect.phantom.app"
+APPROVAL_PATH = "/device-connect"
+_URL = re.compile(r"https://[^\s\x1b\"'<>]+")
+_CODE = re.compile(r"Code:\s*([A-Za-z0-9-]{4,64})")
 _LOCK = threading.Lock()
 _FLOW: dict = {
     "state": "idle",
@@ -84,16 +88,25 @@ def start(timeout_s: float = LOGIN_TIMEOUT_S) -> dict:
     if already:
         log.info("phantom login pending")
         return public_login()
+    _stop_orphan(home, binary)
     log.info("phantom login starting")
-    child = subprocess.Popen(
+    try:
+        child = subprocess.Popen(
         [binary, "login", "--display-mode", "text"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_child_env(home),
+        env=_child_env(home, binary),
         cwd=str(home),
         start_new_session=True,
-    )
+        )
+    except OSError:
+        with _LOCK:
+            _FLOW["state"] = "failed"
+            _FLOW["process"] = None
+        log.info("phantom login failed")
+        raise RuntimeError("phantom package is not available")
+    _write_pid(home, child.pid)
     with _LOCK:
         _FLOW["process"] = child
     threading.Thread(target=_watch, args=(child, home, timeout_s), daemon=True).start()
@@ -137,8 +150,11 @@ def _watch(child: subprocess.Popen, home: Path, timeout_s: float) -> None:
                 chunk = b""
             if not chunk:
                 continue
-            raw += chunk.decode("utf-8", "replace")
-            url, code = _approval(raw)
+            raw = _append(raw, chunk)
+            url, code, rejected = _approval(raw)
+            if rejected:
+                _fail_closed(child)
+                return
             if url:
                 with _LOCK:
                     if _FLOW["state"] == "pending":
@@ -155,8 +171,11 @@ def _watch(child: subprocess.Popen, home: Path, timeout_s: float) -> None:
                 break
             if not chunk:
                 break
-            raw += chunk.decode("utf-8", "replace")
-    url, code = _approval(raw)
+            raw = _append(raw, chunk)
+    url, code, rejected = _approval(raw)
+    if rejected:
+        _fail_closed(child)
+        return
     if url:
         with _LOCK:
             if _FLOW["state"] == "pending":
@@ -198,7 +217,7 @@ def _verify() -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_child_env(home),
+            env=_child_env(home, binary),
             cwd=str(home),
             timeout=30,
             check=False,
@@ -208,7 +227,7 @@ def _verify() -> None:
             _FLOW["state"] = "failed"
         log.info("phantom login failed")
         return
-    text = (done.stdout + done.stderr).decode("utf-8", "replace")
+    text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
     if done.returncode != 0 or "401" in text or "AUTH_EXPIRED" in text or "Failed to get wallet addresses" in text:
         with _LOCK:
             _FLOW["state"] = "auth_expired"
@@ -227,16 +246,51 @@ def _verify() -> None:
     log.info("phantom login %s", _FLOW["state"])
 
 
-def _approval(text: str) -> tuple[str | None, str | None]:
-    found = _URL.search(text)
+def _append(raw: str, chunk: bytes) -> str:
+    if len(raw) >= MAX_CAPTURE:
+        return raw
+    return raw + chunk.decode("utf-8", "replace")[: MAX_CAPTURE - len(raw)]
+
+
+def _approval(text: str) -> tuple[str | None, str | None, bool]:
+    found = _URL.findall(text)
     if not found:
-        return None, None
-    url = found.group(0)
-    code = _CODE.search(text)
-    user_code = code.group(1) if code else None
-    if user_code is None and "user_code=" in url:
-        user_code = url.split("user_code=", 1)[1].split("&", 1)[0]
-    return url, user_code
+        return None, None, False
+    if any(not _allowed(url) for url in found):
+        return None, None, True
+    url = found[0]
+    parsed = urlparse(url)
+    query_code = parse_qs(parsed.query).get("user_code", [None])[0]
+    line = _CODE.search(text)
+    user_code = line.group(1) if line else query_code
+    if user_code != query_code:
+        return None, None, True
+    return url, user_code, False
+
+
+def _allowed(url: str) -> bool:
+    if any(char in url for char in " \t\r\n<>\"'"):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "connect.phantom.app":
+        return False
+    if parsed.port not in (None, 443) or parsed.username or parsed.password or parsed.fragment:
+        return False
+    if parsed.path != APPROVAL_PATH:
+        return False
+    code = parse_qs(parsed.query).get("user_code", [None])[0]
+    return isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9-]{4,64}", code) is not None
+
+
+def _fail_closed(child: subprocess.Popen) -> None:
+    _kill(child)
+    with _LOCK:
+        if _FLOW["state"] == "pending":
+            _FLOW["state"] = "failed"
+            _FLOW["approval_url"] = None
+            _FLOW["user_code"] = None
+            _FLOW["process"] = None
+    log.info("phantom login failed")
 
 
 def _identity(text: str) -> tuple[str | None, str | None]:
@@ -268,10 +322,16 @@ def _matches():
 
 
 def _binary() -> str:
-    binary = os.environ.get("DESK_PHANTOM_BIN") or "phantom"
-    if binary != "phantom" and not os.path.isabs(binary):
-        raise RuntimeError("phantom binary path is not usable")
-    return binary
+    override = os.environ.get("DESK_PHANTOM_BIN")
+    if override:
+        if not os.path.isabs(override) or any(char in override for char in "\n\r\x00"):
+            raise RuntimeError("phantom package is not available")
+        path = Path(override)
+    else:
+        path = Path(__file__).resolve().parent / "node_modules" / ".bin" / "phantom"
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise RuntimeError("phantom package is not available")
+    return str(path)
 
 
 def _home() -> Path:
@@ -281,14 +341,45 @@ def _home() -> Path:
     return Path(db._data_dir()) / "phantom-mcp"
 
 
-def _child_env(home: Path) -> dict:
-    env = {
+def _child_env(home: Path, binary: str | None = None) -> dict:
+    parts = ["/usr/bin", "/bin"]
+    node_bin = Path(__file__).resolve().parent / ".tools" / "node" / "bin"
+    if node_bin.is_dir():
+        parts.insert(0, str(node_bin))
+    if binary:
+        parts.insert(0, str(Path(binary).resolve().parent))
+    return {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home),
         "XDG_DATA_HOME": str(home),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": os.pathsep.join(parts),
     }
-    return env
+
+
+def _write_pid(home: Path, pid: int) -> None:
+    path = home / "login.pid"
+    path.write_text(str(pid), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def _stop_orphan(home: Path, binary: str) -> None:
+    path = home / "login.pid"
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")[:32].strip()
+    if not text.isdigit():
+        return
+    pid = int(text)
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+    except OSError:
+        return
+    if binary not in command or " login" not in f" {command}":
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def _kill(proc: subprocess.Popen | None) -> None:

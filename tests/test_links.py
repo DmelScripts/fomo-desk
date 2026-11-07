@@ -14,7 +14,7 @@ MINT = "4FHEBKNYy6BZ1QFMKj1xL8HDTM12rdXLRYw8DgiCUnQn"
 HANDLE = "example"
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP = {".git", "__pycache__", ".venv", "logs", "node_modules"}
+SKIP = {".git", "__pycache__", ".venv", "logs", "node_modules", ".tools"}
 APP_TEXT = {".py", ".js", ".html", ".json", ".css", ".md", ".txt", ".yaml", ".yml"}
 SHORTENERS = ("bit.ly", "t.co", "tinyurl.com", "goo.gl")
 
