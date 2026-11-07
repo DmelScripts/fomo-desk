@@ -50,6 +50,9 @@ def public_status() -> dict:
         "size_usd": "8.00",
         "fomo_bump_applies": False,
         "loss_policy": "not_approved",
+        "intake": "manual",
+        "signals_connected": False,
+        "scheduled_exits_connected": False,
         "halted": halted(),
         "required_wallet_id": phantom_transport.REQUIRED_WALLET_ID,
         "required_wallet": phantom_transport.REQUIRED_WALLET,
@@ -79,10 +82,24 @@ def run_intent(body: dict, runtime=None) -> dict:
     if db.get_setting("mode", "PAPER") != "PAPER":
         raise HTTPException(status_code=409, detail="LIVE locked")
     spec = _spec(body)
+    rows = db.query(
+        "SELECT status FROM phantom_reservations WHERE intent_id = ?",
+        (spec["intent_id"],),
+    )
+    status = rows[0]["status"] if rows else None
+    chosen = runtime or _runtime()
+    paper = getattr(chosen, "name", "") == "paper_simulation"
+    if status in _DONE or status == "submit_unknown":
+        return db.exclusive(lambda conn: _drive(conn, spec, chosen))
+    if status == "sim_open":
+        if not paper:
+            _alert("session_halt", phantom_transport.AUTH)
+            _write_halt(True)
+            return _stopped("sim_open", "exit_blocked_auth")
+        return db.exclusive(lambda conn: _drive(conn, spec, chosen))
     if halted():
         return _stopped("halted", "kill_switch")
-    chosen = runtime or _runtime()
-    if getattr(chosen, "name", "") != "paper_simulation":
+    if not paper:
         _alert("session_halt", phantom_transport.AUTH)
         _write_halt(True)
         return _stopped("halted", phantom_transport.AUTH)

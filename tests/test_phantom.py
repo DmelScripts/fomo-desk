@@ -93,6 +93,9 @@ class TestPhantomRunner(unittest.TestCase):
         self.assertFalse(account["phantom"]["fomo_bump_applies"])
         self.assertFalse(account["phantom"]["live_ready"])
         self.assertEqual(account["phantom"]["transport"], "BLOCKED")
+        self.assertFalse(account["phantom"]["signals_connected"])
+        self.assertFalse(account["phantom"]["scheduled_exits_connected"])
+        self.assertEqual(account["phantom"]["intake"], "manual")
         self.assertEqual(account["mode"], "PAPER")
         self.assertEqual(db.get_setting("paper_start_stack"), "200")
         self.assertEqual(db.get_setting("min_ticket_usd"), "47.50")
@@ -162,6 +165,113 @@ class TestPhantomRunner(unittest.TestCase):
         self.assertEqual(db.get_setting("paper_start_stack"), "200")
         self.assertEqual(db.get_setting("agents_enabled"), "0")
 
+    def test_kill_switch_blocks_new_entries_and_still_exits(self):
+        opened = phantom_runner.run_intent(self._intent("held-open", fee="0.20"), runtime=ExitBlocked())
+        self.assertEqual(opened["status"], "sim_open")
+        phantom_runner.set_halt({"halted": True})
+        fresh = phantom_runner.run_intent(self._intent("after-halt"))
+        self.assertEqual(fresh["reason"], "kill_switch")
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations WHERE intent_id = 'after-halt'"), [])
+        closed = phantom_runner.run_intent(self._intent("held-open", fee="0.20"))
+        self.assertEqual(closed["status"], "sim_closed")
+        self.assertTrue(closed["reconciled"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM phantom_reservations WHERE intent_id = 'held-open'")[0]["n"], 1)
+        now = time.time()
+        db.execute(
+            """
+            INSERT INTO phantom_reservations (
+                intent_id, status, wallet_id, wallet, chain, pair_json, amount_usd, fee_usd,
+                reserved_usd, slippage, entry_quote_id, exit_quote_id, fx_sol_usd, fx_at,
+                result_json, created_at, updated_at
+            ) VALUES ('halt-unknown', 'submit_unknown', ?, ?, 'solana:mainnet', '{}', '8.00', '0.20',
+                      '8.20', 1, 'entry-old', NULL, '150.00', ?, NULL, ?, ?)
+            """,
+            (WALLET_ID, WALLET, now, now, now),
+        )
+        reconciled = phantom_runner.reconcile_unknown({"intent_id": "halt-unknown"})
+        self.assertEqual(reconciled["reason"], "reconciled_without_resubmit")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'halt-unknown'")[0]["status"], "released")
+        self.assertTrue(phantom_runner.halted())
+
+    def test_cap_survives_restart_and_is_not_daily_turnover(self):
+        opened = phantom_runner.run_intent(self._intent("stay", fee="50.00"), runtime=ExitBlocked())
+        self.assertEqual(opened["status"], "sim_open")
+        held = db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'stay'")[0]["reserved_usd"]
+        self.assertEqual(held, "58.00")
+        db.init_db()
+        self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'stay'")[0]["reserved_usd"], "58.00")
+        self.assertEqual(db.get_setting("paper_start_stack"), "200")
+        phantom_runner.set_halt({"halted": False})
+        blocked = phantom_runner.run_intent(self._intent("after-restart", fee="50.00"))
+        self.assertEqual(blocked["reason"], "bankroll")
+        closed = phantom_runner.run_intent(self._intent("turn", fee="0.20"))
+        self.assertEqual(closed["status"], "sim_closed")
+        nxt = phantom_runner.run_intent(self._intent("turn-2", fee="0.20"))
+        self.assertEqual(nxt["status"], "sim_closed")
+        self.assertEqual(nxt["amount_usd"], "8.00")
+        spent = db.query(
+            "SELECT fee_usd FROM phantom_reservations WHERE status = 'sim_closed' AND intent_id = 'turn'"
+        )[0]["fee_usd"]
+        self.assertEqual(spent, "0.20")
+
+    def test_concurrent_reservations_do_not_exceed_the_cap(self):
+        results = []
+
+        def once(name):
+            results.append(phantom_runner.run_intent(self._intent(name, fee="50.00"), runtime=ExitBlocked()))
+
+        threads = [threading.Thread(target=once, args=(name,)) for name in ("cap-a", "cap-b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        statuses = sorted(row["status"] for row in results)
+        self.assertEqual(statuses, ["rejected", "sim_open"])
+        open_rows = db.query("SELECT reserved_usd FROM phantom_reservations WHERE status = 'sim_open'")
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(open_rows[0]["reserved_usd"], "58.00")
+
+    def test_stale_quote_and_wallet_mismatch_fail_closed(self):
+        stale = phantom_runner.run_intent(self._intent("stale-quote"), runtime=StalePaper())
+        self.assertEqual(stale["reason"], "paper_validity")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'stale-quote'")[0]["status"], "released")
+        invented = phantom_runner.run_intent(self._intent("invented"), runtime=InventedExpiry())
+        self.assertEqual(invented["reason"], "invented_provider_expiry")
+        self.assertNotEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'invented'")[0]["status"], "sim_closed")
+        wrong = self._intent("wrong-wallet")
+        wrong["wallet"] = "4tKiUbkTbbcPqrTDsjmMWgZWZ7mZucMKJqk2nHE2HP4f"
+        self.assertEqual(self.client.post("/api/phantom/run", headers=AUTH, json=wrong).status_code, 400)
+        wrong_id = self._intent("wrong-id")
+        wrong_id["wallet_id"] = "00000000-0000-0000-0000-000000000000"
+        self.assertEqual(self.client.post("/api/phantom/run", headers=AUTH, json=wrong_id).status_code, 400)
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations WHERE intent_id IN ('wrong-wallet', 'wrong-id')"), [])
+        opened = phantom_runner.run_intent(self._intent("auth-open"), runtime=ExitBlocked())
+        self.assertEqual(opened["status"], "sim_open")
+        os.environ["DESK_PHANTOM_PAPER"] = "0"
+
+        class Explode:
+            name = "blocked"
+
+            def quote(self, _spec):
+                raise AssertionError("quoted during auth failure")
+
+        blocked = phantom_runner.run_intent(self._intent("auth-open"), runtime=Explode())
+        self.assertEqual(blocked["status"], "sim_open")
+        self.assertEqual(blocked["reason"], "exit_blocked_auth")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'auth-open'")[0]["status"], "sim_open")
+
+    def test_agents_do_not_feed_the_phantom_runner(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in (
+            "agents/scanner.py", "agents/auditor.py", "agents/executor.py", "agents/risk.py",
+            "main.py", "server.py", "report.py", "health.py", "notifier.py", "replay.py",
+        ):
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertNotIn("phantom_runner", text, name)
+            self.assertNotIn("run_intent", text, name)
+        self.assertFalse(phantom_runner.public_status()["signals_connected"])
+        self.assertFalse(phantom_runner.public_status()["scheduled_exits_connected"])
+
     def test_same_intent_is_single_flight(self):
         results = []
 
@@ -197,7 +307,20 @@ class ExitBlocked(phantom_runner.PaperRuntime):
     def quote(self, spec):
         if spec["side"] == "exit":
             quote = super().quote(spec)
-            quote["quote_id"] = spec.get("entry") or quote["quote_id"]
             quote["sim_fill_allowed"] = False
             return quote
         return super().quote(spec)
+
+
+class StalePaper(phantom_runner.PaperRuntime):
+    def quote(self, spec):
+        quote = super().quote(spec)
+        quote["paper_valid_until"] = time.time() - 30
+        return quote
+
+
+class InventedExpiry(phantom_runner.PaperRuntime):
+    def quote(self, spec):
+        quote = super().quote(spec)
+        quote["provider_expiry"] = time.time() + 60
+        return quote

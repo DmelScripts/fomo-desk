@@ -717,6 +717,7 @@
     node.appendChild(el("p", "Transport " + (row.transport || "BLOCKED") + " · " + (row.auth || "AWAITING_OWNER_AUTH_PROCEDURE")));
     node.appendChild(el("p", row.halted ? "Kill switch on" : "Kill switch off"));
     node.appendChild(el("p", "Send off. A quote needs the bound wallet id and Solana address. The recorded quote is not executable."));
+    node.appendChild(el("p", "Scanner, auditor, and Jev signals do not start an order. Exits are not scheduled from here.", "muted"));
   }
 
   function renderQuotes() {
