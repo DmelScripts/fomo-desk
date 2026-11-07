@@ -12,6 +12,7 @@ the swap instruction stay unverified.
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 
 import phantom_transport
@@ -24,12 +25,13 @@ _AMOUNT = "10000000"
 _SLIPPAGE_BPS = 100
 _REQUIRED = {
     "inputMint", "outputMint", "inAmount", "outAmount", "otherAmountThreshold",
-    "swapMode", "slippageBps", "routePlan", "computeBudgetInstructions",
-    "setupInstructions", "swapInstruction", "cleanupInstruction",
-    "otherInstructions", "tipInstruction", "addressesByLookupTableAddress",
-    "blockhashWithMetadata",
+    "swapMode", "slippageBps", "priceImpactPct", "routePlan",
+    "computeBudgetInstructions", "setupInstructions", "swapInstruction",
+    "cleanupInstruction", "otherInstructions", "tipInstruction",
+    "addressesByLookupTableAddress", "blockhashWithMetadata", "transactionVersion",
 }
-_OPTIONAL = {"transactionVersion", "computeUnitPrice"}
+_OPTIONAL = {"computeUnitPrice"}
+_IMPACT = re.compile(r"-?\d+(\.\d+)?")
 _KNOWN_PROGRAMS = solana_tx.ALLOWED_PROGRAMS | {solana_jupiter.PROGRAM_ID}
 
 
@@ -114,6 +116,9 @@ def evaluate(body: dict, rpc) -> dict:
     inspected["provider_expiry"] = None
     inspected["freshness_guarantee"] = False
     inspected["other_amount_threshold"] = parsed["other_amount_threshold"]
+    inspected["price_impact_pct"] = parsed["price_impact_pct"]
+    inspected["price_impact_verified"] = False
+    inspected["blockhash_fetched_at"] = parsed["blockhash_fetched_at"]
     inspected["min_output_formula_ok"] = True
     inspected["min_output_verified"] = False
     inspected["dex_accounts_verified"] = False
@@ -146,6 +151,10 @@ def parse_build(body: dict) -> dict:
     floor = out_amount * (10_000 - slippage) // 10_000
     if threshold > out_amount or threshold < floor:
         raise BuildError("jupiter build minimum output does not match the slippage field", "slippage_mismatch")
+    if "computeUnitPrice" in body and version in {0, "0"}:
+        raise BuildError("jupiter build v0 response included computeUnitPrice", "malformed")
+    if not isinstance(body.get("priceImpactPct"), str) or _IMPACT.fullmatch(body["priceImpactPct"]) is None or len(body["priceImpactPct"]) > 32:
+        raise BuildError("jupiter build price impact is malformed", "malformed")
     if body.get("tipInstruction") is not None:
         raise BuildError("jupiter build included a tip", "tip_unbound")
     _route(body.get("routePlan"))
@@ -160,10 +169,9 @@ def parse_build(body: dict) -> dict:
         if not isinstance(group, list):
             raise BuildError("jupiter build instructions are malformed", "malformed")
         instructions.extend(_instruction(item) for item in group)
-    if not any(item.program_id == solana_jupiter.PROGRAM_ID for item in instructions):
-        raise BuildError("jupiter build swap program is not JUP6", "route_mismatch")
+    _require_supported_swap(instructions)
     tables = _tables(body.get("addressesByLookupTableAddress"))
-    blockhash, height = _blockhash(body.get("blockhashWithMetadata"))
+    blockhash, height, fetched_at = _blockhash(body.get("blockhashWithMetadata"))
     return {
         "instructions": instructions,
         "tables": tables,
@@ -172,6 +180,8 @@ def parse_build(body: dict) -> dict:
         "out_amount": str(out_amount),
         "other_amount_threshold": str(threshold),
         "slippage_bps": slippage,
+        "price_impact_pct": body["priceImpactPct"],
+        "blockhash_fetched_at": fetched_at,
     }
 
 
@@ -254,16 +264,40 @@ def _drain(meta: dict, addresses: list[str], predicate) -> tuple[list[int], list
     return indexes, keys
 
 
+def _require_supported_swap(instructions: list[_Ix]) -> None:
+    swaps = [item for item in instructions if item.program_id == solana_jupiter.PROGRAM_ID]
+    if len(swaps) != 1:
+        raise BuildError("jupiter build swap program is not JUP6", "route_mismatch")
+    data = swaps[0].data
+    if len(data) >= 8 and data[:8] == solana_jupiter.ROUTE_V2:
+        raise BuildError(
+            "jupiter build swap is route_v2 and its account layout is not supported",
+            "jupiter_route_v2_unsupported",
+        )
+    if len(data) < 8 or data[:8] != solana_jupiter._SHARED:
+        raise BuildError(
+            "jupiter build swap instruction is not shared_accounts_route",
+            "jupiter_instruction_unsupported",
+        )
+
+
 def _route(plan) -> None:
     if not isinstance(plan, list) or not 1 <= len(plan) <= 16:
         raise BuildError("jupiter build route plan is not usable", "route_mismatch")
     mints = []
     for step in plan:
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or set(step) - {"usdValue"} != {"swapInfo", "percent", "bps"}:
             raise BuildError("jupiter build route plan is not usable", "route_mismatch")
         info = step.get("swapInfo")
         percent = step.get("percent")
-        if not isinstance(info, dict) or isinstance(percent, bool) or not isinstance(percent, int) or not 1 <= percent <= 100:
+        bps = step.get("bps")
+        if not isinstance(info, dict) or set(info) != {"ammKey", "label", "inputMint", "outputMint", "inAmount", "outAmount"}:
+            raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+        if isinstance(percent, bool) or not isinstance(percent, int) or not 1 <= percent <= 100:
+            raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+        if isinstance(bps, bool) or not isinstance(bps, int) or bps != percent * 100:
+            raise BuildError("jupiter build route plan is not usable", "route_mismatch")
+        if "usdValue" in step and (isinstance(step["usdValue"], bool) or not isinstance(step["usdValue"], (int, float))):
             raise BuildError("jupiter build route plan is not usable", "route_mismatch")
         mints.append((info.get("inputMint"), info.get("outputMint")))
     if mints[0][0] != solana_tx.NATIVE_MINT or mints[-1][1] != solana_tx.USDC_MINT:
@@ -322,16 +356,25 @@ def _tables(value) -> list[tuple[str, list[str]]]:
     return tables
 
 
-def _blockhash(value) -> tuple[str, int]:
-    if not isinstance(value, dict):
+def _blockhash(value) -> tuple[str, int, dict]:
+    if not isinstance(value, dict) or set(value) != {"blockhash", "lastValidBlockHeight", "fetchedAt"}:
         raise BuildError("jupiter build blockhash is malformed", "malformed")
     raw = value.get("blockhash")
     height = value.get("lastValidBlockHeight")
+    fetched = value.get("fetchedAt")
     if not isinstance(raw, list) or len(raw) != 32 or any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item <= 255 for item in raw):
         raise BuildError("jupiter build blockhash is malformed", "malformed")
     if isinstance(height, bool) or not isinstance(height, int) or height < 1:
         raise BuildError("jupiter build blockhash height is malformed", "malformed")
-    return solana_tx.b58encode(bytes(raw)), height
+    if not isinstance(fetched, dict) or set(fetched) != {"secs_since_epoch", "nanos_since_epoch"}:
+        raise BuildError("jupiter build blockhash fetch time is malformed", "malformed")
+    secs = fetched.get("secs_since_epoch")
+    nanos = fetched.get("nanos_since_epoch")
+    if isinstance(secs, bool) or not isinstance(secs, int) or secs < 0:
+        raise BuildError("jupiter build blockhash fetch time is malformed", "malformed")
+    if isinstance(nanos, bool) or not isinstance(nanos, int) or not 0 <= nanos < 1_000_000_000:
+        raise BuildError("jupiter build blockhash fetch time is malformed", "malformed")
+    return solana_tx.b58encode(bytes(raw)), height, {"secs_since_epoch": secs, "nanos_since_epoch": nanos}
 
 
 def _positive_integer(value, name: str) -> int:

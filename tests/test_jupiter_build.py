@@ -70,6 +70,8 @@ def _body(**overrides):
         "otherAmountThreshold": str(FLOOR),
         "swapMode": "ExactIn",
         "slippageBps": 100,
+        "priceImpactPct": "0.001",
+        "transactionVersion": 0,
         "routePlan": [{
             "percent": 100,
             "bps": 10000,
@@ -95,7 +97,11 @@ def _body(**overrides):
         "otherInstructions": [],
         "tipInstruction": None,
         "addressesByLookupTableAddress": {TABLE: [DEX]},
-        "blockhashWithMetadata": {"blockhash": list(b"\x11" * 32), "lastValidBlockHeight": 250_000_000},
+        "blockhashWithMetadata": {
+            "blockhash": list(b"\x11" * 32),
+            "lastValidBlockHeight": 250_000_000,
+            "fetchedAt": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+        },
     }
     body.update(overrides)
     return body
@@ -144,6 +150,9 @@ class JupiterBuildTest(unittest.TestCase):
         self.assertFalse(shown["last_valid_block_height_is_provider_expiry"])
         self.assertIsNone(shown["provider_expiry"])
         self.assertFalse(shown["freshness_guarantee"])
+        self.assertEqual(shown["price_impact_pct"], "0.001")
+        self.assertFalse(shown["price_impact_verified"])
+        self.assertEqual(shown["blockhash_fetched_at"], {"secs_since_epoch": 1, "nanos_since_epoch": 0})
         self.assertEqual(shown["other_amount_threshold"], str(FLOOR))
         self.assertTrue(shown["min_output_formula_ok"])
         self.assertFalse(shown["min_output_verified"])
@@ -196,6 +205,23 @@ class JupiterBuildTest(unittest.TestCase):
         with self.assertRaises(jupiter_build.BuildError) as version:
             jupiter_build.parse_build(_body(transactionVersion=1))
         self.assertEqual(version.exception.category, "transaction_version_unsupported")
+        ceiling = _body(otherAmountThreshold=str(FLOOR + 1))
+        self.assertEqual(jupiter_build.parse_build(ceiling)["other_amount_threshold"], str(FLOOR + 1))
+
+    def test_route_v2_discriminator_is_rejected_without_a_layout(self):
+        body = _body()
+        synthetic = solana_jupiter.ROUTE_V2 + (b"\x00" * 32)
+        body["swapInstruction"] = dict(body["swapInstruction"], data=base64.b64encode(synthetic).decode("ascii"))
+        with self.assertRaises(jupiter_build.BuildError) as caught:
+            jupiter_build.parse_build(body)
+        self.assertEqual(solana_jupiter.ROUTE_V2.hex(), "bb64facc31c4af14")
+        self.assertEqual(caught.exception.category, "jupiter_route_v2_unsupported")
+        self.assertNotIn("raw", caught.exception.reason)
+        missing_time = _body()
+        missing_time["blockhashWithMetadata"] = {"blockhash": list(b"\x11" * 32), "lastValidBlockHeight": 250_000_000}
+        with self.assertRaises(jupiter_build.BuildError) as timed:
+            jupiter_build.parse_build(missing_time)
+        self.assertEqual(timed.exception.category, "malformed")
 
     def test_nonzero_fee_does_not_reach_simulation(self):
         fake = _rpc()
