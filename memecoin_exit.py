@@ -339,19 +339,20 @@ def match_entry(reserved: dict, signature: str, pulled: dict) -> dict:
     if wallet is None or wallet[0] < wallet[1]:
         return refused | {"reason": "cost_missing"}
     spent = wallet[0] - wallet[1]
-    if mint_row.get("bot_funded") is True and isinstance(mint_row.get("rent_lamports"), int):
-        deposit = mint_row["rent_lamports"]
-    elif mint_row.get("preexisting") is True or mint_row.get("provenance") == "lamports_zero_without_close":
-        deposit = 0
-    elif mint_row.get("observed") is True and mint_row.get("post_lamports") == 0 and mint_row.get("pre_lamports") == 0:
-        deposit = 0
-    else:
-        return refused | {"reason": "deposit_unobserved"}
+    conserved = _conserved_deposit(decoded, pulled["meta"], destination, created.get(destination) is not None)
+    if conserved.get("ok") is not True:
+        return refused | {
+            "reason": conserved.get("reason"),
+            "accounts": conserved.get("accounts"),
+            "network_fee_lamports": fee,
+            "wallet_spent_lamports": spent,
+        }
+    deposit = conserved["deposit_lamports"]
     wsol = rent.get("wsol") or {}
     if wsol.get("net_proven") is not True:
-        return refused | {"reason": "rent_unproven"}
+        return refused | {"reason": "rent_unproven", "network_fee_lamports": fee, "wallet_spent_lamports": spent}
     if spent != int(reserved["input_lamports"]) + fee + deposit:
-        return refused | {"reason": "cost_unsplit", "spent_lamports": spent}
+        return refused | {"reason": "cost_unsplit", "spent_lamports": spent, "network_fee_lamports": fee, "deposit_lamports": deposit}
     return {
         "ok": True,
         "reason": None,
@@ -474,12 +475,69 @@ def match_refund(recorded: dict, signature: str, pulled: dict) -> dict:
         "resend": False,
         "account": account,
         "rent_lamports": rent,
+        "network_fee_lamports": fee,
         "wallet": phantom_transport.REQUIRED_WALLET,
         "slot": pulled["slot"],
         "signature": signature,
         "send": False,
         "live_ready": False,
     }
+
+
+def _conserved_deposit(decoded, meta: dict, mint_ata: str, created: bool) -> dict:
+    """Every native delta has to be the fee, the swap input, or the mint account this buy funds.
+
+    An unchanged preexisting mint account is not our deposit. A lamport change on
+    that account, or on any other account, is unexplained and is not a fill.
+    """
+    deltas = _account_deltas(decoded, meta)
+    if deltas is None or not isinstance(mint_ata, str):
+        return {"ok": False, "reason": "cost_missing"}
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    unexplained = []
+    mint_delta = None
+    for item in deltas:
+        if item["account"] == wallet:
+            continue
+        if item["account"] == wsol:
+            if item["delta"] != 0:
+                unexplained.append(item)
+            continue
+        if item["account"] == mint_ata:
+            mint_delta = item
+            continue
+        if item["delta"] != 0:
+            unexplained.append(item)
+    if mint_delta is None:
+        return {"ok": False, "reason": "deposit_unobserved", "accounts": unexplained}
+    if created and mint_delta["pre"] == 0:
+        deposit = mint_delta["post"]
+    elif mint_delta["delta"] == 0:
+        deposit = 0
+    else:
+        unexplained.append(mint_delta)
+        deposit = None
+    if unexplained:
+        return {"ok": False, "reason": "unexplained_lamports", "accounts": unexplained}
+    return {"ok": True, "deposit_lamports": deposit, "mint_pre": mint_delta["pre"], "mint_post": mint_delta["post"]}
+
+
+def _account_deltas(decoded, meta: dict):
+    pre = meta.get("preBalances") if isinstance(meta, dict) else None
+    post = meta.get("postBalances") if isinstance(meta, dict) else None
+    keys = decoded.static_keys
+    if not isinstance(pre, list) or not isinstance(post, list) or len(pre) != len(keys) or len(post) != len(keys):
+        return None
+    rows = []
+    for index, key in enumerate(keys):
+        before, after = pre[index], post[index]
+        if isinstance(before, bool) or isinstance(after, bool) or not isinstance(before, int) or not isinstance(after, int):
+            return None
+        if before < 0 or after < 0:
+            return None
+        rows.append({"index": index, "account": key, "pre": before, "post": after, "delta": after - before})
+    return rows
 
 
 def _account_actions(decoded) -> tuple[dict, dict]:
