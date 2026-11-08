@@ -271,7 +271,7 @@ class RouteV2Tests(unittest.TestCase):
         )
         self.assertEqual(unbound["reason"], "snapshot_unbound")
         tiny = _decode(_tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 9999)), data)
-        self.assertEqual(tiny["reason"], "slippage_unapproved")
+        self.assertEqual(tiny["reason"], "slippage_exceeds")
         self.assertFalse(tiny["ok"])
         wider = _decode(_tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 9999)), data, allowance=50)
         self.assertEqual(wider["reason"], "slippage_exceeds")

@@ -408,6 +408,10 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
     quoted = jupiter_route_v2._amm_bound(parsed, state, parsed.get("a_to_b") is True, tick_bytes, pool_key)
     if quoted.get("ok") is not True:
         return _note(row, "executor", quoted.get("reason") or "quote_unbound")
+    import owner_slippage
+    slip = owner_slippage.check_route(parsed.get("slippage_bps"), parsed.get("min_out"), quoted.get("est_out"))
+    if slip.get("ok") is not True:
+        return _note(row, "executor", slip.get("reason") or "slippage_exceeds")
     clock = memecoin_exit.quote_clock(None, None, None)
     dex = jupiter_route_v2.whirlpool_fee(route["in_amount"], state["fee_rate"])
     compute = [bytes(item.data) for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
@@ -432,7 +436,8 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         "trail_arm_pct": format(TRAIL_ARM, "f"),
         "trail_drop_pct": format(TRAIL_DROP, "f"),
         "source": "owner_widget_21:37",
-        "owner_slippage_approved": False,
+        "max_slippage_bps": owner_slippage.BPS,
+        "owner_slippage_approved": owner_slippage.ceiling_bps() == owner_slippage.BPS,
         "test_consent_is_owner_consent": False,
     }
     blocked = _effectual_blocks()
@@ -631,7 +636,7 @@ def confirm_entry(case_id: str, signature: str, now: float | None = None) -> dic
             "entry_halt": breach,
             "entry_funding_proven": True,
             "effectual_entry": False,
-            "owner_slippage_approved": False,
+            "owner_slippage_approved": __import__("owner_slippage").ceiling_bps() == 50,
             "holds": True,
             "send": False,
             "sign": False,
@@ -702,6 +707,24 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
         return _note(row, "risk", "fee_cap")
     if exposure > TICKET:
         return _note(row, "risk", "exposure_cap")
+    import owner_slippage
+    import solana_jupiter
+    pool_for_quote, tick_keys = _hop_keys(route)
+    swap_data = b""
+    for instruction in decoded.instructions:
+        if decoded.static_keys[instruction.program_index] == solana_jupiter.PROGRAM_ID:
+            swap_data = bytes(instruction.data)
+    parsed = jupiter_route_v2.parse(swap_data)
+    tick_bytes = []
+    for key in tick_keys:
+        tick = snapshot.accounts.get(key)
+        if isinstance(tick, tuple):
+            tick_bytes.append(tick[1])
+    quoted = jupiter_route_v2._amm_bound(parsed, state, parsed.get("a_to_b") is True, tick_bytes, pool_key if pool_for_quote is None else pool_for_quote)
+    est = quoted.get("est_out") if isinstance(quoted, dict) else None
+    slip = owner_slippage.check_route(parsed.get("slippage_bps"), parsed.get("min_out"), est)
+    if slip.get("ok") is not True:
+        return _note(row, "risk", slip.get("reason") or "slippage_exceeds")
     snap = _snapshot(row)
 
     def work(conn):
@@ -1383,7 +1406,7 @@ def _reservation_view(case_id: str, reservation: dict, *, idempotent: bool) -> d
         "reserved_fee_usd": reservation.get("reserved_fee_usd"),
         "wallet": reservation.get("wallet"),
         "mint": reservation.get("mint"),
-        "owner_slippage_approved": False,
+        "owner_slippage_approved": (reservation.get("policy") or {}).get("owner_slippage_approved") is True,
         "test_consent_is_owner_consent": False,
         "effectual_entry": False,
         "effectual_blocked_by": reservation.get("effectual_blocked_by"),

@@ -456,7 +456,6 @@ def decode_message(tx_b64: str, snapshot, *, side: str, mint: str, now: float | 
     result["wrap_verified"] = result.get("ok") is True
     result["slot"] = snapshot.slot
     result["tip_slot"] = snapshot.tip_slot
-    result["owner_slippage_approved"] = False
     return result
 
 
@@ -579,17 +578,21 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"], "amm_est_out": quoted_ok.get("est_out")}
     result["amm_est_out"] = quoted_ok.get("est_out")
     result["amm_min_out"] = quoted_ok.get("min_out")
-    allowance = slippage_allowance_bps
-    result["owner_slippage_approved"] = False
+    import owner_slippage
+    allowance = owner_slippage.effective_test_allowance(slippage_allowance_bps)
+    result["owner_slippage_approved"] = owner_slippage.ceiling_bps() == owner_slippage.BPS
+    result["owner_ceiling_bps"] = owner_slippage.BPS
+    if parsed["slippage_bps"] > owner_slippage.BPS:
+        return result | {"reason": "slippage_exceeds", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"], "owner_ceiling_bps": owner_slippage.BPS, "buy_proven": False, "exit_proven": False}
+    if allowance == "unbound":
+        return result | {"reason": "slippage_allowance_unbound", "min_out": parsed["min_out"]}
     if allowance is None:
         return result | {"reason": "slippage_unapproved", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"], "buy_proven": False, "exit_proven": False}
-    if isinstance(allowance, bool) or not isinstance(allowance, int) or not 0 <= allowance <= 10_000:
-        return result | {"reason": "slippage_allowance_unbound", "min_out": parsed["min_out"]}
     result["slippage_allowance_bps"] = allowance
-    result["slippage_allowance_source"] = "test_fixture"
+    result["slippage_allowance_source"] = "test_fixture" if slippage_allowance_bps == allowance else "clamped_to_owner_ceiling"
     if parsed["slippage_bps"] > allowance:
         return result | {"reason": "slippage_exceeds", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"]}
-    floor = quoted_ok["est_out"] * (10_000 - allowance) // 10_000
+    floor = quoted_ok["est_out"] * (10_000 - parsed["slippage_bps"]) // 10_000
     if parsed["min_out"] < floor:
         return result | {"reason": "min_below_amm", "min_out": parsed["min_out"], "allowance_floor": floor}
     return result | {
@@ -602,7 +605,6 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         "send": False,
         "sign": False,
         "live_ready": False,
-        "owner_slippage_approved": False,
     }
 
 

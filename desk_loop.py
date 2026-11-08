@@ -36,7 +36,8 @@ def _authorized() -> bool:
 def _ready_reasons() -> list[str]:
     """Missing evidence. A test cannot delete these by replacing this function's constant result."""
     reasons = []
-    if _authorized() is not True or db_setting("memecoin_max_slippage_bps") in (None, ""):
+    import owner_slippage
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
         reasons.append("owner_slippage_unapproved")
     if stalkchain_adapter.UNPROVEN:
         reasons.append("lp_fields_unpublished")
@@ -336,6 +337,16 @@ def public_reader(request: dict) -> dict:
         return {"status": response.status, "body": json.loads(response.read().decode())}
 
 
+def _readiness_blocks(pyth: dict) -> list[str]:
+    import owner_slippage
+    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished"]
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
+        blocks.append("owner_slippage_unapproved")
+    blocks.append(pyth["reason"] or "pyth_sponsored_not_fresh")
+    blocks.append("hermes_not_called")
+    return blocks
+
+
 def readiness() -> dict:
     """Presence and status for this process. Not a Render inventory and not a secret."""
     pyth = pyth_sponsored.status()
@@ -370,12 +381,7 @@ def readiness() -> dict:
         "onchain_pyth_valuation": pyth["valuation"],
         "onchain_pyth_usdc_used": False,
         "onchain_pyth_available": pyth["usable"] is True,
-        "blocked_because": [
-            "stalkchain_response_fields_for_lp_rug_growth_are_unpublished",
-            "owner_slippage_unapproved",
-            pyth["reason"] or "pyth_sponsored_not_fresh",
-            "hermes_not_called",
-        ],
+        "blocked_because": _readiness_blocks(pyth),
     }
 
 
