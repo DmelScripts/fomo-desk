@@ -25,6 +25,7 @@ METHODS = frozenset({
     "getMultipleAccounts",
     "getMinimumBalanceForRentExemption",
     "getLatestBlockhash",
+    "getSlot",
     "getFeeForMessage",
     "isBlockhashValid",
     "getBlockHeight",
@@ -167,10 +168,26 @@ def load_bundle(rpc: ReadRpc, expected_slot: int | None = None) -> dict:
     if parsed is None or not isinstance(rent, int) or isinstance(rent, bool) or rent <= 0:
         return failed | {"reason": "blockhash" if parsed is None else "rent", "context_slot": slot}
     fetched.update(parsed)
+    try:
+        tip = rpc.call("getSlot", [{"commitment": "confirmed", "minContextSlot": slot}])
+    except RpcError as exc:
+        return failed | {"reason": exc.reason, "context_slot": slot}
+    # 150 slots is the protocol recent-blockhash lifetime, not a price band.
+    # tip == batch from this same node is an echo, not proof the slot advanced.
+    if isinstance(tip, bool) or not isinstance(tip, int):
+        return failed | {"reason": "slot_unproven", "context_slot": slot, "fetched": True, "independent_slot_time_proven": False}
+    lag = tip - slot
+    if lag == 0:
+        return failed | {"reason": "slot_echo", "context_slot": slot, "tip_slot": tip, "fetched": True, "independent_slot_time_proven": False}
+    if lag < 0 or lag > 150:
+        return failed | {"reason": "slot_lag", "context_slot": slot, "tip_slot": tip, "fetched": True, "independent_slot_time_proven": False}
     fetched["rent_lamports"] = rent
     fetched["genesis"] = genesis
     fetched["fetched_at"] = fetched_at
+    fetched["tip_slot"] = tip
+    fetched["slot_lag"] = lag
     fetched["slot_is_ttl"] = False
+    fetched["independent_slot_time_proven"] = False
     return fetched
 
 
@@ -268,6 +285,7 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
     meta = transaction.get("meta") if isinstance(transaction.get("meta"), dict) else {}
     fee = meta.get("fee")
     delta = _usdc_delta(meta, decoded)
+    key_count = len(decoded.static_keys)
     slot = transaction.get("slot")
     if row.get("slot") != slot:
         return None
@@ -277,32 +295,52 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
         "wallet": decoded.fee_payer,
         "message_sha256": digest,
         "acquired_raw": delta,
+        "ata_balance": _token_amount(meta.get("postTokenBalances"), decoded, solana_tx.USDC_MINT),
+        "account_keys": list(decoded.static_keys),
+        "native_pre": _native_list(meta.get("preBalances"), key_count),
+        "native_post": _native_list(meta.get("postBalances"), key_count),
         "network_fee_lamports": fee if isinstance(fee, int) and not isinstance(fee, bool) else None,
         "err": None,
         "confirmation_status": row.get("confirmationStatus"),
         "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
         "block_height": row.get("blockHeight") if isinstance(row.get("blockHeight"), int) else None,
         "blockhash": decoded.blockhash,
+        "exit_swap": solana_direct_swap.receipt_exit_fields(decoded),
     }
 
 
+def _native_list(rows, count: int) -> list[int] | None:
+    """Native lamports aligned with the message keys. A missing list is not a row of zeros."""
+    if not isinstance(rows, list) or len(rows) != count:
+        return None
+    if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in rows):
+        return None
+    return list(rows)
+
+
 def _usdc_delta(meta: dict, decoded) -> int | None:
-    """Post minus pre for the wallet's USDC. The post balance itself is not the fill."""
+    """Post minus pre. A missing pre row is not treated as a zero starting balance."""
     pre = _token_amount(meta.get("preTokenBalances"), decoded, solana_tx.USDC_MINT)
     post = _token_amount(meta.get("postTokenBalances"), decoded, solana_tx.USDC_MINT)
-    if post is None:
+    if pre is None or post is None:
         return None
-    return post - (pre or 0)
+    return post - pre
 
 
 def _token_amount(rows, decoded, mint: str) -> int | None:
+    """The wallet's own USDC ATA. A missing owner or a different account index is not the fill."""
     if not isinstance(rows, list):
         return None
+    import solana_tx
     owner = decoded.fee_payer
+    ata = solana_tx.associated_token_address(owner, mint, solana_tx.TOKEN_PROGRAM)
     for row in rows:
-        if not isinstance(row, dict) or row.get("mint") != mint:
+        if not isinstance(row, dict) or row.get("mint") != mint or row.get("owner") != owner:
             continue
-        if row.get("owner") not in (None, owner):
+        index = row.get("accountIndex")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(decoded.static_keys):
+            continue
+        if decoded.static_keys[index] != ata:
             continue
         amount = row.get("uiTokenAmount", {}).get("amount") if isinstance(row.get("uiTokenAmount"), dict) else None
         if isinstance(amount, str) and amount.isdigit():

@@ -41,6 +41,9 @@ def target() -> dict:
         "daily_reset": False,
         "refill": False,
         "guaranteed_loss_limit": False,
+        "new_entries_stop_once_realized_reaches": format(MAX_CUMULATIVE_LOSS_USD, "f"),
+        "open_exposure_is_not_realized_loss": True,
+        "an_open_trade_can_realize_past_the_stop": True,
         "recorded": False,
         "approved": False,
     }
@@ -111,8 +114,47 @@ def store_aggregate_loss(max_loss_usd: str) -> dict:
     return aggregate_view()
 
 
+def usd_source() -> dict:
+    """USDC/USD only when a configured quote is usable. Pool micro-USDC is not USD."""
+    import usdc_valuation
+    quote = usdc_valuation.current()
+    return {
+        "approved": quote.get("approved") is True,
+        "usable": quote.get("usable") is True,
+        "source": quote.get("source"),
+        "accepted_band": None,
+        "reason": quote.get("reason"),
+        "pool_micro_usdc_is_usd": False,
+        "confidence": quote.get("confidence"),
+        "feed_id": quote.get("feed_id"),
+        "upper": quote.get("upper"),
+        "lower": quote.get("lower"),
+        "origin": quote.get("origin"),
+        "live_provider": quote.get("live_provider") is True,
+        "authenticated_live": quote.get("authenticated_live") is True,
+        "publish_time": quote.get("publish_time"),
+        "price": quote.get("price"),
+        "conf": quote.get("conf"),
+        "expo": quote.get("expo"),
+    }
+
+
+def policy_stamp() -> dict:
+    """Versions read inside the same transaction that would insert a hold."""
+    fee = _stamp(_FEE)
+    loss = _stamp(_AGGREGATE)
+    halt = db.query("SELECT value, updated_at FROM phantom_control WHERE key = 'halt'")
+    return {
+        "fee": fee,
+        "loss": loss,
+        "halt": None if not halt else halt[0]["value"],
+        "halt_at": None if not halt else halt[0]["updated_at"],
+    }
+
+
 def persist_owner_approval() -> dict:
     """Record the widget. The numbers are the constants above, not a request body."""
+    _drop_live_consent()
     _write(_FEE, {
         "approved": True,
         "owner_approved": True,
@@ -141,6 +183,7 @@ def persist_owner_approval() -> dict:
 
 def clear_owner_approval() -> dict:
     """Drop approval. Amounts already stored are not replaced by a caller."""
+    _drop_live_consent()
     for key in (_FEE, _AGGREGATE):
         row = _read(key)
         if isinstance(row, dict):
@@ -182,6 +225,16 @@ def _aggregate_approved(row) -> bool:
         and row.get("guaranteed_loss_limit") is False
         and row.get("stops_new_entries") is True
     )
+
+
+def _stamp(key: str):
+    rows = db.query("SELECT updated_at FROM phantom_control WHERE key = ?", (key,))
+    return None if not rows else rows[0]["updated_at"]
+
+
+def _drop_live_consent() -> None:
+    """A financial change retires an older LIVE request. It does not write a new one."""
+    db.execute("DELETE FROM phantom_control WHERE key = 'live_trading_consent'")
 
 
 def _money(text):

@@ -51,6 +51,22 @@ class Decoded:
     instructions: list[Instruction]
     lookups: list[Lookup] = field(default_factory=list)
     resolved_keys: list[str] = field(default_factory=list)
+    required_signatures: int = 1
+    readonly_signed: int = 0
+    readonly_unsigned: int = 0
+
+    def account_flags(self, index: int) -> tuple[bool, bool]:
+        """Signer and writable bits from the legacy header."""
+        if self.version != "legacy" or self.lookups:
+            raise ValueError("transaction version is not usable")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(self.static_keys):
+            raise ValueError("account")
+        signer = index < self.required_signatures
+        if signer:
+            writable = index < self.required_signatures - self.readonly_signed
+        else:
+            writable = index < len(self.static_keys) - self.readonly_unsigned
+        return signer, writable
 
 
 def b58encode(data: bytes) -> str:
@@ -149,7 +165,10 @@ def decode_transaction(raw: bytes) -> Decoded:
     if cursor != len(message):
         raise ValueError("transaction is not usable")
     signers = keys[:required]
-    return Decoded(version, keys[0], signers, keys, blockhash, instructions, lookups, list(keys))
+    return Decoded(
+        version, keys[0], signers, keys, blockhash, instructions, lookups, list(keys),
+        required, readonly_signed, readonly_unsigned,
+    )
 
 
 def lookup_addresses(data: bytes) -> list[str]:

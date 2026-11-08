@@ -57,6 +57,7 @@ def view() -> dict:
 def set_approval(approved: bool) -> dict:
     if approved and not _settings_match():
         raise ValueError("thresholds do not match the approved exit rules")
+    db.execute("DELETE FROM phantom_control WHERE key = 'live_trading_consent'")
     payload = {
         "approved": approved,
         "revoked": not approved,

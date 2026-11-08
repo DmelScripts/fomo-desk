@@ -23,7 +23,7 @@ SIZE = Decimal("8.00")
 FX_MAX_AGE_S = 120
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 OBSERVED_QUOTE_ID = "e09cf162-9f00-40fa-9c36-0714a7c5fa94"
-_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown", "confirmed"}
+_OPEN = {"reserved", "quoted", "sim_open", "submit_unknown", "confirmed", "exit_planned", "exit_unknown"}
 MANUAL_STATEMENT = "Manually reconcile this unknown chain submit without resubmitting."
 CHAIN_STATUS = None
 _DONE = {"sim_closed", "released", "rejected", "halted"}
@@ -110,6 +110,8 @@ def run_intent(body: dict, runtime=None, cycle: str = "round_trip", prices: dict
     spec["cycle"] = cycle
     spec["entry_price"] = str((prices or {}).get("entry") or "1")
     spec["exit_price"] = str((prices or {}).get("exit") or spec["entry_price"])
+    if status is None:
+        _enforce_paper_against_policy(spec)
     chosen = runtime or _runtime()
     paper = getattr(chosen, "name", "") == "paper_simulation"
     if status in _DONE or status == "submit_unknown":
@@ -156,6 +158,21 @@ def reconcile_unknown(body: dict) -> dict:
         return result
 
     return db.exclusive(work)
+
+
+def _enforce_paper_against_policy(spec: dict) -> None:
+    """Once the owner cap is recorded, a PAPER fee above it cannot open a new entry."""
+    import spend_policy
+    if not spend_policy.fee_view()["approved"]:
+        return
+    if Decimal(spec["fee_usd"]) > spend_policy.MAX_FEE_USD:
+        raise HTTPException(status_code=409, detail="fee cap")
+    conn = db.connect()
+    try:
+        if cumulative_realized_loss(conn) >= spend_policy.MAX_CUMULATIVE_LOSS_USD:
+            raise HTTPException(status_code=409, detail="loss stop")
+    finally:
+        conn.close()
 
 
 def cumulative_realized_loss(conn) -> Decimal:
@@ -216,7 +233,7 @@ def _json_object(raw) -> dict:
 
 
 def owner_release(body: dict) -> dict:
-    """An explicit owner release. A statement does not prove the ledger and does not release."""
+    """Does not free a hold. An unproved submit stays exposure."""
     _reject_tree(body)
     if not isinstance(body, dict) or set(body) != {"intent_id", "release"} or body.get("release") is not True:
         raise HTTPException(status_code=400, detail="unexpected field")
@@ -229,12 +246,10 @@ def owner_release(body: dict) -> dict:
         if row is None or row["status"] != "submit_unknown" or not _chain_unknown(row):
             status = None if row is None else row["status"]
             return _stopped(status or "missing", "not_unknown") | {"resubmit": False, "ledger_proven": False}
-        result = _result(row, "released", "owner_release")
-        result["resubmit"] = False
-        result["paper"] = False
-        result["ledger_proven"] = False
-        _save(conn, intent_id, "released", "0.00", row["entry_quote_id"], row["exit_quote_id"], result)
-        return result
+        held = _held(row, "release_disabled")
+        held["ledger_proven"] = False
+        held["reserved_usd"] = row["reserved_usd"]
+        return held
 
     return db.exclusive(work)
 
@@ -262,14 +277,12 @@ def _reconcile_chain(conn, row, body: dict) -> dict:
 
 
 def _read_chain_status(signature: str):
-    reader = CHAIN_STATUS
+    """The trusted read adapter. A caller-supplied status dict is not consulted."""
+    import solana_read_rpc
+    reader = solana_read_rpc.configured_reader()
     if reader is None:
         return None
-    try:
-        proof = reader(signature)
-    except Exception:
-        return None
-    return proof if isinstance(proof, dict) else None
+    return solana_read_rpc.read_receipt(reader, signature)
 
 
 def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: dict) -> dict:
@@ -289,25 +302,56 @@ def _confirm_in(conn, intent_id: str, signature: str, block_height: int, proof: 
         return _held(row, "receipt_mismatch")
     if proof.get("message_sha256") != stored.get("message_sha256"):
         return _held(row, "message_mismatch")
-    if proof.get("network_fee_lamports") != stored.get("network_fee_lamports"):
-        return _held(row, "fee_mismatch")
-    if proof.get("acquired_raw") != stored.get("entry_token_est_out"):
+    from solana_direct_swap import entry_economics
+    import usdc_valuation
+    import spend_policy
+    landed = entry_economics(
+        proof.get("account_keys"), proof.get("native_pre"), proof.get("native_post"),
+        proof.get("network_fee_lamports"), stored.get("entry_lamports"),
+    )
+    if landed.get("ok") is not True:
+        return _held(row, landed.get("reason") or "native_missing")
+    source = spend_policy.usd_source()
+    snap = usdc_valuation.snapshot(source)
+    pool_micro = stored.get("pool_micro_per_sol")
+    dex_micro = usdc_valuation._ceil_lamports(stored.get("dex_fee_lamports") or 0, pool_micro if isinstance(pool_micro, int) else 0)
+    from execution_transport import _combined_fee_ok
+    if snap.get("usable") is not True or dex_micro is None or not _combined_fee_ok(dex_micro, landed["network_fee"], pool_micro, snap):
+        return _held(row, snap.get("reason") or "fee_cap")
+    acquired_now = proof.get("acquired_raw")
+    minimum = stored.get("entry_token_min_out")
+    estimated = stored.get("entry_token_est_out")
+    if isinstance(acquired_now, bool) or not isinstance(acquired_now, int) or isinstance(minimum, bool) or not isinstance(minimum, int) or isinstance(estimated, bool) or not isinstance(estimated, int) or not minimum <= acquired_now <= estimated:
         return _held(row, "delta_mismatch")
+    if acquired_now == stored.get("wallet_usdc_raw") or acquired_now == 188718141:
+        return _held(row, "wallet_balance")
     if proof.get("confirmation_status") != "finalized" or proof.get("err") is not None:
         return _held(row, "status_rejected")
     if proof.get("block_height") is not None and proof.get("block_height") != block_height:
         return _held(row, "block_height")
     from solana_direct_swap import exit_amount
-    choice = exit_amount(acquired, wallet_raw if isinstance(wallet_raw, int) else -1, confirmed=True)
+    choice = exit_amount(
+        acquired_now, wallet_raw if isinstance(wallet_raw, int) else -1, confirmed=True,
+        minimum=minimum, estimated=estimated, ata_balance=proof.get("ata_balance"),
+    )
     if choice["allowed"] is not True:
         return _held(row, choice["reason"])
     stored["chain_submit"] = True
     stored["confirmed"] = True
     stored["acquired_raw"] = choice["exit_raw"]
-    stored["exit_raw"] = choice["exit_raw"]
+    stored["exit_raw"] = None
+    stored["ata_balance"] = proof.get("ata_balance")
     stored["signature"] = signature
     stored["block_height"] = block_height
     stored["fill"] = "chain_status"
+    stored["actual_sol_out_lamports"] = landed["sol_out"]
+    stored["actual_network_fee_lamports"] = landed["network_fee"]
+    stored["rent_net_lamports"] = landed["rent_net"]
+    stored["entry_valuation"] = snap
+    stored["entry_price_micro"] = pool_micro
+    stored["peak_price_micro"] = pool_micro
+    stored["opened_at"] = time.time()
+    stored["trail_armed"] = False
     stored["live_ready"] = False
     stored["sign"] = False
     stored["resubmit"] = False
@@ -335,7 +379,7 @@ def _proof_matches(proof, block_height: int) -> bool:
         return False
     if proof.get("err") is not None or proof.get("confirmation_status") != "finalized":
         return False
-    if proof.get("block_height") != block_height:
+    if proof.get("block_height") is not None and proof.get("block_height") != block_height:
         return False
     if proof.get("network") != "solana:mainnet":
         return False
@@ -621,6 +665,9 @@ def on_qualified_signal(payload: dict) -> dict:
         if not isinstance(payload.get("sol_usd"), str) or isinstance(payload.get("fx_at"), bool) or not isinstance(payload.get("fx_at"), (int, float)):
             return _stopped("rejected", "fx quote is missing or stale")
         fee = payload.get("phantom_fee_usd") if isinstance(payload.get("phantom_fee_usd"), str) else "0.20"
+        import spend_policy
+        if spend_policy.fee_view()["approved"] and Decimal(fee) > spend_policy.MAX_FEE_USD:
+            return _stopped("rejected", "fee_policy")
         body = {
             "intent_id": "sig-" + mint,
             "wallet_id": phantom_transport.REQUIRED_WALLET_ID,

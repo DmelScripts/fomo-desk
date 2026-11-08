@@ -39,7 +39,7 @@ class FixtureRpc:
         return {"context": {"slot": self.slot}, "value": values}
 
 
-def _accounts() -> dict:
+def _accounts(wsol_amount: int | None = None) -> dict:
     body = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     pool = solana_direct_swap.SOL_USDC_POOL
     vault_a = solana_direct_swap.SOL_USDC_OBSERVATION["vault_a"]
@@ -78,14 +78,22 @@ def _accounts() -> dict:
         item = _b64(raw)
         item["owner"] = owner
         encoded[address] = item
-    encoded[wsol] = None
+    if wsol_amount is None:
+        encoded[wsol] = None
+    else:
+        raw = bytearray(solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, wallet))
+        raw[64:72] = int(wsol_amount).to_bytes(8, "little")
+        present = _b64(bytes(raw))
+        present["owner"] = solana_tx.TOKEN_PROGRAM
+        present["lamports"] = solana_direct_swap.RENT_EXEMPTION_165
+        encoded[wsol] = present
     return encoded
 
 
 class FakeTransport:
     """JSON-RPC envelopes for the read methods. This does not open a socket."""
 
-    def __init__(self, slot: int = 466547240, fee: int = 6000, height: int = 900, last_valid: int = 5000, valid: bool = True, sim_err=None, drop: str | None = None):
+    def __init__(self, slot: int = 466547240, fee: int = 6000, height: int = 900, last_valid: int = 5000, valid: bool = True, sim_err=None, drop: str | None = None, tip: int | None = None, wsol_amount: int | None = None):
         import solana_tx
         self.slot = slot
         self.fee = fee
@@ -94,7 +102,11 @@ class FakeTransport:
         self.valid = valid
         self.sim_err = sim_err
         self.drop = drop
+        self.tip = slot + 1 if tip is None else tip
+        self.wsol_amount = wsol_amount
         self.payloads = []
+        self.statuses = None
+        self.transaction = None
         self.blockhash = solana_tx.b58encode(b"\x44" * 32)
 
     def __call__(self, payload):
@@ -104,7 +116,7 @@ class FakeTransport:
             import solana_read_rpc
             return {"jsonrpc": "2.0", "id": 1, "result": solana_read_rpc.MAINNET_GENESIS}
         if method == "getMultipleAccounts":
-            encoded = _accounts()
+            encoded = _accounts(self.wsol_amount)
             values = []
             for address in payload["params"][0]:
                 if address == self.drop:
@@ -114,6 +126,8 @@ class FakeTransport:
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": values}}
         if method == "getMinimumBalanceForRentExemption":
             return {"jsonrpc": "2.0", "id": 1, "result": 1488440}
+        if method == "getSlot":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.tip}
         if method == "getLatestBlockhash":
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"blockhash": self.blockhash, "lastValidBlockHeight": self.last_valid}}}
         if method == "getFeeForMessage":
@@ -122,6 +136,10 @@ class FakeTransport:
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": self.valid}}
         if method == "getBlockHeight":
             return {"jsonrpc": "2.0", "id": 1, "result": self.height}
+        if method == "getSignatureStatuses":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.statuses}
+        if method == "getTransaction":
+            return {"jsonrpc": "2.0", "id": 1, "result": self.transaction}
         if method == "simulateTransaction":
             return {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": self.slot}, "value": {"err": self.sim_err, "unitsConsumed": 12000}}}
         return {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": method}}

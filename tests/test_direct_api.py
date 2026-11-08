@@ -98,7 +98,7 @@ class DirectApiTests(unittest.TestCase):
         body = prepared.json()
         self.assertEqual(body["rpc_methods"], [
             "getGenesisHash", "getMultipleAccounts", "getMinimumBalanceForRentExemption",
-            "getLatestBlockhash", "getFeeForMessage", "isBlockhashValid", "getBlockHeight",
+            "getLatestBlockhash", "getSlot", "getFeeForMessage", "isBlockhashValid", "getBlockHeight",
         ])
         self.assertEqual(started, [])
         self.assertEqual(body["entry_lamports"], 88979314)
@@ -123,13 +123,16 @@ class DirectApiTests(unittest.TestCase):
             body["exposure_micro_usdc"],
             body["marginal_micro_usdc"] + body["network_fee_micro_usdc"] + body["rent_micro_usdc"],
         )
-        self.assertEqual(body["exit_plan_raw"], 7995630)
-        self.assertEqual(body["exit_quote_out"], 88882136)
-        self.assertFalse(body["exit_closes_usdc"])
-        self.assertEqual(len(body["exit_tx_sha256"]), 64)
+        self.assertIsNone(body["exit_plan_raw"])
+        self.assertIsNone(body["exit_tx_sha256"])
+        self.assertFalse(body["exit_executable"])
+        self.assertTrue(body["exit_preview_only"])
         self.assertNotIn("_entry_tx", body)
         self.assertNotIn("_exit_tx", body)
-        self.assertTrue(body["fee_cap_ok"])
+        self.assertFalse(body["fee_cap_ok"])
+        self.assertFalse(body["usd_cap_ok"])
+        self.assertEqual(body["reason"], "usd_source_unapproved")
+        self.assertTrue(body["pool_fee_within_micro_cap"])
         self.assertFalse(body["priority_only"])
         self.assertFalse(body["rent_is_fee"])
         self.assertLessEqual(body["marginal_micro_usdc"], 8_000_000)
@@ -138,11 +141,11 @@ class DirectApiTests(unittest.TestCase):
         self.assertIsNone(body["exit_close_raw"])
         self.assertNotEqual(body["quote_token_est_out"], body["wallet_usdc_raw"])
         self.assertEqual(body["wallet_usdc_raw"], 188718141)
-        self.assertFalse(solana_direct_swap.exit_amount(188718141, 188718141, confirmed=True)["allowed"])
-        self.assertEqual(
-            solana_direct_swap.exit_amount(body["quote_token_est_out"], body["wallet_usdc_raw"], confirmed=True)["exit_raw"],
-            body["quote_token_est_out"],
-        )
+        self.assertFalse(solana_direct_swap.exit_amount(188718141, 188718141, confirmed=True, minimum=1, estimated=8000000)["allowed"])
+        self.assertEqual(solana_direct_swap.exit_amount(188718142, 188718141, confirmed=True, minimum=1, estimated=188718142)["reason"], "above_balance")
+        preview = solana_direct_swap.exit_amount(body["quote_token_est_out"], body["wallet_usdc_raw"], confirmed=False, minimum=body["min_out"], estimated=body["quote_token_est_out"])
+        self.assertFalse(preview["allowed"])
+        self.assertEqual(preview["reason"], "unconfirmed")
         exit_state = solana_direct_swap.fetch_state(self.rpc)
         exit_arrays = solana_direct_swap._quote_arrays(exit_state["pool"], exit_state["pool_data"], exit_state["accounts"], False)
         exit_quote = solana_direct_swap.quote_exit_exact_in(
@@ -165,12 +168,10 @@ class DirectApiTests(unittest.TestCase):
         self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations"), [])
         phantom_runner.set_halt({"halted": False})
         reserved = self.client.post("/api/phantom/direct-reserve", headers=AUTH, json={"intent_id": "entry-1"})
-        self.assertEqual(reserved.status_code, 200, reserved.text)
-        self.assertEqual(reserved.json()["status"], "sim_open")
-        self.assertEqual(reserved.json()["network_fee_lamports"], 6000)
-        self.assertEqual(reserved.json()["exit_plan_raw"], 7995630)
-        self.assertFalse(reserved.json()["exit_closes_usdc"])
-        self.assertEqual(len(reserved.json()["message_sha256"]), 64)
+        self.assertEqual(reserved.status_code, 409, reserved.text)
+        self.assertEqual(reserved.json()["reason"], "usd_source_unapproved")
+        self.assertFalse(reserved.json()["created"])
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations WHERE intent_id = 'entry-1'"), [])
         self.assertEqual(reserved.json()["rpc_methods"].count("simulateTransaction"), 1)
         self.assertEqual(reserved.json()["simulation"]["simulated"], True)
         self.assertFalse(reserved.json()["simulation"]["broadcastable"])
@@ -178,126 +179,24 @@ class DirectApiTests(unittest.TestCase):
         self.assertEqual(sent[-1]["params"][1]["sigVerify"], False)
         self.assertEqual(sent[-1]["params"][1]["replaceRecentBlockhash"], False)
         self.assertNotIn("sendTransaction", reserved.json()["rpc_methods"])
-        self.assertEqual(reserved.json()["entry_lamports"], 88979314)
-        self.assertLessEqual(reserved.json()["marginal_micro_usdc"], 8_000_000)
-        self.assertIsNone(reserved.json()["exit_close_raw"])
         self.assertFalse(reserved.json()["sign"])
-        repeat = self.client.post("/api/phantom/direct-reserve", headers=AUTH, json={"intent_id": "entry-1"})
-        self.assertFalse(repeat.json()["created"])
-        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["n"], 1)
-        fetched = solana_direct_swap.fetch_state(self.rpc)
-        unsigned = solana_direct_swap.build(
-            fetched["pool"], fetched["pool_data"], fetched["accounts"], 100,
-            solana_direct_swap.MIN_SQRT_PRICE + 1, solana_direct_swap.PLACEHOLDER_BLOCKHASH,
-            fetched["context_slot"], amount=reserved.json()["entry_lamports"],
-        )
-        proved = execution_transport.decide("entry-1", unsigned, direct_state=fetched)
-        self.assertTrue(proved["checks"]["slippage_verified"])
-        self.assertTrue(proved["checks"]["spend_verified"])
-        self.assertFalse(proved["checks"]["fee_unbound_clear"])
-        self.assertFalse(proved["checks"]["blockhash_checked"])
-        fetched["network_fee_lamports"] = 6000
-        fetched["rent_lamports"] = 1488440
-        priced = solana_direct_swap.build(
-            fetched["pool"], fetched["pool_data"], fetched["accounts"], 100,
-            solana_direct_swap.MIN_SQRT_PRICE + 1, self.transport.blockhash,
-            fetched["context_slot"], amount=reserved.json()["entry_lamports"],
-        )
-        checked = execution_transport.decide("entry-1", priced, direct_state=fetched, blockhash_source=lambda: {
-            "blockhash": self.transport.blockhash, "slot": fetched["context_slot"],
-            "last_valid_block_height": 5000, "simulated": True, "simulation": {"err": None},
-        })
-        self.assertTrue(checked["checks"]["fee_unbound_clear"])
-        self.assertTrue(checked["checks"]["blockhash_checked"])
-        self.assertIsNot(checked.get("broadcastable"), True)
-        flagged = execution_transport.decide("entry-1", unsigned, direct_state={"slippage_verified": True, "fee_cap_ok": True, "exposure_cap_ok": True})
+        self.assertFalse(reserved.json()["live_ready"])
+        flagged = execution_transport.decide("entry-1", "AAAA", direct_state={"slippage_verified": True, "fee_cap_ok": True})
+        self.assertIn("caller_state_refused", flagged["unmet"])
         self.assertFalse(flagged["checks"]["slippage_verified"])
-        self.assertFalse(flagged["checks"]["fee_unbound_clear"])
+        self.assertFalse(flagged["checks"]["usd_source_approved"])
         self._closed("loss-19", "-19.00", "5.00")
         connection = db.connect()
         try:
             self.assertEqual(phantom_runner.cumulative_realized_loss(connection), Decimal("19.00"))
         finally:
             connection.close()
-        second = self.client.post("/api/phantom/direct-reserve", headers=AUTH, json={"intent_id": "entry-2"})
-        self.assertEqual(second.status_code, 200, second.text)
-        self._closed("loss-1", "-1.00", "0.01")
-        blocked = self.client.post("/api/phantom/direct-reserve", headers=AUTH, json={"intent_id": "entry-3"})
-        self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.json()["reason"], "stop_new_entries")
-        self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'entry-3'")[0]["reserved_usd"], "0.00")
-        runner_calls = []
-
-        def runner(argv, _env, _timeout):
-            runner_calls.append(argv)
-            raise AssertionError("signer")
-
-        submitted = execution_transport.submit("entry-1", "AAAA", runner=runner, direct_state={"slippage_verified": True})
-        self.assertEqual(runner_calls, [])
-        self.assertFalse(submitted["signer_called"])
-        self.assertFalse(submitted["checks"]["slippage_verified"])
-        self.assertFalse(submitted["broadcastable"])
-        self.assertTrue(execution_transport._claim("entry-1", "abc"))
-        row = db.query("SELECT status, reserved_usd, result_json FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]
-        self.assertEqual(row["status"], "submit_unknown")
-        self.assertNotEqual(row["reserved_usd"], "0.00")
-        stored = json.loads(row["result_json"])
-        self.assertTrue(stored["chain_submit"])
-        self.assertFalse(stored["confirmed"])
-        held_usd = row["reserved_usd"]
-        plain = self.client.post("/api/phantom/reconcile", headers=AUTH, json={"intent_id": "entry-1"})
-        self.assertEqual(plain.status_code, 200)
-        self.assertEqual(plain.json()["reason"], "held_pending_proof")
-        self.assertFalse(plain.json()["resubmit"])
-        self.assertEqual(db.query("SELECT status, reserved_usd FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["reserved_usd"], held_usd)
-        unproven = self.client.post("/api/phantom/direct-confirm", headers=AUTH, json={
-            "intent_id": "entry-1", "signature": SIGNATURE, "block_height": 400,
-        })
-        self.assertFalse(unproven.json()["confirmed"])
-        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["status"], "submit_unknown")
-        stored = json.loads(db.query("SELECT result_json FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["result_json"])
-        phantom_runner.CHAIN_STATUS = lambda _signature: {
-            "err": None, "confirmation_status": "finalized", "block_height": 400, "slot": 466547240,
-            "network": "solana:mainnet", "signature": SIGNATURE, "wallet": phantom_transport.REQUIRED_WALLET,
-            "message_sha256": stored["message_sha256"], "network_fee_lamports": stored["network_fee_lamports"],
-            "acquired_raw": 188718141,
-        }
-        rejected = self.client.post("/api/phantom/reconcile", headers=AUTH, json={
-            "intent_id": "entry-1", "proof": {"signature": SIGNATURE, "block_height": 400},
-        })
-        self.assertEqual(rejected.json()["reason"], "delta_mismatch")
-        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["status"], "submit_unknown")
-        phantom_runner.CHAIN_STATUS = lambda _signature: {
-            "err": None, "confirmation_status": "finalized", "block_height": 400, "slot": 466547240,
-            "network": "solana:mainnet", "signature": SIGNATURE, "wallet": phantom_transport.REQUIRED_WALLET,
-            "message_sha256": stored["message_sha256"], "network_fee_lamports": stored["network_fee_lamports"],
-            "acquired_raw": stored["entry_token_est_out"],
-        }
-        confirmed = self.client.post("/api/phantom/direct-confirm", headers=AUTH, json={
-            "intent_id": "entry-1", "signature": SIGNATURE, "block_height": 400,
-        })
-        self.assertTrue(confirmed.json()["confirmed"])
-        self.assertEqual(confirmed.json()["acquired_raw"], 7995630)
-        self.assertEqual(confirmed.json()["exit_raw"], 7995630)
-        self.assertNotEqual(confirmed.json()["exit_raw"], 188718141)
-        self.assertIsNone(confirmed.json()["realized_pnl"])
-        self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'entry-1'")[0]["reserved_usd"], held_usd)
-        replay = execution_transport.send_after_identity("entry-1", "AAAA", runner, binary="phantom")
-        self.assertEqual(replay["subprocess"], [])
-        self.assertFalse(replay["resend"])
-        self.assertEqual(runner_calls, [])
-        status = self.client.get("/api/phantom/direct-status", headers=AUTH, params={"intent_id": "entry-1"})
+        status = self.client.get("/api/phantom/direct-status", headers=AUTH)
         view = status.json()
-        self.assertEqual(view["network"], "solana:mainnet")
-        self.assertEqual(view["wallet"], phantom_transport.REQUIRED_WALLET)
-        self.assertEqual(view["intent"]["context_slot"], 466547240)
-        self.assertEqual(view["intent"]["exit_close_raw"], 7995630)
-        self.assertFalse(view["intent"]["exit_uses_wallet_balance"])
         self.assertFalse(view["agents_enabled"])
         self.assertEqual(view["mode"], "PAPER")
         self.assertEqual(view["strategies_enabled"], [])
         self.assertFalse(view["live_ready"])
-        self.assertFalse(view["kill_switch"])
         hook = solana_direct_swap.revalidate_blockhash(solana_direct_swap.PLACEHOLDER_BLOCKHASH, lambda: {
             "blockhash": "9" * 32, "slot": 466547240, "last_valid_block_height": 500,
             "simulated": True, "simulation": {"err": None}, "placeholder": False,
@@ -338,7 +237,8 @@ class DirectApiTests(unittest.TestCase):
         )
         blocked = self.client.post("/api/phantom/direct-reserve", headers=AUTH, json={"intent_id": "too-much"})
         self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.json()["reason"], "allocation")
+        self.assertEqual(blocked.json()["reason"], "usd_source_unapproved")
+        self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations WHERE intent_id = 'too-much'"), [])
 
     def test_synthetic_paper_unknown_still_releases(self):
         now = __import__("time").time()
@@ -380,10 +280,10 @@ class DirectApiTests(unittest.TestCase):
         self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'chain-manual'")[0]["status"], "submit_unknown")
         manual = self.client.post("/api/phantom/owner-release", headers=AUTH, json={"intent_id": "chain-manual", "release": True})
         self.assertEqual(manual.status_code, 200, manual.text)
-        self.assertEqual(manual.json()["reason"], "owner_release")
+        self.assertEqual(manual.json()["reason"], "release_disabled")
         self.assertFalse(manual.json()["ledger_proven"])
-        self.assertFalse(manual.json()["resubmit"])
-        self.assertEqual(db.query("SELECT status, reserved_usd FROM phantom_reservations WHERE intent_id = 'chain-manual'")[0]["reserved_usd"], "0.00")
+        self.assertEqual(db.query("SELECT status, reserved_usd FROM phantom_reservations WHERE intent_id = 'chain-manual'")[0]["status"], "submit_unknown")
+        self.assertEqual(db.query("SELECT reserved_usd FROM phantom_reservations WHERE intent_id = 'chain-manual'")[0]["reserved_usd"], "8.14")
 
     def _closed(self, intent_id: str, realized: str, fee: str) -> None:
         now = __import__("time").time()

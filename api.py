@@ -1223,6 +1223,28 @@ def phantom_direct_confirm(request: Request, body: dict | None = None) -> JSONRe
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/phantom/diagnostic")
+def phantom_diagnostic_view(request: Request) -> JSONResponse:
+    """Diagnostic SOL/USDC lifecycle state. No transaction bytes and no signer."""
+    require_app_token(request)
+    import diagnostic_lifecycle
+    return JSONResponse(diagnostic_lifecycle.view(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/phantom/diagnostic/tick")
+def phantom_diagnostic_tick(request: Request, body: dict | None = None) -> JSONResponse:
+    """One server-owned step. The body cannot carry bytes, a price, or a receipt."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree
+    _reject_tree(body)
+    if body not in (None, {}):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import diagnostic_lifecycle
+    result = diagnostic_lifecycle.service_tick()
+    code = 200 if result.get("ok") else 409
+    return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/push")
 async def push(request: Request) -> dict:
     """Save one phone. The body is a JSON object even if the browser labeled it text."""
