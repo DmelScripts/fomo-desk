@@ -141,6 +141,71 @@ def _refused_route(reason: str) -> dict:
     }
 
 
+def request_quote(get, estimate: int, amount: int, input_mint: str, output_mint: str) -> tuple:
+    """HTTP order and build for an estimate the snapshot review already measured.
+
+    This does not read pool bytes and it does not accept a slippage override.
+    """
+    import base64
+    import hashlib
+    import jupiter_route_v2
+    import owner_slippage
+    order = {"ok": False, "reason": "estimate_unavailable", "execution_allowed": False, "min_out_proven": False, "transaction_present": False}
+    build = {"ok": False, "reason": "estimate_unavailable", "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+    instruction = {"instruction_matches_request": False, "rewritten": False, "requested_slippage_bps": None, "measured_est_out": estimate, "instruction_data_b64": None, "instruction_sha256": None, "jupiter_called": False}
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
+        return order, build, instruction
+    selected = jupiter_route_v2.quote_request(estimate)
+    if selected.get("ok") is not True or selected.get("approved") is not True:
+        order["reason"] = selected.get("reason") or "owner_slippage_unapproved"
+        build["reason"] = order["reason"]
+        return order, build, instruction
+    requested = selected["slippage_bps"]
+    instruction["requested_slippage_bps"] = requested
+    try:
+        order = jupiter_swap_v2.assess_order(get(jupiter_swap_v2.order_url(input_mint, output_mint, str(amount))))
+        build_body = get(jupiter_swap_v2.build_url(input_mint, output_mint, str(amount), slippage_bps=requested))
+    except PublicStop as exc:
+        build = {"ok": False, "reason": exc.reason, "status": exc.status, "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+        instruction["jupiter_called"] = True
+        return order, build, instruction
+    instruction["jupiter_called"] = True
+    if not isinstance(build_body, dict):
+        build = {"ok": False, "reason": "build_shape", "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+        return order, build, instruction
+    raw = _swap_bytes(build_body)
+    build = jupiter_swap_v2.assess_build(build_body)
+    parsed = jupiter_route_v2.parse(raw) if raw else {"ok": False}
+    check = owner_slippage.check_route(parsed.get("slippage_bps"), parsed.get("min_out"), estimate)
+    matches = (
+        raw != b""
+        and parsed.get("slippage_bps") == requested
+        and parsed.get("quoted_out_amount") == estimate
+        and check.get("ok") is True
+    )
+    instruction = {
+        "instruction_data_b64": None if not raw else base64.b64encode(raw).decode("ascii"),
+        "instruction_sha256": None if not raw else hashlib.sha256(raw).hexdigest(),
+        "instruction_matches_request": matches,
+        "measured_est_out": estimate,
+        "requested_slippage_bps": requested,
+        "rewritten": False,
+        "jupiter_called": True,
+        "quote_expiry_proven": False,
+        "block_height_missing": True,
+    }
+    build["requested_slippage_bps"] = requested
+    build["measured_est_out"] = estimate
+    build["instruction_matches_request"] = matches
+    build["execution_allowed"] = False
+    build["buy_proven"] = False
+    build["exit_proven"] = False
+    build["send"] = False
+    if not matches:
+        build["reason"] = check.get("reason") or parsed.get("reason") or "instruction_mismatch"
+    return order, build, instruction
+
+
 def _jupiter_route(get, pool_accounts, pool, amount, input_mint, output_mint) -> tuple:
     """Measure the pool, select the bps, then fetch. The response bytes are not edited."""
     import base64

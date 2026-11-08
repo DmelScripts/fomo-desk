@@ -105,7 +105,13 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
     for mint in selected["mints"]:
         result = run_once(mint, transport, now, stalk_transport)
         if result.get("reason"):
-            kills.append({"mint": mint, "reason": result.get("reason"), "source": result.get("source") or dexscreener_public.SOURCE})
+            kills.append({
+                "mint": mint,
+                "reason": result.get("reason"),
+                "source": result.get("source") or dexscreener_public.SOURCE,
+                "quote": result.get("quote"),
+                "jupiter_called": result.get("jupiter_called") is True,
+            })
             continue
         ranked.append(result)
     ranked.sort(key=lambda item: item.get("liquidity_ratio") or 0, reverse=True)
@@ -203,10 +209,11 @@ def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
     _runtime["running"] = True
     _runtime["started"] = True
     faults = 0
+    last = None
     try:
         for _ in range(rounds):
             try:
-                run_discovery(transport, now)
+                last = run_discovery(transport, now)
                 _runtime["passes"] += 1
             except Exception as exc:
                 _runtime["faults"] += 1
@@ -226,6 +233,7 @@ def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
         "agents_enabled": False,
         "live_ready": False,
         "send": False,
+        "discovery": last,
     }
 
 
@@ -246,8 +254,13 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
     _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
     opened = memecoin_desk.scout(parsed["scout"], now=now)
+    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
     if opened.get("ok") is not True:
-        return stopped | {"reason": opened.get("reason"), "stage": opened.get("stage"), "case_id": opened.get("case_id")}
+        return stopped | {
+            "reason": opened.get("reason"), "stage": opened.get("stage"), "case_id": opened.get("case_id"),
+            "quote": quote, "jupiter_called": quote.get("jupiter_called") is True, "score_measured": False,
+            "quote_expiry_proven": False,
+        }
     try:
         rpc = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})
     except Exception:
@@ -282,7 +295,125 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         "scheduled": False,
         "usd_live": False,
         "onchain_pyth": pyth_sponsored.status(),
+        "quote": quote,
+        "jupiter_called": quote.get("jupiter_called") is True,
+        "quote_expiry_proven": False,
+        "effectual_entry": False,
     }
+
+
+def _screen_quote(transport, now: float, mint: str, evidence: dict) -> dict:
+    """Read-only pool review. Authorization and the owner record are required first.
+
+    A missing policy does not fetch the pool or Jupiter. An unsupported pair,
+    a wrong owner, or a stale slot stops before Jupiter. An open position is
+    left where it is.
+    """
+    quiet = {"attempted": False, "jupiter_called": False, "send": False, "sign": False, "live_ready": False, "quote_expiry_proven": False, "effectual_entry": False, "score_measured": False}
+    if not _authorized():
+        return quiet | {"reason": "scheduler_unauthorized"}
+    import owner_slippage
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
+        return quiet | {"reason": "owner_slippage_unapproved"}
+    identity = dexscreener_public.supported_pool(evidence)
+    if identity.get("ok") is not True:
+        return quiet | {"attempted": True, "reason": identity.get("reason"), "dex_id": identity.get("dex_id")}
+    intent = _quote_intent(mint, identity["pool"])
+    if intent.get("ok") is not True:
+        return quiet | {"attempted": True, "reason": intent.get("reason"), "pool": identity["pool"]}
+    import jupiter_route_v2
+    try:
+        first = jupiter_route_v2.read_snapshot(transport, [identity["pool"]], now)
+    except Exception:
+        return quiet | {"attempted": True, "reason": "snapshot_transport", "pool": identity["pool"]}
+    if first.get("ok") is not True:
+        return quiet | {"attempted": True, "reason": first.get("reason"), "pool": identity["pool"]}
+    pool_record = first["snapshot"].accounts.get(identity["pool"])
+    if not isinstance(pool_record, tuple) or pool_record[0] != __import__("solana_whirlpool").PROGRAM_ID:
+        return quiet | {"attempted": True, "reason": "whirlpool_pool_unbound", "pool": identity["pool"], "slot": first["snapshot"].slot}
+    fields = __import__("solana_whirlpool").pool_fields(pool_record[1])
+    if fields is None or intent["input_mint"] not in {fields[0], fields[2]}:
+        return quiet | {"attempted": True, "reason": "whirlpool_mint_unbound", "pool": identity["pool"]}
+    keys = jupiter_route_v2.snapshot_keys(pool_record[1], identity["pool"], fields[0] == intent["input_mint"])
+    if keys is None:
+        return quiet | {"attempted": True, "reason": "whirlpool_pool_unbound", "pool": identity["pool"]}
+    try:
+        fetched = jupiter_route_v2.read_snapshot(transport, keys, now)
+    except Exception:
+        return quiet | {"attempted": True, "reason": "snapshot_transport", "pool": identity["pool"]}
+    if fetched.get("ok") is not True:
+        return quiet | {"attempted": True, "reason": fetched.get("reason"), "pool": identity["pool"]}
+    reviewed = jupiter_route_v2.review_snapshot(
+        fetched["snapshot"], identity["pool"], intent["input_mint"], intent["output_mint"], intent["amount"], now,
+    )
+    if reviewed.get("ok") is not True:
+        return quiet | {"attempted": True, "reason": reviewed.get("reason"), "pool": identity["pool"], "slot": fetched["snapshot"].slot, "tip_slot": fetched["snapshot"].tip_slot}
+    import public_market
+
+    def get(url: str):
+        response = transport({"kind": "http", "url": url})
+        if not isinstance(response, dict) or response.get("status") != 200 or not isinstance(response.get("body"), (dict, list)):
+            raise public_market.PublicStop("http_status")
+        return response["body"]
+
+    try:
+        _order, build, instruction = public_market.request_quote(
+            get, reviewed["est_out"], intent["amount"], intent["input_mint"], intent["output_mint"],
+        )
+    except Exception:
+        return quiet | {"attempted": True, "reason": "quote_transport", "pool": identity["pool"], "measured_est_out": reviewed["est_out"]}
+    return quiet | {
+        "attempted": True,
+        "reason": None if instruction.get("instruction_matches_request") is True else build.get("reason"),
+        "jupiter_called": instruction.get("jupiter_called") is True,
+        "pool": identity["pool"],
+        "amount": intent["amount"],
+        "side": intent["side"],
+        "measured_est_out": reviewed["est_out"],
+        "requested_slippage_bps": instruction.get("requested_slippage_bps"),
+        "instruction_matches_request": instruction.get("instruction_matches_request") is True,
+        "instruction_sha256": instruction.get("instruction_sha256"),
+        "rewritten": False,
+        "slot": reviewed["slot"],
+        "tip_slot": reviewed["tip_slot"],
+        "context_slot": reviewed["context_slot"],
+        "quote_expiry_proven": False,
+        "block_height_missing": True,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "effectual_entry": False,
+    }
+
+
+def _quote_intent(mint: str, pool: str) -> dict:
+    """Quantity from an open protected entry or a filled exit. No invented size."""
+    import db
+    import solana_tx
+    refused = {"ok": False, "reason": "intent_unbound"}
+    try:
+        rows = db.query(
+            "SELECT id, stage, snapshot_json FROM memecoin_cases WHERE mint = ? AND stage NOT IN ('rejected', 'exited')",
+            (mint,),
+        )
+    except Exception:
+        return refused
+    if len(rows) != 1:
+        return refused
+    import json
+    try:
+        snap = json.loads(rows[0]["snapshot_json"])
+    except Exception:
+        return refused
+    if not isinstance(snap, dict):
+        return refused
+    stage = rows[0]["stage"]
+    if stage in {"filled", "partial"} and isinstance(snap.get("remaining_raw"), int) and snap["remaining_raw"] > 0:
+        return {"ok": True, "side": "exit", "amount": snap["remaining_raw"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
+    amount = snap.get("entry_amount_raw")
+    if stage == "protected" and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+        return {"ok": True, "side": "entry", "amount": amount, "input_mint": solana_tx.NATIVE_MINT, "output_mint": mint, "a_to_b": True, "case_id": rows[0]["id"], "pool": pool}
+    return refused
 
 
 def _halt_entries() -> None:
@@ -315,9 +446,16 @@ def public_reader(request: dict) -> dict:
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
     method = request.get("method")
-    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getTransaction", "getSignatureStatuses", "getGenesisHash"}:
+    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash"}:
         if method == "getAccountInfo":
             params = [request.get("mint"), {"encoding": "base64", "commitment": "confirmed"}]
+        elif method == "getMultipleAccounts":
+            accounts = request.get("accounts")
+            if not isinstance(accounts, list) or not accounts or not all(isinstance(item, str) for item in accounts):
+                raise RuntimeError("method_refused")
+            params = [accounts, {"encoding": "base64", "commitment": "confirmed"}]
+        elif method == "getSlot":
+            params = [{"commitment": "confirmed"}]
         elif method == "getTransaction":
             params = [request.get("signature"), {"encoding": "base64", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}]
         elif method == "getSignatureStatuses":
@@ -330,7 +468,9 @@ def public_reader(request: dict) -> dict:
         req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
     else:
         url = request.get("url")
-        if not isinstance(url, str) or not url.startswith("https://api.dexscreener.com/"):
+        if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
+            raise RuntimeError("host_refused")
+        if url.startswith("https://api.jup.ag/") and ("/execute" in url or "/submit" in url):
             raise RuntimeError("host_refused")
         req = urllib.request.Request(url, headers={"accept": "application/json"})
     with urllib.request.urlopen(req, timeout=8) as response:

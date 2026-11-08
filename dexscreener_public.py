@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 SOURCE = "dexscreener"
+WHIRLPOOL_DEX_ID = "whirlpool"
 NOT_PROVEN = (
     "unique_buyers",
     "smart_wallets",
@@ -26,6 +27,19 @@ NOT_PROVEN = (
     "mint_authority",
     "freeze_authority",
 )
+
+
+def supported_pool(evidence: dict) -> dict:
+    """The pair address is a Whirlpool only when DexScreener says so. No substitute pool."""
+    if not isinstance(evidence, dict):
+        return {"ok": False, "reason": "pool_identity_missing", "pool": None}
+    dex_id = evidence.get("dex_id")
+    pool = evidence.get("pair_address")
+    if dex_id != WHIRLPOOL_DEX_ID:
+        return {"ok": False, "reason": "pool_dex_unsupported", "dex_id": dex_id if isinstance(dex_id, str) else None, "pool": None}
+    if not isinstance(pool, str) or len(pool) < 32:
+        return {"ok": False, "reason": "pool_identity_missing", "dex_id": dex_id, "pool": None}
+    return {"ok": True, "reason": None, "dex_id": dex_id, "pool": pool}
 
 
 def pairs_url(mint: str) -> str:

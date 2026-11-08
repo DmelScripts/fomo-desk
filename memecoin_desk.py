@@ -211,6 +211,32 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     return _advance(row, "analyst_passed", "analyst", evidence, snap)
 
 
+def set_entry_amount(case_id: str, amount: int) -> dict:
+    """Remember the raw entry size on a protected case. This does not send or approve."""
+    row = _case(case_id)
+    if row is None or row["stage"] != "protected":
+        return {"ok": False, "reason": "stage", "case_id": case_id, "send": False, "live_ready": False}
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return {"ok": False, "reason": "amount", "case_id": case_id, "send": False, "live_ready": False}
+    snap = _snapshot(row)
+    snap["entry_amount_raw"] = amount
+    snap["entry_amount_is_a_fill"] = False
+    snap["send"] = False
+    snap["live_ready"] = False
+
+    def work(conn):
+        current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None or current["stage"] != "protected":
+            return {"ok": False, "reason": "stage", "case_id": row["id"], "send": False, "live_ready": False}
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(snap, sort_keys=True), time.time(), row["id"]),
+        )
+        return {"ok": True, "reason": None, "case_id": row["id"], "amount": amount, "stage": "protected", "send": False, "live_ready": False}
+
+    return db.exclusive(work)
+
+
 def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None) -> dict:
     """Persist the stop and the 12/12 trail before an entry can become eligible."""
     row = _case(case_id)

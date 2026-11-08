@@ -176,6 +176,8 @@ def measure_pool(accounts: dict, pool: str, amount: int, input_mint: str) -> dic
     record = accounts.get(pool)
     if not isinstance(record, tuple) or len(record) != 2 or not isinstance(record[1], (bytes, bytearray)):
         return refused
+    if record[0] != solana_whirlpool.PROGRAM_ID:
+        return refused | {"reason": "whirlpool_pool_unbound"}
     fields = solana_whirlpool.pool_fields(record[1])
     state = solana_whirlpool.pool_state(record[1])
     if fields is None or state is None or input_mint not in {fields[0], fields[2]}:
@@ -203,7 +205,119 @@ def measure_pool(accounts: dict, pool: str, amount: int, input_mint: str) -> dic
     estimate = quoted.get("token_est_out")
     if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
         return refused
-    return {"ok": True, "est_out": estimate, "pool": pool, "a_to_b": a_to_b, "send": False}
+    return {"ok": True, "est_out": estimate, "pool": pool, "a_to_b": a_to_b, "send": False, "context_slot": 1, "context_slot_from_rpc": False}
+
+
+def review_snapshot(snapshot, pool: str, input_mint: str, output_mint: str, amount: int, now: float) -> dict:
+    """Quote one pool from a server snapshot. The context slot is the snapshot's slot.
+
+    Caller account dicts are not accepted. A slot of 1 is not a fetched context.
+    Quote expiry stays unproven: this slot is not a block height.
+    """
+    import solana_whirlpool_quote
+    refused = {
+        "ok": False, "send": False, "sign": False, "live_ready": False,
+        "quote_expiry_proven": False, "block_height_missing": True, "jupiter_called": False,
+    }
+    if not isinstance(snapshot, Snapshot) or not isinstance(pool, str):
+        return refused | {"reason": "snapshot_unbound"}
+    if isinstance(snapshot.slot, bool) or not isinstance(snapshot.slot, int) or snapshot.slot <= 1:
+        return refused | {"reason": "context_slot_unbound", "slot": snapshot.slot}
+    clock = _snapshot_clock(snapshot, now)
+    if clock is not None:
+        return refused | {"reason": clock, "slot": snapshot.slot, "tip_slot": snapshot.tip_slot}
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return refused | {"reason": "intent_unbound"}
+    record = snapshot.accounts.get(pool)
+    if not isinstance(record, tuple) or record[0] != solana_whirlpool.PROGRAM_ID:
+        return refused | {"reason": "whirlpool_pool_unbound"}
+    fields = solana_whirlpool.pool_fields(record[1])
+    state = solana_whirlpool.pool_state(record[1])
+    if fields is None or state is None:
+        return refused | {"reason": "whirlpool_pool_unbound"}
+    mint_a, vault_a, mint_b, vault_b = fields
+    if input_mint not in {mint_a, mint_b} or output_mint not in {mint_a, mint_b} or input_mint == output_mint:
+        return refused | {"reason": "whirlpool_mint_unbound"}
+    a_to_b = mint_a == input_mint
+    if (a_to_b and output_mint != mint_b) or (not a_to_b and output_mint != mint_a):
+        return refused | {"reason": "whirlpool_mint_unbound"}
+    for vault, mint in ((vault_a, mint_a), (vault_b, mint_b)):
+        if _vault_unbound(snapshot.accounts, vault, mint):
+            return refused | {"reason": "whirlpool_vault_unbound"}
+    spacing = state["tick_spacing"]
+    current = state["tick_current_index"]
+    if not isinstance(spacing, int) or spacing <= 0:
+        return refused | {"reason": "whirlpool_tick_array_unbound"}
+    base = solana_whirlpool.start_tick_index(current, spacing)
+    step = solana_whirlpool.TICK_ARRAY_SIZE * spacing
+    starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
+    arrays = []
+    for start in starts:
+        address = solana_whirlpool.tick_array_address(pool, start)
+        tick = snapshot.accounts.get(address)
+        parsed_array = None if not isinstance(tick, tuple) else solana_whirlpool.tick_array_state(tick[1])
+        if not isinstance(tick, tuple) or tick[0] != solana_whirlpool.PROGRAM_ID or parsed_array is None:
+            return refused | {"reason": "whirlpool_tick_array_unbound"}
+        if parsed_array.get("pool") != pool or parsed_array.get("start_tick_index") != start:
+            return refused | {"reason": "whirlpool_tick_array_unbound"}
+        arrays.append({"start_tick_index": parsed_array["start_tick_index"], "ticks": parsed_array["ticks"]})
+    oracle = solana_whirlpool.oracle_address(pool)
+    oracle_account = snapshot.accounts.get(oracle)
+    if not isinstance(oracle_account, tuple) or oracle_account[0] != solana_whirlpool.PROGRAM_ID or len(oracle_account[1]) < 8:
+        return refused | {"reason": "whirlpool_oracle_unbound"}
+    try:
+        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, amount, a_to_b, 0, 0, snapshot.slot)
+    except solana_whirlpool_quote.QuoteError:
+        return refused | {"reason": "amm_quote_failed", "slot": snapshot.slot}
+    estimate = quoted.get("token_est_out")
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
+        return refused | {"reason": "amm_quote_zero", "slot": snapshot.slot}
+    return {
+        "ok": True,
+        "reason": None,
+        "est_out": estimate,
+        "pool": pool,
+        "a_to_b": a_to_b,
+        "slot": snapshot.slot,
+        "tip_slot": snapshot.tip_slot,
+        "context_slot": snapshot.slot,
+        "context_slot_from_rpc": True,
+        "amount": amount,
+        "input_mint": input_mint,
+        "output_mint": output_mint,
+        "quote_expiry_proven": False,
+        "block_height_missing": True,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "jupiter_called": False,
+    }
+
+
+def _vault_unbound(accounts: dict, address: str, mint: str) -> bool:
+    record = accounts.get(address)
+    if not isinstance(record, tuple) or record[0] != solana_tx.TOKEN_PROGRAM:
+        return True
+    fields = solana_tx.token_account_fields(record[1])
+    if fields is None or fields[0] != mint:
+        return True
+    if fields[1] in {phantom_transport.REQUIRED_WALLET, address}:
+        return True
+    return False
+
+
+def snapshot_keys(pool_data: bytes, pool: str, a_to_b: bool) -> list[str] | None:
+    """Vaults, tick-array PDAs, and the oracle derived from the pool bytes."""
+    fields = solana_whirlpool.pool_fields(pool_data)
+    state = solana_whirlpool.pool_state(pool_data)
+    if fields is None or state is None or state["tick_spacing"] <= 0:
+        return None
+    _mint_a, vault_a, _mint_b, vault_b = fields
+    base = solana_whirlpool.start_tick_index(state["tick_current_index"], state["tick_spacing"])
+    step = solana_whirlpool.TICK_ARRAY_SIZE * state["tick_spacing"]
+    starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
+    ticks = [solana_whirlpool.tick_array_address(pool, start) for start in starts]
+    return [pool, vault_a, vault_b, *ticks, solana_whirlpool.oracle_address(pool)]
 
 
 def parse(data: bytes) -> dict:
