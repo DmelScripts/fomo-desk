@@ -344,19 +344,9 @@ class Executor:
         else:
             self.pending[mint] = {"at": now, "price": float(fresh_price), "size": size, "name": name, "pct": pct}
             status = "sent"
-        if mode == "PAPER" and status == "bought":
-            try:
-                import phantom_runner
-                phantom_runner.on_qualified_signal({
-                    "qualified": True,
-                    "mint": mint,
-                    "price": float(fresh_price),
-                    "sol_usd": payload.get("sol_usd"),
-                    "fx_at": payload.get("fx_at"),
-                    "phantom_fee_usd": payload.get("phantom_fee_usd"),
-                })
-            except Exception:
-                log.warning("phantom paper entry did not run")
+        import token_execution
+        chain = token_execution.supported_buy(mint)
+        result_chain = chain
         log.info("mint=%s stack=%s raw=%s final=%s mode=%s status=%s link=%s", mint, stack, stack * db.get_float("stack_pct") / 100, size, mode, status, url)
         result = {
             "agent": "executor",
@@ -369,6 +359,8 @@ class Executor:
             "status": status,
             "reason": None,
             "stop_price": float(fresh_price) * (1 - stop / 100.0),
+            "chain": result_chain,
+            "chain_send": False,
         }
         self.desk.bus.publish("signal", {key: result[key] for key in ("agent", "mint", "signalPrice", "sizeUsd", "stackPct", "link", "mode", "status", "reason")})
         return result

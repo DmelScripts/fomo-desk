@@ -134,74 +134,130 @@ def _signature(text: str) -> str | None:
     return None
 
 
-def _claim(intent_id: str, digest: str) -> bool:
-    """One transaction moves sim_open to submit_unknown and records the digest."""
+def fresh_block_height() -> int | None:
+    """One getBlockHeight on the configured reader. None when that read is unavailable."""
+    import solana_read_rpc
+    reader = solana_read_rpc.configured_reader()
+    if reader is None:
+        return None
+    try:
+        height = reader.call("getBlockHeight", [{"commitment": "confirmed"}])
+    except solana_read_rpc.RpcError:
+        return None
+    if isinstance(height, bool) or not isinstance(height, int) or height <= 0:
+        return None
+    return height
+
+
+def claim_after_identity(intent_id: str, digest: str, *, message_sha256: str, expect_status: str, last_valid, block_height) -> str | None:
+    """Claim only after identity. None means the row moved. A reason means it did not.
+
+    Halt, the policy stamp, the reserved message, status, and expiry are read
+    inside this immediate transaction. A control write that commits after this
+    transaction returns, and before the subprocess returns, is still outside it.
+    """
 
     def work(conn):
+        if _halted_conn(conn):
+            return "kill_switch"
         row = conn.execute(
-            "SELECT status, wallet, wallet_id, amount_usd, result_json, reserved_usd FROM phantom_reservations WHERE intent_id = ?",
+            "SELECT status, wallet, wallet_id, amount_usd, result_json FROM phantom_reservations WHERE intent_id = ?",
             (intent_id,),
         ).fetchone()
-        if row is None or row["status"] != "sim_open":
-            return False
+        if row is None or row["status"] != expect_status:
+            return "not_claimable"
         if (
             row["wallet"] != phantom_transport.REQUIRED_WALLET
             or row["wallet_id"] != phantom_transport.REQUIRED_WALLET_ID
             or row["amount_usd"] != "8.00"
         ):
-            return False
-        current = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
-        ledger = {}
-        if current is not None:
-            try:
-                ledger = json.loads(current["value"])
-            except json.JSONDecodeError:
-                return False
-        if not isinstance(ledger, dict) or intent_id in ledger:
-            return False
-        now = time.time()
-        current_result = row["result_json"] if "result_json" in row.keys() else None
+            return "not_claimable"
         try:
-            payload = json.loads(current_result) if current_result else {}
+            payload = json.loads(row["result_json"]) if row["result_json"] else {}
         except json.JSONDecodeError:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        payload["chain_submit"] = True
-        payload["resubmit"] = False
-        payload["confirmed"] = False
+        stamp = payload.get("policy_stamp")
+        if isinstance(stamp, dict) and _stamp_changed(conn, stamp):
+            return "policy_changed"
+        bound = payload.get("message_sha256") if expect_status == "sim_open" else payload.get("exit_message_sha256")
+        if bound != message_sha256:
+            return "message_unbound"
+        if isinstance(last_valid, int) and not isinstance(last_valid, bool):
+            if isinstance(block_height, bool) or not isinstance(block_height, int) or block_height <= 0:
+                return "expiry_unproven"
+            if block_height > last_valid:
+                return "blockhash_expired"
+        now = time.time()
+        if expect_status == "sim_open":
+            current = conn.execute("SELECT value FROM phantom_control WHERE key = ?", (_LEDGER,)).fetchone()
+            ledger = {}
+            if current is not None:
+                try:
+                    ledger = json.loads(current["value"])
+                except json.JSONDecodeError:
+                    return "not_claimable"
+            if not isinstance(ledger, dict) or intent_id in ledger:
+                return "not_claimable"
+            payload["chain_submit"] = True
+            payload["resubmit"] = False
+            payload["confirmed"] = False
+            updated = conn.execute(
+                """
+                UPDATE phantom_reservations
+                SET status = 'submit_unknown', result_json = ?, updated_at = ?
+                WHERE intent_id = ? AND status = 'sim_open'
+                """,
+                (json.dumps(payload, separators=(",", ":"), sort_keys=True), now, intent_id),
+            )
+            if updated.rowcount != 1:
+                return "not_claimable"
+            ledger[intent_id] = {"sha256": digest, "status": "submit_unknown"}
+            conn.execute(
+                """
+                INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (_LEDGER, json.dumps(ledger, separators=(",", ":"), sort_keys=True), now),
+            )
+            return None
+        if payload.get("exit_claimed") is True:
+            return "not_claimable"
+        payload["exit_claimed"] = True
+        payload["resend"] = False
         updated = conn.execute(
             """
             UPDATE phantom_reservations
-            SET status = 'submit_unknown', result_json = ?, updated_at = ?
-            WHERE intent_id = ? AND status = 'sim_open'
+            SET status = 'exit_unknown', result_json = ?, updated_at = ?
+            WHERE intent_id = ? AND status = 'confirmed'
             """,
             (json.dumps(payload, separators=(",", ":"), sort_keys=True), now, intent_id),
         )
         if updated.rowcount != 1:
-            return False
-        ledger[intent_id] = {"sha256": digest, "status": "submit_unknown"}
-        conn.execute(
-            """
-            INSERT INTO phantom_control (key, value, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-            """,
-            (_LEDGER, json.dumps(ledger, separators=(",", ":"), sort_keys=True), now),
-        )
-        return True
+            return "not_claimable"
+        return None
 
-    return db.exclusive(work) is True
+    return db.exclusive(work)
 
 
 def _stamp_changed(conn, stamp: dict) -> bool:
     fee = conn.execute("SELECT updated_at FROM phantom_control WHERE key = 'fee_policy'").fetchone()
     loss = conn.execute("SELECT updated_at FROM phantom_control WHERE key = 'aggregate_loss_policy'").fetchone()
     halt = conn.execute("SELECT value, updated_at FROM phantom_control WHERE key = 'halt'").fetchone()
+    exit_row = conn.execute("SELECT updated_at FROM phantom_control WHERE key = 'exit_policy_approval'").fetchone()
     fee_at = None if fee is None else fee["updated_at"]
     loss_at = None if loss is None else loss["updated_at"]
     halt_value = None if halt is None else halt["value"]
     halt_at = None if halt is None else halt["updated_at"]
-    return fee_at != stamp.get("fee") or loss_at != stamp.get("loss") or halt_value != stamp.get("halt") or halt_at != stamp.get("halt_at")
+    exit_at = None if exit_row is None else exit_row["updated_at"]
+    return (
+        fee_at != stamp.get("fee")
+        or loss_at != stamp.get("loss")
+        or halt_value != stamp.get("halt")
+        or halt_at != stamp.get("halt_at")
+        or exit_at != stamp.get("exit")
+    )
 
 
 def _halted_conn(conn) -> bool:
@@ -367,8 +423,38 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     if code != 0 or not identity["ok"]:
         reason = "auth_expired" if code != 0 or identity["reason"] == "auth_expired" else "wallet_mismatch"
         return {"status": "refused", "reason": reason, "send": False, "resend": False, "subprocess": seen}
-    if not _claim(intent_id, digest):
-        return {"status": "refused", "reason": "reservation_lost", "send": False, "resend": False, "subprocess": seen}
+    stored = {}
+    if reservation["result_json"]:
+        try:
+            parsed = json.loads(reservation["result_json"])
+            stored = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            stored = {}
+    import solana_tx
+    try:
+        message_sha = hashlib.sha256(solana_tx.message_bytes(base64.b64encode(raw).decode("ascii"))).hexdigest()
+    except ValueError:
+        return {"status": "refused", "reason": "bytes", "send": False, "resend": False, "subprocess": seen}
+    last_valid = stored.get("last_valid_block_height")
+    height = None
+    if isinstance(last_valid, int) and not isinstance(last_valid, bool):
+        height = fresh_block_height()
+    refused = claim_after_identity(
+        intent_id, digest, message_sha256=message_sha, expect_status="sim_open",
+        last_valid=last_valid, block_height=height,
+    )
+    if refused:
+        return {
+            "status": "refused",
+            "reason": refused,
+            "send": False,
+            "resend": False,
+            "subprocess": seen,
+            "cli_transport": "argv_only",
+            "stdin_transaction": False,
+            "signature": None,
+            "post_claim_toctou": False,
+        }
     try:
         code, text = runner(send_argv(binary, base64.b64encode(raw).decode("ascii")), env, timeout)
     except (subprocess.TimeoutExpired, OSError):
@@ -378,7 +464,17 @@ def send_after_identity(intent_id: str, tx_b64: str, runner, *, binary: str = "p
     if signature is None:
         return {"status": "submit_unknown", "reason": "ambiguous", "send": False, "resend": False, "subprocess": seen}
     _record_signature(intent_id, signature, digest)
-    return {"status": "submitted", "reason": None, "send": True, "signature": signature, "resend": False, "subprocess": seen, "cli_transport": "argv_only", "stdin_transaction": False}
+    return {
+        "status": "submitted",
+        "reason": None,
+        "send": True,
+        "signature": signature,
+        "resend": False,
+        "subprocess": seen,
+        "cli_transport": "argv_only",
+        "stdin_transaction": False,
+        "post_claim_toctou": True,
+    }
 
 
 def status() -> dict:
@@ -434,8 +530,8 @@ def activation_status() -> dict:
             "scanner": "not wired to the direct reserve",
             "auditor": "not wired to the direct reserve",
             "analyst": "not wired to the direct reserve",
-            "executor": "PAPER on_qualified_signal only",
-            "risk": "PAPER on_scheduled_exit only",
+            "executor": "scanner mint reaches supported_buy and fails closed",
+            "risk": "paper exit reaches supported_exit and fails closed",
         },
         "checks": checks,
         "unmet": [name for name, passed in checks.items() if not passed],
@@ -756,6 +852,8 @@ def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict |
         "exit_tx_sha256": prepared.get("exit_tx_sha256"),
         "exit_plan_raw": prepared.get("exit_plan_raw"),
         "blockhash": prepared.get("blockhash"),
+        "last_valid_block_height": prepared.get("last_valid_block_height"),
+        "policy_stamp": stamp if isinstance(stamp, dict) else None,
         "rent_micro_usdc": prepared.get("rent_micro_usdc"),
         "unsigned_tx_sha256": prepared.get("unsigned_tx_sha256"),
         "confirmed": False,
@@ -990,6 +1088,8 @@ def plan_acquired_exit(intent_id: str, rpc, mark_micro: int | None = None, ident
     stored["exit_dex_micro"] = dex_micro
     stored["exit_pool_micro_per_sol"] = exit_micro
     stored["exit_network_fee_estimate"] = tail.get("network_fee_lamports")
+    stored["exit_blockhash"] = bundle.get("blockhash")
+    stored["exit_last_valid_block_height"] = bundle.get("last_valid_block_height")
     stored["exit_valuation"] = usdc_valuation.snapshot(source)
     stored["exit_simulated"] = simulated
     stored["exit_raw"] = acquired if simulated else None
