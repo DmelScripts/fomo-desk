@@ -1238,6 +1238,8 @@ def _preflight_report(**extra) -> dict:
         "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
         "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
         "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
+        "dex_fee_quote_raw": None, "dex_fee_quote_partial": False,
+        "dex_fee_quote_current_state": False, "dex_fee_quote_is_inclusion_bound": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": None,
         "combined_fee_usd_proven": False, "allocation_proven": False,
@@ -1514,7 +1516,81 @@ def _hop_pool(decoded) -> dict | None:
         "destination_mint": route["destination_mint"],
         "in_amount": amount,
         "a_to_b": parsed["a_to_b"],
+        "tick_arrays": [keys[pool_index + 5], keys[pool_index + 6], keys[pool_index + 7]],
     }
+
+
+def _current_account(transport, purpose: str, address: str, tip: int, blockhash: str):
+    """One confirmed account. The context slot is the read's slot, not inclusion."""
+    import jupiter_route_v2
+    try:
+        response = transport({
+            "method": "getAccountInfo", "purpose": purpose, "account": address,
+            "commitment": "confirmed", "minContextSlot": tip, "blockhash": blockhash,
+        })
+    except Exception:
+        return None, None, "transport"
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return None, None, "malformed"
+    echoed = result.get("blockhash", body.get("blockhash") if isinstance(body, dict) else None)
+    if echoed is not None and echoed != blockhash:
+        return None, None, "hash"
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return None, None, "context_missing"
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return None, None, "context_malformed"
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        return None, None, "context_stale" if slot < tip else "context_future"
+    value = result.get("value")
+    if value is None:
+        return None, slot, "missing"
+    if not isinstance(value, dict) or value.get("executable") is not False:
+        return None, slot, "executable"
+    return value, slot, None
+
+
+def _message_tick_arrays(transport, hop: dict, state: dict, tip: int, blockhash: str, pool_slot: int):
+    """The three tick arrays named by the frozen message, checked against their PDAs."""
+    import solana_whirlpool
+    spacing = state["tick_spacing"]
+    current = state["tick_current_index"]
+    if not isinstance(spacing, int) or spacing <= 0 or not isinstance(current, int):
+        return None, "tick_array_spacing"
+    base = solana_whirlpool.start_tick_index(current, spacing)
+    step = solana_whirlpool.TICK_ARRAY_SIZE * spacing
+    starts = [base - i * step for i in range(3)] if hop["a_to_b"] else [base + i * step for i in range(3)]
+    named = hop.get("tick_arrays")
+    if not isinstance(named, list) or len(named) != 3:
+        return None, "tick_array_missing"
+    expected = [solana_whirlpool.tick_array_address(hop["pool"], start) for start in starts]
+    if named != expected:
+        return None, "tick_array_pda"
+    if not (starts[0] <= current < starts[0] + step):
+        return None, "tick_array_coverage"
+    parsed = []
+    for address, start in zip(named, starts):
+        value, slot, reason = _current_account(transport, "whirlpool_tick_array", address, tip, blockhash)
+        if reason is not None:
+            return None, "tick_array_" + reason
+        if slot != pool_slot:
+            return None, "tick_array_context"
+        if value.get("owner") != solana_whirlpool.PROGRAM_ID:
+            return None, "tick_array_owner"
+        raw = _decoded_account_data(value.get("data"))
+        fields = None if raw is None else solana_whirlpool.tick_array_state(raw)
+        if fields is None or fields["start_tick_index"] != start or fields["pool"] != hop["pool"]:
+            return None, "tick_array_layout"
+        offset = 12
+        for _ in range(solana_whirlpool.TICK_ARRAY_SIZE):
+            if raw[offset] not in (0, 1):
+                return None, "tick_array_layout"
+            offset += 113
+        parsed.append(fields)
+    return parsed, None
 
 
 def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
@@ -1523,10 +1599,11 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     programs/whirlpool/src/math/swap_math.rs compute_swap charges each step
     separately. A step that reaches the next tick uses
     ceil(amount_in * rate / (1_000_000 - rate)). A step that does not uses
-    amount_remaining - amount_in. Those amounts add across the loop. The
-    one-shot ceil(input * rate / 1_000_000) is recorded and is not that sum.
-    An adaptive fee or a Token-2022 transfer fee is a different amount. Nothing
-    here is the fee a landed swap charged.
+    amount_remaining - amount_in. Those amounts add across the loop in
+    swap_manager.rs. The one-shot ceil(input * rate / 1_000_000) is recorded
+    and is not that sum. The sum is the fee of the pool and tick arrays as
+    read now. It is not a bound at inclusion and it is not the landed Traded
+    event. An adaptive fee or a Token-2022 transfer fee is a different amount.
     """
     import base64
     import jupiter_route_v2
@@ -1536,6 +1613,8 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
         "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
         "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
         "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
+        "dex_fee_quote_raw": None, "dex_fee_quote_partial": False,
+        "dex_fee_quote_current_state": False, "dex_fee_quote_is_inclusion_bound": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": "pool_fee_unobserved",
     }
@@ -1602,9 +1681,33 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     one_shot = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
     if one_shot is None or one_shot >= 2**64:
         one_shot = None
+    observed = observed | {"dex_fee_one_shot_raw": one_shot}
+    arrays, array_reason = _message_tick_arrays(transport, hop, state, tip, proof["blockhash"], slot)
+    if array_reason is not None:
+        return observed | {"pool_fee_reason": array_reason}
+    import solana_whirlpool_quote
+    try:
+        computed = solana_whirlpool_quote._compute_swap(
+            hop["in_amount"], 0,
+            {
+                "sqrt_price": state["sqrt_price"],
+                "tick_current_index": state["tick_current_index"],
+                "fee_rate": rate,
+                "liquidity": state["liquidity"],
+                "tick_spacing": state["tick_spacing"],
+            },
+            arrays, hop["a_to_b"], True,
+        )
+    except solana_whirlpool_quote.QuoteError as exc:
+        return observed | {"pool_fee_reason": exc.category}
     return observed | {
-        "dex_fee_one_shot_raw": one_shot,
-        "pool_fee_reason": "pool_fee_step_bound_unproven",
+        "dex_fee_quote_raw": computed["trade_fee"],
+        "dex_fee_quote_partial": computed["amount_remaining"] != 0,
+        "dex_fee_quote_amount_remaining": computed["amount_remaining"],
+        "dex_fee_quote_steps": computed["steps"],
+        "dex_fee_quote_current_state": True,
+        "dex_fee_quote_is_inclusion_bound": False,
+        "pool_fee_reason": "pool_fee_quote_not_inclusion_bound",
     }
 
 
@@ -3834,7 +3937,7 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
+    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "whirlpool_tick_array", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

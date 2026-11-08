@@ -34,6 +34,34 @@ class WhirlpoolQuoteTests(unittest.TestCase):
             self.assertEqual(got["token_max_in"], maximum)
             self.assertEqual(got["trade_fee"], fee)
 
+    def test_compute_swap_matches_the_program_max_step(self):
+        """programs/whirlpool/src/math/swap_math.rs swap_a_to_b_input_max at 2509ad9."""
+        step = quote._swap_step(1000, 20_000, 1296, 9 << 64, 4 << 64, True, True)
+        self.assertEqual(step["amount_in"], 180)
+        self.assertEqual(step["amount_out"], 6480)
+        self.assertEqual(step["fee_amount"], 4)
+        self.assertEqual(step["next_sqrt_price"], 4 << 64)
+
+    def test_two_crossed_ticks_charge_more_than_the_one_shot_ceil(self):
+        arrays = []
+        for start in (0, -88, -176):
+            ticks = [{"initialized": False, "liquidity_net": 0} for _ in range(88)]
+            arrays.append({"start_tick_index": start, "ticks": ticks})
+        arrays[1]["ticks"][87] = {"initialized": True, "liquidity_net": 0}
+        arrays[1]["ticks"][86] = {"initialized": True, "liquidity_net": 0}
+        pool = {
+            "sqrt_price": quote.sqrt_price_from_tick(0),
+            "tick_current_index": 0,
+            "fee_rate": 3000,
+            "liquidity": 1,
+            "tick_spacing": 1,
+        }
+        got = quote._compute_swap(4, 0, pool, arrays, True, True)
+        self.assertEqual(got["trade_fee"], 2)
+        self.assertEqual(got["steps"], 2)
+        self.assertEqual(got["amount_remaining"], 0)
+        self.assertEqual((4 * 3000 + 1_000_000 - 1) // 1_000_000, 1)
+
     def test_slippage_floor_matches_the_published_996_case(self):
         self.assertEqual(quote.min_amount(996, 1000), 896)
         self.assertEqual(quote.sqrt_price_from_tick(0), 1 << 64)

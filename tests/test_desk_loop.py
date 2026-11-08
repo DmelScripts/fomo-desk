@@ -351,6 +351,7 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "simulateTransaction", "transaction": "abc"},
             {"method": "getFeeForMessage", "message": "abc"},
             {"method": "getAccountInfo", "purpose": "whirlpool_pool", "account": MINT},
+            {"method": "getAccountInfo", "purpose": "whirlpool_tick_array", "account": MINT},
             {"method": "getAccountInfo", "purpose": "token_deposit", "account": MINT},
             {"method": "getMinimumBalanceForRentExemption", "purpose": "rent_exemption", "size": 165},
             {"method": "getAccountInfo", "purpose": "mint_decimals", "account": MINT},
@@ -359,7 +360,7 @@ class DeskLoopTests(unittest.TestCase):
             posted = len(posts)
             with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
-            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
+            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") in {"whirlpool_pool", "whirlpool_tick_array", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
                 self.assertEqual(str(refused.exception), "method_refused")
                 self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
@@ -2022,6 +2023,18 @@ conn.close()
                     if mode != "executable_missing":
                         value["executable"] = executable
                 return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": value, "blockhash": echoed}, "blockhash": echoed}}
+            if method == "getAccountInfo" and request.get("purpose") == "whirlpool_tick_array":
+                address = request.get("account")
+                echoed = request.get("blockhash")
+                if address not in accounts:
+                    value = None
+                else:
+                    owner, raw = accounts[address]
+                    value = {
+                        "owner": owner, "executable": False, "lamports": 1,
+                        "data": [base64.b64encode(bytes(raw)).decode("ascii"), "base64"],
+                    }
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": value, "blockhash": echoed}, "blockhash": echoed}}
             if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
                 shape = chain.get("fee_payer_shape")
                 payer_data = {
@@ -2260,7 +2273,10 @@ conn.close()
         self.assertFalse(entry_preflight["dex_fee_one_shot_is_bound"])
         self.assertIsNone(entry_preflight["dex_fee_estimate_raw"])
         self.assertFalse(entry_preflight["dex_fee_estimate_proven"], entry_preflight)
-        self.assertEqual(entry_preflight["pool_fee_reason"], "pool_fee_step_bound_unproven")
+        self.assertEqual(entry_preflight["pool_fee_reason"], "pool_fee_quote_not_inclusion_bound")
+        self.assertTrue(entry_preflight["dex_fee_quote_current_state"])
+        self.assertFalse(entry_preflight["dex_fee_quote_is_inclusion_bound"])
+        self.assertIsInstance(entry_preflight["dex_fee_quote_raw"], int)
         self.assertFalse(entry_preflight["dex_fee_charged_proven"])
         self.assertFalse(entry_preflight["dex_fee_proven"])
         self.assertFalse(entry_preflight["adaptive_fee_unsupported"])
@@ -3609,7 +3625,9 @@ conn.close()
         self.assertFalse(exit_preflight["dex_fee_one_shot_is_bound"])
         self.assertIsNone(exit_preflight["dex_fee_estimate_raw"])
         self.assertFalse(exit_preflight["dex_fee_estimate_proven"], exit_preflight)
-        self.assertEqual(exit_preflight["pool_fee_reason"], "pool_fee_step_bound_unproven")
+        self.assertEqual(exit_preflight["pool_fee_reason"], "pool_fee_quote_not_inclusion_bound")
+        self.assertTrue(exit_preflight["dex_fee_quote_current_state"])
+        self.assertFalse(exit_preflight["dex_fee_quote_is_inclusion_bound"])
         self.assertFalse(exit_preflight["deposit_observed"], exit_preflight)
         self.assertIsNone(exit_preflight["deposit_lamports"])
         self.assertEqual(exit_preflight["deposit_reason"], "close_without_create")
@@ -5062,6 +5080,78 @@ conn.close()
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_exit_receipts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
+
+    def test_tick_array_bytes_quote_the_fixed_fee_for_the_current_state(self):
+        import base64
+        from tests.test_jupiter_route_v2 import _metas, _route, _tx
+        import phantom_transport
+        import solana_whirlpool
+        import solana_whirlpool_quote as quote
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        wallet = phantom_transport.REQUIRED_WALLET
+        vault_a = solana_tx.b58encode(b"\x31" * 32)
+        vault_b = solana_tx.b58encode(b"\x32" * 32)
+        raw = bytearray(solana_whirlpool.reference_pool(
+            solana_tx.NATIVE_MINT, vault_a, mint, vault_b, 1, 0,
+            sqrt_price=quote.sqrt_price_from_tick(0), fee_rate=3000, liquidity=1,
+        ))
+        raw[8:40] = b"\x45" * 32
+        fields = solana_whirlpool.pool_fields(bytes(raw))
+        seed = bytes(raw[solana_whirlpool._TICK_SPACING + 2:solana_whirlpool._TICK_SPACING + 4])
+        derived, bump = solana_tx.find_program_address(
+            [b"whirlpool", bytes(raw[8:40]), solana_tx.b58decode(fields[0]), solana_tx.b58decode(fields[2]), seed],
+            solana_tx.b58decode(solana_whirlpool.PROGRAM_ID),
+        )
+        raw[40] = bump
+        pool = solana_tx.b58encode(derived)
+        starts = [0, -88, -176]
+        accounts = {pool: (solana_whirlpool.PROGRAM_ID, bytes(raw))}
+        ticks = []
+        for start in starts:
+            address = solana_whirlpool.tick_array_address(pool, start)
+            accounts[address] = (solana_whirlpool.PROGRAM_ID, bytearray(solana_whirlpool.reference_tick_array(pool, start)))
+            ticks.append(address)
+        crossed = accounts[ticks[1]][1]
+        for offset in (86, 87):
+            crossed[12 + offset * 113] = 1
+        block = solana_tx.b58encode(b"\x44" * 32)
+        values = {
+            "pool": pool,
+            "source": solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM),
+            "dest": solana_tx.b58encode(b"\x69" * 32),
+            "vault_a": vault_a, "vault_b": vault_b, "ticks": ticks,
+            "oracle": solana_whirlpool.oracle_address(pool),
+            "authority": wallet, "token_program": solana_tx.TOKEN_PROGRAM,
+        }
+        encoded = _tx(_metas(solana_tx.NATIVE_MINT, mint, values), _route(100, 50, True, amount=4), side="buy", blockhash=block)
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+
+        def transport(request):
+            address = request.get("account")
+            record = accounts.get(address)
+            value = None if record is None else {
+                "owner": record[0], "executable": False, "lamports": 1,
+                "data": [base64.b64encode(bytes(record[1])).decode("ascii"), "base64"],
+            }
+            return {"status": 200, "body": {"result": {"context": {"slot": 12}, "value": value, "blockhash": block}}}
+
+        quoted = desk_loop._reserved_pool_fee(transport, {"pool": pool, "blockhash": block}, decoded, 12)
+        self.assertEqual(quoted["dex_fee_quote_raw"], 2, quoted)
+        self.assertEqual(quoted["dex_fee_quote_steps"], 2)
+        self.assertFalse(quoted["dex_fee_quote_partial"])
+        self.assertEqual(quoted["dex_fee_one_shot_raw"], 1)
+        self.assertFalse(quoted["dex_fee_one_shot_is_bound"])
+        self.assertFalse(quoted["dex_fee_quote_is_inclusion_bound"])
+        self.assertTrue(quoted["dex_fee_quote_current_state"])
+        self.assertFalse(quoted["dex_fee_estimate_proven"])
+        self.assertFalse(quoted["dex_fee_charged_proven"])
+        self.assertEqual(quoted["pool_fee_reason"], "pool_fee_quote_not_inclusion_bound")
+        accounts.pop(ticks[2])
+        missing = desk_loop._reserved_pool_fee(transport, {"pool": pool, "blockhash": block}, decoded, 12)
+        self.assertIsNone(missing["dex_fee_quote_raw"])
+        self.assertEqual(missing["pool_fee_reason"], "tick_array_missing")
+        self.assertEqual(missing["dex_fee_one_shot_raw"], 1)
+        self.assertFalse(missing["dex_fee_one_shot_is_bound"])
 
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
         import shutil

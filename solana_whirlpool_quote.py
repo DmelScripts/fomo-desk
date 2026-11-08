@@ -196,6 +196,7 @@ def _compute_swap(amount: int, sqrt_price_limit: int, pool: dict, arrays: list[d
         "trade_fee": fee,
         "sqrt_price": price,
         "amount_remaining": remaining,
+        "steps": steps,
     }
 
 
