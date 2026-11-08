@@ -276,8 +276,25 @@ def _entry_lamports(sol_leg: dict, rent_lamports: int | None = None) -> dict:
     }
 
 
+def _balance_class(item) -> str:
+    """Paper and synthetic are not live. A live-looking row without server provenance is unresolved."""
+    if item["ledger"] in {"paper", "synthetic"}:
+        return "skip"
+    if item["ledger"] != "live" or item["ledger_provenance"] != "server":
+        return "ambiguous"
+    return "live"
+
+
 def receipt_remaining(case_id: str) -> dict:
-    """Live server token qty. A paper or synthetic row is not part of that balance."""
+    """Size a live exit from server-proven live receipts.
+
+    A paper or synthetic row is not live quantity, so it does not close a
+    proven live position and it does not add to it. A live-looking row that
+    is not server-proven can be an unaccounted buy or sale. It is not ignored
+    and it is not counted. Sizing stays closed until a new server-proven
+    receipt accounts for that row. The lineage trigger rejects editing the
+    old row into server provenance. The hold is unchanged either way.
+    """
     refused = {"ok": False, "reason": "exit_receipt_unproven", "remaining": None}
 
     def work(conn):
@@ -299,9 +316,10 @@ def receipt_remaining(case_id: str) -> dict:
             if item["signature"] in seen:
                 continue
             seen.add(item["signature"])
-            if item["ledger_provenance"] != "server" or item["ledger"] not in _LEDGERS:
+            kind = _balance_class(item)
+            if kind == "ambiguous":
                 return refused | {"reason": "provenance_unproven"}
-            if item["ledger"] != "live":
+            if kind == "skip":
                 continue
             live_buys += 1
             qty = item["qty"]
@@ -316,9 +334,10 @@ def receipt_remaining(case_id: str) -> dict:
             if item["signature"] in exited:
                 continue
             exited.add(item["signature"])
-            if item["ledger_provenance"] != "server" or item["ledger"] not in _LEDGERS:
+            kind = _balance_class(item)
+            if kind == "ambiguous":
                 return refused | {"reason": "provenance_unproven"}
-            if item["ledger"] != "live":
+            if kind == "skip":
                 continue
             qty = item["qty"]
             if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
@@ -2859,6 +2878,35 @@ def _replace_lineage_triggers(conn) -> None:
     )
 
 
+_IDENTITY_FIELDS = (
+    "case_id", "side", "message_b64", "router", "blockhash",
+    "last_valid_block_height", "last_valid_provenance", "expire_at",
+    "pool", "intent_id", "ledger", "ledger_provenance",
+)
+
+
+def _identity_agreement(conn, proof) -> str:
+    """The frozen first proof must still be the reservation row."""
+    row = conn.execute(
+        "SELECT * FROM memecoin_reservation_identity WHERE message_sha256 = ?",
+        (proof["message_sha256"],),
+    ).fetchone()
+    if row is None:
+        return "missing"
+    for field in _IDENTITY_FIELDS:
+        if row[field] != proof[field]:
+            return "mismatch"
+    return "match"
+
+
+def _open_reservation_count(conn, case_id: str, side: str) -> int:
+    rows = conn.execute(
+        "SELECT * FROM memecoin_reservations WHERE case_id = ? AND side = ?",
+        (case_id, side),
+    ).fetchall()
+    return sum(1 for item in rows if _reservation_status(conn, item) in {"active", "unknown"})
+
+
 def _reservation_status(conn, proof) -> str:
     """A live server receipt of this side and message is the only thing that ends a live reservation."""
     case = conn.execute(
@@ -2940,6 +2988,32 @@ def _store_reservation(conn, *, case_id: str, side: str, message_b64: str, diges
     )
 
 
+def _backfill_active_slots(conn) -> None:
+    """One open proof per case and side. Duplicates stay stored and none is chosen."""
+    rows = list(conn.execute("SELECT * FROM memecoin_reservations"))
+    grouped = {}
+    for row in rows:
+        grouped.setdefault((row["case_id"], row["side"]), []).append(row)
+    for (case_id, side), items in grouped.items():
+        existing = conn.execute(
+            "SELECT message_sha256 FROM memecoin_reservation_active WHERE case_id = ? AND side = ?",
+            (case_id, side),
+        ).fetchone()
+        if existing is not None:
+            continue
+        open_rows = [item for item in items if _reservation_status(conn, item) in {"active", "unknown"}]
+        if len(open_rows) == 1:
+            conn.execute(
+                "INSERT INTO memecoin_reservation_active (case_id, side, message_sha256) VALUES (?, ?, ?)",
+                (case_id, side, open_rows[0]["message_sha256"]),
+            )
+        elif len(open_rows) > 1:
+            conn.execute(
+                "INSERT INTO memecoin_reservation_active (case_id, side, message_sha256) VALUES (?, ?, 'ambiguous')",
+                (case_id, side),
+            )
+
+
 def _replace_reservation_triggers(conn) -> None:
     """The first proof for a message hash sticks. A later insert of that hash cannot replace it."""
     conn.execute(
@@ -2952,6 +3026,7 @@ def _replace_reservation_triggers(conn) -> None:
             router TEXT NOT NULL,
             blockhash TEXT NOT NULL,
             last_valid_block_height INTEGER,
+            last_valid_provenance TEXT,
             expire_at INTEGER,
             pool TEXT,
             intent_id TEXT,
@@ -2960,16 +3035,72 @@ def _replace_reservation_triggers(conn) -> None:
         )
         """
     )
+    identity_columns = {row[1] for row in conn.execute("PRAGMA table_info(memecoin_reservation_identity)")}
+    if "last_valid_provenance" not in identity_columns:
+        conn.execute("ALTER TABLE memecoin_reservation_identity ADD COLUMN last_valid_provenance TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservation_anchor (
+            message_sha256 TEXT PRIMARY KEY
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservation_pin (
+            message_sha256 TEXT PRIMARY KEY
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservation_active (
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            PRIMARY KEY (case_id, side)
+        )
+        """
+    )
     conn.execute(
         """
         INSERT INTO memecoin_reservation_identity (
             message_sha256, case_id, side, message_b64, router, blockhash,
-            last_valid_block_height, expire_at, pool, intent_id, ledger, ledger_provenance
+            last_valid_block_height, last_valid_provenance, expire_at, pool, intent_id, ledger, ledger_provenance
         )
         SELECT message_sha256, case_id, side, message_b64, router, blockhash,
-               last_valid_block_height, expire_at, pool, intent_id, ledger, ledger_provenance
+               last_valid_block_height, last_valid_provenance, expire_at, pool, intent_id, ledger, ledger_provenance
         FROM memecoin_reservations
         WHERE message_sha256 NOT IN (SELECT message_sha256 FROM memecoin_reservation_identity)
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_identity_update")
+    conn.execute(
+        """
+        UPDATE memecoin_reservation_identity
+        SET last_valid_provenance = (
+            SELECT last_valid_provenance FROM memecoin_reservations
+            WHERE memecoin_reservations.message_sha256 = memecoin_reservation_identity.message_sha256
+        )
+        WHERE last_valid_provenance IS NULL
+          AND message_sha256 IN (
+            SELECT message_sha256 FROM memecoin_reservations
+            WHERE last_valid_provenance IS NOT NULL
+          )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_reservation_anchor (message_sha256)
+        SELECT message_sha256 FROM memecoin_reservation_identity
+        WHERE message_sha256 NOT IN (SELECT message_sha256 FROM memecoin_reservation_anchor)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_reservation_pin (message_sha256)
+        SELECT message_sha256 FROM memecoin_reservation_anchor
+        WHERE message_sha256 NOT IN (SELECT message_sha256 FROM memecoin_reservation_pin)
         """
     )
     conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_proof")
@@ -2990,6 +3121,21 @@ def _replace_reservation_triggers(conn) -> None:
         END
         """
     )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_active_guard")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservations_active_guard
+        BEFORE INSERT ON memecoin_reservations
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_reservation_active
+            WHERE case_id = NEW.case_id AND side = NEW.side
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_active');
+        END
+        """
+    )
     conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_identity_guard")
     conn.execute(
         """
@@ -2998,6 +3144,48 @@ def _replace_reservation_triggers(conn) -> None:
         FOR EACH ROW
         WHEN EXISTS (
             SELECT 1 FROM memecoin_reservation_identity
+            WHERE message_sha256 = NEW.message_sha256
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_identity_guard")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_identity_guard
+        BEFORE INSERT ON memecoin_reservation_identity
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_reservation_anchor
+            WHERE message_sha256 = NEW.message_sha256
+        )
+        OR EXISTS (
+            SELECT 1 FROM memecoin_reservations
+            WHERE message_sha256 = NEW.message_sha256
+              AND (
+                case_id IS NOT NEW.case_id OR side IS NOT NEW.side OR message_b64 IS NOT NEW.message_b64
+                OR router IS NOT NEW.router OR blockhash IS NOT NEW.blockhash
+                OR last_valid_block_height IS NOT NEW.last_valid_block_height
+                OR last_valid_provenance IS NOT NEW.last_valid_provenance
+                OR expire_at IS NOT NEW.expire_at OR pool IS NOT NEW.pool OR intent_id IS NOT NEW.intent_id
+                OR ledger IS NOT NEW.ledger OR ledger_provenance IS NOT NEW.ledger_provenance
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_anchor_guard")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_anchor_guard
+        BEFORE INSERT ON memecoin_reservation_anchor
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_reservation_pin
             WHERE message_sha256 = NEW.message_sha256
         )
         BEGIN
@@ -3014,11 +3202,16 @@ def _replace_reservation_triggers(conn) -> None:
         BEGIN
             INSERT INTO memecoin_reservation_identity (
                 message_sha256, case_id, side, message_b64, router, blockhash,
-                last_valid_block_height, expire_at, pool, intent_id, ledger, ledger_provenance
+                last_valid_block_height, last_valid_provenance, expire_at, pool, intent_id, ledger, ledger_provenance
             ) VALUES (
                 NEW.message_sha256, NEW.case_id, NEW.side, NEW.message_b64, NEW.router, NEW.blockhash,
-                NEW.last_valid_block_height, NEW.expire_at, NEW.pool, NEW.intent_id, NEW.ledger, NEW.ledger_provenance
+                NEW.last_valid_block_height, NEW.last_valid_provenance, NEW.expire_at, NEW.pool, NEW.intent_id,
+                NEW.ledger, NEW.ledger_provenance
             );
+            INSERT INTO memecoin_reservation_anchor (message_sha256) VALUES (NEW.message_sha256);
+            INSERT INTO memecoin_reservation_pin (message_sha256) VALUES (NEW.message_sha256);
+            INSERT INTO memecoin_reservation_active (case_id, side, message_sha256)
+            VALUES (NEW.case_id, NEW.side, NEW.message_sha256);
         END
         """
     )
@@ -3039,6 +3232,78 @@ def _replace_reservation_triggers(conn) -> None:
         BEFORE DELETE ON memecoin_reservation_identity
         BEGIN
             SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    for name, table in (
+        ("memecoin_reservation_anchor_update", "memecoin_reservation_anchor"),
+        ("memecoin_reservation_anchor_delete", "memecoin_reservation_anchor"),
+        ("memecoin_reservation_pin_update", "memecoin_reservation_pin"),
+        ("memecoin_reservation_pin_delete", "memecoin_reservation_pin"),
+        ("memecoin_reservation_active_update", "memecoin_reservation_active"),
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        kind = "UPDATE" if name.endswith("_update") else "DELETE"
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, 'reservation_immutable');
+            END
+            """
+        )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_active_delete")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_active_delete
+        BEFORE DELETE ON memecoin_reservation_active
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM memecoin_entry_receipts e
+            JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
+            JOIN memecoin_cases c ON c.id = OLD.case_id
+            WHERE OLD.side = 'entry' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
+              AND e.ledger = 'live' AND e.ledger_provenance = 'server'
+              AND r.ledger = 'live' AND r.ledger_provenance = 'server'
+              AND c.ledger = 'live' AND c.ledger_provenance = 'server'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM memecoin_exit_receipts e
+            JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
+            JOIN memecoin_cases c ON c.id = OLD.case_id
+            WHERE OLD.side = 'exit' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
+              AND e.ledger = 'live' AND e.ledger_provenance = 'server'
+              AND r.ledger = 'live' AND r.ledger_provenance = 'server'
+              AND c.ledger = 'live' AND c.ledger_provenance = 'server'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_active');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_entry_receipts_release_active")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_entry_receipts_release_active
+        AFTER INSERT ON memecoin_entry_receipts
+        FOR EACH ROW
+        WHEN NEW.ledger = 'live' AND NEW.ledger_provenance = 'server'
+        BEGIN
+            DELETE FROM memecoin_reservation_active
+            WHERE case_id = NEW.case_id AND side = 'entry' AND message_sha256 = NEW.message_sha256;
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_exit_receipts_release_active")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_exit_receipts_release_active
+        AFTER INSERT ON memecoin_exit_receipts
+        FOR EACH ROW
+        WHEN NEW.ledger = 'live' AND NEW.ledger_provenance = 'server'
+        BEGIN
+            DELETE FROM memecoin_reservation_active
+            WHERE case_id = NEW.case_id AND side = 'exit' AND message_sha256 = NEW.message_sha256;
         END
         """
     )
@@ -3094,6 +3359,7 @@ def _replace_reservation_triggers(conn) -> None:
         END
         """
     )
+    _backfill_active_slots(conn)
 
 
 def _install_lineage_triggers(conn) -> None:

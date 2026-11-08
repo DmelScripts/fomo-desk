@@ -494,6 +494,12 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     embedded = decoded.blockhash
     if again != proof["message_sha256"] or again != message_sha256 or embedded != proof["blockhash"] or proof["side"] not in {"entry", "exit"} or proof["case_id"] != case_id:
         return base | identity | {"reason": "reservation_proof_mismatch", "blockhash": embedded}
+    agreement = db.exclusive(lambda conn: memecoin_desk._identity_agreement(conn, proof))
+    if agreement != "match":
+        return base | identity | {
+            "reason": "reservation_identity_mismatch" if agreement == "mismatch" else "reservation_identity_missing",
+            "holds": True, "resend": False,
+        }
     router = proof["router"]
     stored_last = proof["last_valid_block_height"]
     expire_at = proof["expire_at"]
@@ -508,6 +514,8 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
         if intent is None or intent["pool"] != proof["pool"] or (proof["intent_id"] not in (None, intent["id"])):
             return base | identity | {"reason": "intent_unbound", "blockhash": embedded}
     status = db.exclusive(lambda conn: memecoin_desk._reservation_status(conn, proof))
+    if status in {"active", "unknown"} and db.exclusive(lambda conn: memecoin_desk._open_reservation_count(conn, case_id, proof["side"])) > 1:
+        return base | identity | {"reason": "reservation_ambiguous", "holds": True, "resend": False, "active": False}
     if status == "consumed":
         return base | identity | {"reason": "reservation_consumed", "blockhash": embedded, "active": False}
     if status == "failed":
@@ -937,19 +945,6 @@ def _supervise_reservations(transport, now: float) -> list:
         if status in {"consumed", "failed"}:
             continue
         seen.add((proof["case_id"], proof["message_sha256"]))
-        if status == "unknown":
-            found.append({
-                "case_id": proof["case_id"], "mint": None if memecoin_desk._case(proof["case_id"]) is None else memecoin_desk._case(proof["case_id"])["mint"],
-                "side": proof["side"], "jupiter_called": False, "requoted": False, "supervised": True,
-                "message_sha256": proof["message_sha256"], "active": True,
-                "execution": {
-                    "execution_eligible": False, "reason": "reservation_unknown", "holds": True, "resend": False,
-                    "rewritten": False, "requoted": False, "sign": False, "send": False, "simulate": False,
-                    "operation": "unimplemented", "message_sha256": proof["message_sha256"],
-                    "price_freshness_proven": False, "gate_complete": False, "quote_expiry_proven": False, "active": True,
-                },
-            })
-            continue
         try:
             decision = execution_gate(proof["case_id"], proof["message_sha256"], transport, now)
         except Exception:
