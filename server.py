@@ -99,8 +99,11 @@ async def lifespan(_app: FastAPI):
     if os.environ.get("DESK_PRICE_LOOP") != "0":
         price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
     import desk_loop
-    if desk_loop.scheduler_status()["armed"] or desk_loop.scheduler_status()["started"]:
-        raise RuntimeError("memecoin desk scheduler is not allowed to start")
+    gate = desk_loop.scheduler_status()
+    desk_stop = asyncio.Event()
+    desk_task = None
+    if gate["armed"]:
+        desk_task = asyncio.create_task(_memecoin_screen(desk_stop))
     if agents_enabled():
         from main import run_desk
         agent_task = asyncio.create_task(run_desk())
@@ -120,6 +123,26 @@ async def lifespan(_app: FastAPI):
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await agent_task
+        desk_stop.set()
+        if desk_task is not None:
+            desk_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await desk_task
+
+
+async def _memecoin_screen(stop: asyncio.Event) -> None:
+    """One discovery pass at a time. Lifespan starts this only when the gate is armed."""
+    import time
+    import desk_loop
+    while not stop.is_set():
+        try:
+            desk_loop.run_discovery(desk_loop.public_reader, time.time())
+        except Exception:
+            desk_loop._runtime["faults"] += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+        except TimeoutError:
+            continue
 
 
 app = FastAPI(title="desk", lifespan=lifespan)

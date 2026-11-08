@@ -14,9 +14,8 @@ https://docs.pyth.network/api-reference/hermes/price-feeds
 
 from __future__ import annotations
 
-# The scheduler is implemented and unarmed. Nothing in this process starts it.
-ARMED = False
-STARTED = False
+# Production authorization is a settings row, default absent. Readiness is not met.
+_runtime = {"running": False, "started": False, "passes": 0, "faults": 0}
 
 import dexscreener_public
 import memecoin_desk
@@ -26,13 +25,39 @@ import stalkchain_adapter
 import usdc_valuation
 
 
+def _authorized() -> bool:
+    import db
+    try:
+        return db.get_setting("memecoin_scheduler_authorized", "0") == "1"
+    except Exception:
+        return False
+
+
+def _ready() -> bool:
+    """LP, rug history, holder growth, and an owner slippage limit are still missing."""
+    return False
+
+
 def scheduler_status() -> dict:
-    """The loop exists and is not started. Agents and LIVE are not turned on here."""
+    """Report the real latch. Armed only when authorization and readiness are both true."""
+    authorized = _authorized()
+    ready = _ready()
     return {
-        "armed": False,
-        "started": False,
-        "server_loop": False,
-        "scheduled": False,
+        "armed": authorized and ready,
+        "authorized": authorized,
+        "ready": ready,
+        "ready_because": [] if ready else [
+            "owner_slippage_unapproved",
+            "lp_fields_unpublished",
+            "rug_history_unpublished",
+            "holder_growth_unproven",
+        ],
+        "started": _runtime["started"],
+        "running": _runtime["running"],
+        "passes": _runtime["passes"],
+        "faults": _runtime["faults"],
+        "server_loop": _runtime["started"],
+        "scheduled": _runtime["started"],
         "send": False,
         "sign": False,
         "live_ready": False,
@@ -45,9 +70,7 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
 
     A caller does not name the mint. The default process does not call this.
     """
-    stopped = scheduler_status() | {"ok": False}
-    if ARMED or STARTED:
-        return stopped | {"reason": "scheduler_refusing_to_start"}
+    stopped = scheduler_status() | {"ok": False, "send": False, "live_ready": False}
     if transport is None:
         return stopped | {"reason": "network_disabled", "mint": None}
     try:
@@ -56,16 +79,42 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
         return stopped | {"reason": "dexscreener_transport", "mint": None}
     if not isinstance(response, dict) or response.get("status") != 200:
         return stopped | {"reason": "dexscreener_status", "mint": None}
-    selected = dexscreener_public.parse_boost_mint(response.get("body"))
+    selected = dexscreener_public.parse_boost_mints(response.get("body"))
     if selected.get("ok") is not True:
-        return stopped | {"reason": selected.get("reason"), "mint": None, "caller_named_mint": False}
-    result = run_once(selected["mint"], transport, now, stalk_transport)
-    result["caller_named_mint"] = False
-    result["discovered_mint"] = selected["mint"]
-    result["armed"] = False
-    result["started"] = False
-    result["scheduled"] = False
-    return result
+        return stopped | {"reason": selected.get("reason"), "source": selected.get("source"), "mint": None, "caller_named_mint": False, "kills": []}
+    kills = list(selected.get("skipped") or [])
+    ranked = []
+    for mint in selected["mints"]:
+        result = run_once(mint, transport, now, stalk_transport)
+        if result.get("reason"):
+            kills.append({"mint": mint, "reason": result.get("reason"), "source": result.get("source") or dexscreener_public.SOURCE})
+            continue
+        ranked.append(result)
+    ranked.sort(key=lambda item: item.get("liquidity_ratio") or 0, reverse=True)
+    return stopped | {
+        "ok": False,
+        "reason": None if not kills else kills[0].get("reason"),
+        "source": dexscreener_public.SOURCE,
+        "caller_named_mint": False,
+        "candidates": len(selected["mints"]),
+        "kills": kills,
+        "ranked": [item.get("mint") for item in ranked],
+        "score_measured": False,
+        "holder_growth_unproven": True,
+    }
+
+
+def collect_holder_count(mint: str, reading: dict) -> dict:
+    """Write a holder count only from a same-source series this desk can verify.
+
+    StalkChain has not published the holder-count field. DexScreener transaction
+    counts are not holders. Nothing is invented and nothing is purchased.
+    """
+    if not isinstance(reading, dict):
+        return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False}
+    if reading.get("source") != "desk_holder_count" or "holder_count" not in reading:
+        return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False}
+    return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False, "mint": mint}
 
 
 def holder_growth(mint: str) -> dict:
@@ -127,6 +176,41 @@ def _observe(mint: str, source: str, metric: str, value: str, fetched_at: float)
     db.exclusive(work)
 
 
+def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
+    """The loop the server would start. Tests call it with a mock. Production does not."""
+    if _runtime["running"]:
+        return {"ok": False, "reason": "already_running", "started": True, "agents_enabled": False, "live_ready": False}
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1 or rounds > 3:
+        return {"ok": False, "reason": "rounds", "agents_enabled": False}
+    _runtime["running"] = True
+    _runtime["started"] = True
+    faults = 0
+    try:
+        for _ in range(rounds):
+            try:
+                run_discovery(transport, now)
+                _runtime["passes"] += 1
+            except Exception as exc:
+                _runtime["faults"] += 1
+                _runtime["last_fault"] = repr(exc)
+                faults += 1
+                break
+    finally:
+        _runtime["started"] = False
+        _runtime["running"] = False
+    return {
+        "ok": faults == 0,
+        "reason": None if faults == 0 else "discovery_fault",
+        "passes": rounds - faults,
+        "faults": faults,
+        "last_fault": _runtime.get("last_fault"),
+        "started": False,
+        "agents_enabled": False,
+        "live_ready": False,
+        "send": False,
+    }
+
+
 def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     """Fetch, then hand off. No loop is started and no flag is turned on."""
     stopped = {"ok": False, "send": False, "sign": False, "live_ready": False, "armed": False, "mint": mint}
@@ -140,8 +224,7 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         return stopped | {"reason": "dexscreener_status", "stage": "scout"}
     parsed = dexscreener_public.parse_pairs(response["body"], mint, now)
     if parsed.get("ok") is not True:
-        memecoin_desk.scout({"mint": mint, "source": "other"}, now=now)
-        return stopped | {"reason": parsed.get("reason"), "stage": "scout", "fdv_used_as_market_cap": False}
+        return stopped | {"reason": parsed.get("reason"), "source": dexscreener_public.SOURCE, "stage": "scout", "fdv_used_as_market_cap": False}
     _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
     _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
     opened = memecoin_desk.scout(parsed["scout"], now=now)
@@ -182,6 +265,26 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         "usd_live": False,
         "onchain_pyth": pyth_sponsored.status(),
     }
+
+
+def public_reader(request: dict) -> dict:
+    """Documented DexScreener GET or one mainnet getAccountInfo. The unarmed process does not call this."""
+    import json
+    import urllib.request
+    if not isinstance(request, dict):
+        raise RuntimeError("host_refused")
+    if request.get("kind") == "rpc":
+        if request.get("method") != "getAccountInfo":
+            raise RuntimeError("method_refused")
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [request.get("mint"), {"encoding": "base64"}]}
+        req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
+    else:
+        url = request.get("url")
+        if not isinstance(url, str) or not url.startswith("https://api.dexscreener.com/"):
+            raise RuntimeError("host_refused")
+        req = urllib.request.Request(url, headers={"accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=8) as response:
+        return {"status": response.status, "body": json.loads(response.read().decode())}
 
 
 def readiness() -> dict:

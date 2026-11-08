@@ -108,7 +108,8 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(view["onchain_pyth_usable"])
         source = Path("server.py").read_text(encoding="utf-8")
         self.assertIn("desk_loop.scheduler_status()", source)
-        self.assertNotIn("run_discovery(", source)
+        self.assertIn('if gate["armed"]', source)
+        self.assertIn("def _memecoin_screen", source)
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         self.assertFalse(desk_loop.scheduler_status()["started"])
 
@@ -129,17 +130,78 @@ class DeskLoopTests(unittest.TestCase):
             return {"status": 200, "body": _pair()}
 
         found = desk_loop.run_discovery(transport, NOW)
-        self.assertEqual(found["discovered_mint"], MINT)
+        self.assertEqual(found["candidates"], 1)
+        self.assertEqual(found["kills"][0]["mint"], MINT)
+        self.assertEqual(found["kills"][0]["reason"], "lp")
+        self.assertEqual(found["kills"][0]["source"], "dexscreener")
         self.assertFalse(found["caller_named_mint"])
         self.assertFalse(found["armed"])
-        self.assertEqual(found["reason"], "lp")
-        self.assertFalse(found["holder_growth"]["ok"])
-        self.assertEqual(found["holder_growth"]["reason"], "holder_growth_unproven")
         self.assertFalse(found["score_measured"])
-        desk_loop._observe(MINT, "desk_holder_count", "holder_count", "10", NOW)
+        self.assertTrue(found["holder_growth_unproven"])
+        refused = desk_loop.collect_holder_count(MINT, {"source": "stalkchain", "holder_count": 12, "fetched_at": NOW})
+        self.assertFalse(refused["written"])
+        self.assertEqual(refused["reason"], "holder_count_source_unpublished")
         self.assertEqual(desk_loop.holder_growth(MINT)["reason"], "holder_growth_unproven")
-        desk_loop._observe(MINT, "desk_holder_count", "holder_count", "12", NOW + 60)
-        growth = desk_loop.holder_growth(MINT)
-        self.assertEqual(growth["delta"], "2")
-        self.assertFalse(growth["score_measured"])
-        self.assertFalse(growth["cross_provider"])
+        bare = [{key: value for key, value in _pair()[0].items() if key != "marketCap"}]
+        missing = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW)
+        self.assertEqual(missing["reason"], "market_cap_missing")
+        self.assertEqual(missing["source"], "dexscreener")
+
+    def test_every_solana_boost_is_a_candidate_and_the_loop_can_be_stopped(self):
+        other = solana_tx.b58encode(b"\x44" * 32)
+
+        def transport(request):
+            if str(request.get("url", "")).endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [
+                    {"chainId": "ethereum", "tokenAddress": "0xabc"},
+                    {"chainId": "solana", "tokenAddress": MINT},
+                    {"chainId": "solana", "tokenAddress": other},
+                ]}
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+            mint = str(request.get("url", "")).rsplit("/", 1)[-1]
+            body = _pair()
+            body[0]["baseToken"] = {"address": mint}
+            return {"status": 200, "body": body}
+
+        found = desk_loop.run_discovery(transport, NOW)
+        self.assertEqual(found["candidates"], 2)
+        self.assertEqual({item.get("reason") for item in found["kills"] if item.get("mint")}, {"lp"})
+        self.assertIn("not_solana", {item.get("reason") for item in found["kills"]})
+        status = desk_loop.scheduler_status()
+        self.assertFalse(status["authorized"])
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["armed"])
+        self.assertIn("owner_slippage_unapproved", status["ready_because"])
+        once = desk_loop.run_supervised(transport, NOW, rounds=1)
+        self.assertTrue(once["ok"], once)
+        self.assertFalse(desk_loop.scheduler_status()["started"])
+        again = desk_loop.run_supervised(transport, NOW, rounds=1)
+        self.assertTrue(again["ok"], again)
+
+        original = desk_loop.run_discovery
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("reader down")
+
+        desk_loop.run_discovery = explode
+        try:
+            fault = desk_loop.run_supervised(transport, NOW, rounds=1)
+        finally:
+            desk_loop.run_discovery = original
+        self.assertEqual(fault["reason"], "discovery_fault")
+        self.assertFalse(desk_loop.scheduler_status()["started"])
+        self.assertFalse(desk_loop.scheduler_status()["running"])
+
+        def reenter(request):
+            reenter.nested = desk_loop.run_supervised(transport, NOW, rounds=1)
+            raise RuntimeError("stop after nested")
+
+        nested = desk_loop.run_supervised(reenter, NOW, rounds=1)
+        self.assertEqual(reenter.nested["reason"], "already_running")
+        self.assertFalse(desk_loop.scheduler_status()["started"])
+        self.assertFalse(desk_loop.scheduler_status()["running"])
+        self.assertTrue(nested["ok"], nested)

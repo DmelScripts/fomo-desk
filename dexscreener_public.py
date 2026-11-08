@@ -32,19 +32,37 @@ def pairs_url(mint: str) -> str:
     return PAIRS_URL + mint
 
 
-def parse_boost_mint(payload) -> dict:
-    """A boost names a mint. It is not a pass and not a smart-wallet proof."""
+def parse_boost_mints(payload, limit: int = 30) -> dict:
+    """Every Solana mint in the boost list, in list order, bounded. Not a pass."""
     if not isinstance(payload, list):
-        return {"ok": False, "reason": "boosts_shape", "source": SOURCE, "smart_wallet_proof": False}
+        return {"ok": False, "reason": "boosts_shape", "source": SOURCE, "mints": [], "skipped": [], "smart_wallet_proof": False}
+    mints = []
+    skipped = []
     for item in payload:
+        if len(mints) >= limit:
+            break
         if not isinstance(item, dict):
+            skipped.append({"reason": "boost_shape", "source": SOURCE})
             continue
         if item.get("chainId") != "solana":
+            skipped.append({"chainId": item.get("chainId"), "reason": "not_solana", "source": SOURCE})
             continue
         mint = item.get("tokenAddress")
-        if isinstance(mint, str) and len(mint) >= 32:
-            return {"ok": True, "mint": mint, "source": SOURCE, "smart_wallet_proof": False, "boost_is_not_a_pass": True}
-    return {"ok": False, "reason": "solana_mint_missing", "source": SOURCE, "smart_wallet_proof": False}
+        if not isinstance(mint, str) or len(mint) < 32:
+            skipped.append({"reason": "mint", "source": SOURCE})
+            continue
+        mints.append(mint)
+    if not mints:
+        return {"ok": False, "reason": "solana_mint_missing", "source": SOURCE, "mints": [], "skipped": skipped, "smart_wallet_proof": False}
+    return {"ok": True, "reason": None, "source": SOURCE, "mints": mints, "skipped": skipped, "smart_wallet_proof": False, "boost_is_not_a_pass": True}
+
+
+def parse_boost_mint(payload) -> dict:
+    """The first Solana mint. Discovery uses parse_boost_mints so the rest are not dropped."""
+    found = parse_boost_mints(payload, limit=30)
+    if found.get("ok") is not True:
+        return found
+    return found | {"mint": found["mints"][0]}
 
 
 def parse_pairs(payload, mint: str, fetched_at: float) -> dict:

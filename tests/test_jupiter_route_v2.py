@@ -331,6 +331,17 @@ class RouteV2Tests(unittest.TestCase):
         priced = _decode(_tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 50)), data, allowance=50)
         self.assertTrue(priced["ok"], priced)
         self.assertFalse(priced["owner_slippage_approved"])
+        leg = {"used": True, "fresh": True, "price": 100_000_000, "conf": 0, "expo": -8}
+        import memecoin_exit
+        one = memecoin_exit.plan_slices(7_730_000_000, 1 << 64, True, leg)
+        exact = memecoin_exit.plan_slices(8_000_000_000, 1 << 64, True, leg)
+        over = memecoin_exit.plan_slices(8_960_000_000, 1 << 64, True, leg)
+        ten = memecoin_exit.plan_slices(10_000_000_000, 1 << 64, True, leg)
+        self.assertEqual(one["slices"], [7_730_000_000])
+        self.assertEqual(exact["slices"], [8_000_000_000])
+        self.assertEqual(over["slices"], [8_000_000_000, 960_000_000])
+        self.assertEqual(ten["slices"], [8_000_000_000, 2_000_000_000])
+        self.assertEqual(sum(over["slices"]), over["whole_raw"])
         self.assertEqual(priced["slippage_allowance_source"], "test_fixture")
         view = pyth_sponsored.status()
         self.assertFalse(view["live"])

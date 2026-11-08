@@ -274,16 +274,14 @@ class MemecoinDeskTests(unittest.TestCase):
         armed = memecoin_desk.mark(case_id, "1.12", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(armed["action"], "hold")
         self.assertTrue(memecoin_desk.view(case_id)["snapshot"]["trail_armed"])
-        missing_fee = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
-        self.assertEqual(missing_fee["reason"], "exit_fee_missing")
-        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
-        recorded = _bind_exit(case_id)
-        self.assertTrue(recorded["ok"], recorded)
         exited = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(exited["action"], "trail")
-        closed = memecoin_desk.view(case_id)["snapshot"]
-        self.assertLess(Decimal(closed["realized_pnl"]), 0)
-        self.assertFalse(closed["trail_breakeven_guaranteed"])
+        closed = memecoin_desk.view(case_id)
+        self.assertEqual(closed["stage"], "paper_exited")
+        self.assertFalse(closed["snapshot"]["live_ledger"])
+        self.assertIsNone(closed["snapshot"]["paper_exit"]["receipt_proceeds"])
+        self.assertNotIn("realized_pnl", closed["snapshot"])
+        self.assertFalse(closed["snapshot"]["trail_breakeven_guaranteed"])
         self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations"), [])
 
     def test_stop_exit_still_runs_when_loss_is_large_and_halt_blocks(self):
@@ -295,15 +293,15 @@ class MemecoinDeskTests(unittest.TestCase):
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         for number in (40, 41, 42):
             case_id = self._filled(number)
-            self.assertTrue(_bind_exit(case_id)["ok"])
             stopped = memecoin_desk.mark(case_id, "0.01", source="fixture_price", fetched_at=NOW, now=NOW)
             self.assertEqual(stopped["action"], "stop")
+            self.assertEqual(memecoin_desk.view(case_id)["stage"], "paper_exited")
+            self.assertNotIn("realized_pnl", memecoin_desk.view(case_id)["snapshot"])
         blocked = self._analyzed(43)
         self.assertEqual(_protect(blocked)["reason"], "stop_new_entries")
-        self.assertTrue(_bind_exit(live)["ok"])
         stopped = memecoin_desk.mark(live, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(stopped["action"], "stop")
-        self.assertTrue(memecoin_desk.view(live)["snapshot"]["exit"]["fee_counted_once"])
+        self.assertFalse(memecoin_desk.view(live)["snapshot"]["live_ledger"])
 
     def test_allocation_restart_and_one_winner(self):
         for number in range(50, 61):
@@ -348,25 +346,14 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def test_exit_pnl_counts_the_recorded_entry_fee_once(self):
         case_id = self._filled(91)
-        missing = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
-        self.assertEqual(missing["reason"], "exit_fee_missing")
         self.assertEqual(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["reason"], "receipt_unbound")
-        bound = _bind_exit(case_id)
-        self.assertTrue(bound["ok"], bound)
-        self.assertEqual(_bind_exit(case_id)["reason"], "exit_duplicate")
         closed = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(closed["action"], "stop")
         body = memecoin_desk.view(case_id)["snapshot"]
-        booked = body["exit"]
-        notional = Decimal(body["notional_usd"])
-        proceeds = notional * Decimal("0.94")
-        exit_fee = Decimal(bound["exit_fee_usd"])
-        self.assertGreater(exit_fee, 0)
-        self.assertLessEqual(exit_fee, Decimal("0.05"))
-        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05") - exit_fee)
-        self.assertEqual(booked["exit_fee_usd"], bound["exit_fee_usd"])
-        self.assertEqual(booked["entry_fee_usd"], "0.05")
-        self.assertTrue(booked["fee_counted_once"])
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "paper_exited")
+        self.assertFalse(body["live_ledger"])
+        self.assertIsNone(body["paper_exit"]["receipt_proceeds"])
+        self.assertNotIn("realized_pnl", body)
 
     def test_a_restart_keeps_the_fill_and_does_not_send_again(self):
         kept = self._filled(63)
@@ -429,3 +416,75 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertFalse(forged.json()["live"])
         self.assertEqual(forged.json()["reason"], "valuation_stale")
         self.assertNotIn("0.01", forged.text)
+
+    def test_a_confirmed_slice_books_chain_proceeds_and_a_second_signature_does_not(self):
+        import base64
+        from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _snap, _tx
+        case_id = self._filled(91)
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap["fill"]["fixture"] = False
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
+        mint = memecoin_desk.view(case_id)["mint"]
+        values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        unsigned = _tx(_metas(mint, solana_tx.NATIVE_MINT, values), _route(1_000, 0, True, amount=50), side="exit")
+        raw = bytearray(base64.b64decode(unsigned))
+        raw[1:65] = b"\x11" * 64
+        signed = base64.b64encode(bytes(raw)).decode()
+        signature = solana_tx.first_signature(signed)
+        reserved = memecoin_desk.reserve_exit(case_id, signed, 50, _snap(accounts, WHEN), _prices(), WHEN)
+        self.assertTrue(reserved["ok"], reserved)
+        other = bytearray(raw)
+        other[1:65] = b"\x22" * 64
+        other_sig = solana_tx.first_signature(base64.b64encode(bytes(other)).decode())
+        blocked = memecoin_desk.reserve_exit(case_id, base64.b64encode(bytes(other)).decode(), 50, _snap(accounts, WHEN), _prices(), WHEN)
+        self.assertEqual(blocked["reason"], "exit_inflight")
+        decoded = solana_tx.decode_transaction(bytes(raw))
+        width = len(decoded.static_keys)
+        pre = [0] * width
+        post = [0] * width
+        pre[0] = 5_000_000
+        post[0] = 5_100_000
+        source = values["source"]
+        wallet = phantom_transport.REQUIRED_WALLET
+
+        def transport(request):
+            self.assertEqual(request["method"], "getTransaction")
+            self.assertEqual(request["signature"], signature)
+            return {"status": 200, "body": {"result": {
+                "slot": 466835746,
+                "meta": {
+                    "err": None,
+                    "fee": 5000,
+                    "preBalances": pre,
+                    "postBalances": post,
+                    "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "50"}}],
+                    "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
+                },
+                "transaction": [signed, "base64"],
+            }}}
+
+        booked = memecoin_desk.confirm_exit(case_id, signature, transport, WHEN)
+        self.assertTrue(booked["ok"], booked)
+        self.assertEqual(booked["sol_proceeds"], 105_000)
+        self.assertEqual(booked["remaining_raw"], 0)
+        self.assertEqual(booked["stage"], "exited")
+        self.assertTrue(booked["live_ledger"])
+        self.assertNotEqual(booked["sol_proceeds"], 8)
+        again = memecoin_desk.confirm_exit(case_id, other_sig, transport, WHEN)
+        self.assertNotEqual(again.get("reason"), None)
+        self.assertEqual(len(db.query("SELECT signature FROM memecoin_exit_receipts")), 1)
+        import memecoin_exit
+        zeros = bytearray(raw)
+        zeros[1:65] = b"\x00" * 64
+        unsigned = memecoin_exit.match_landed(
+            {"message_sha256": reserved["message_sha256"], "mint": mint, "qty": 50, "pool": values["pool"]},
+            signature,
+            {"ok": True, "transaction": base64.b64encode(bytes(zeros)).decode(), "meta": {"fee": 5000, "err": None, "preBalances": pre, "postBalances": post, "preTokenBalances": [], "postTokenBalances": []}, "slot": 1},
+        )
+        self.assertEqual(unsigned["reason"], "receipt_unsigned")
+        self.assertTrue(unsigned["holds"])
+        self.assertFalse(unsigned["resend"])
+        unsigned_pull = dict(transport( {"method": "getTransaction", "signature": signature} ))
+        zeros = bytearray(raw)
+        zeros[1:65] = b"\x00" * 64
+        unsigned_pull["body"]["result"]["transaction"][0] = base64.b64encode(bytes(zeros)).decode()

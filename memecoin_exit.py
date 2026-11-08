@@ -20,82 +20,132 @@ import solana_whirlpool
 
 
 def bind(mint: str, body: dict, sol_leg: dict) -> dict:
-    """Check one mainnet meta. This does not write and it does not send."""
-    refused = {"ok": False, "live_ready": False, "send": False}
-    if not isinstance(body, dict) or "meta" not in body:
-        return refused | {"reason": "receipt_unbound"}
-    if body.get("genesis") != solana_inspect.MAINNET_GENESIS:
-        return refused | {"reason": "genesis"}
-    signature = body.get("signature")
+    """Caller documents are not a chain receipt."""
+    return {"ok": False, "live_ready": False, "send": False, "reason": "receipt_unbound", "holds": True, "resend": False}
+
+
+def pull(signature: str, transport) -> dict:
+    """One confirmed getTransaction. A missing or failed read holds the position and does not fill."""
+    refused = {"ok": False, "holds": True, "resend": False, "live_ready": False, "send": False}
+    if transport is None or not isinstance(signature, str):
+        return refused | {"reason": "receipt_unknown"}
     try:
-        raw_sig = solana_tx.b58decode(signature, 64)
+        response = transport({
+            "method": "getTransaction",
+            "signature": signature,
+            "commitment": "confirmed",
+            "url": "https://api.mainnet-beta.solana.com",
+        })
     except Exception:
-        return refused | {"reason": "signature"}
-    if len(raw_sig) != 64 or isinstance(body.get("slot"), bool) or not isinstance(body.get("slot"), int):
-        return refused | {"reason": "signature"}
-    meta = body.get("meta")
+        return refused | {"reason": "receipt_unknown"}
+    if not isinstance(response, dict) or response.get("status") != 200 or not isinstance(response.get("body"), dict):
+        return refused | {"reason": "receipt_unknown"}
+    result = response["body"].get("result")
+    if result is None:
+        return refused | {"reason": "receipt_unconfirmed"}
+    if not isinstance(result, dict):
+        return refused | {"reason": "receipt_unknown"}
+    meta = result.get("meta")
     if not isinstance(meta, dict):
-        return refused | {"reason": "receipt_unbound"}
+        return refused | {"reason": "receipt_unknown"}
     if meta.get("err") is not None:
-        return refused | {"reason": "receipt_failed", "holds": True}
-    fee = meta.get("fee")
-    if isinstance(fee, bool) or not isinstance(fee, int) or fee <= 0:
-        return refused | {"reason": "fee_missing"}
+        return refused | {"reason": "receipt_failed"}
+    encoded = result.get("transaction")
+    if not isinstance(encoded, list) or not encoded or not isinstance(encoded[0], str):
+        return refused | {"reason": "receipt_unknown"}
+    slot = result.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int):
+        return refused | {"reason": "slot_unproven"}
+    return {"ok": True, "transaction": encoded[0], "meta": meta, "slot": slot, "holds": False, "resend": False}
+
+
+def match_landed(reserved: dict, signature: str, pulled: dict) -> dict:
+    """The landed transaction must be the reserved message and must carry this signature."""
+    refused = {"ok": False, "live_ready": False, "send": False, "holds": True, "resend": False}
+    if not isinstance(reserved, dict) or not isinstance(pulled, dict) or pulled.get("ok") is not True:
+        return refused | {"reason": pulled.get("reason") if isinstance(pulled, dict) else "receipt_unknown"}
     try:
-        decoded = solana_tx.decode_transaction(base64.b64decode(body.get("transaction"), validate=True))
+        landed = solana_tx.first_signature(pulled["transaction"])
+    except Exception:
+        return refused | {"reason": "receipt_unsigned"}
+    if landed != signature:
+        return refused | {"reason": "signature_mismatch"}
+    try:
+        digest = hashlib.sha256(solana_tx.message_bytes(pulled["transaction"])).hexdigest()
     except Exception:
         return refused | {"reason": "message"}
-    if decoded.static_keys[0] != phantom_transport.REQUIRED_WALLET or decoded.required_signatures != 1:
-        return refused | {"reason": "wallet"}
+    if digest != reserved.get("message_sha256"):
+        return refused | {"reason": "message_mismatch"}
+    decoded = solana_tx.decode_transaction(base64.b64decode(pulled["transaction"], validate=True))
     route = _route(decoded)
-    if route is None or route["destination_mint"] != solana_tx.NATIVE_MINT or route["source_mint"] != mint:
+    if route is None or route["source_mint"] != reserved.get("mint") or route["in_amount"] != reserved.get("qty"):
         return refused | {"reason": "exit_mint"}
-    if route["in_amount"] <= 0 or route["min_out"] <= 0:
-        return refused | {"reason": "min_out"}
-    sold = _token_delta(meta, mint, phantom_transport.REQUIRED_WALLET)
+    if reserved.get("pool") not in route["keys"]:
+        return refused | {"reason": "pool_unbound"}
+    sold = _token_delta(pulled["meta"], reserved["mint"], phantom_transport.REQUIRED_WALLET)
     if sold is None:
         return refused | {"reason": "token_delta_missing"}
-    if sold != route["in_amount"]:
+    if sold != reserved["qty"]:
         return refused | {"reason": "token_delta"}
-    native = _native(decoded.static_keys, meta.get("preBalances"), meta.get("postBalances"), fee)
+    fee = pulled["meta"].get("fee")
+    native = _native(decoded.static_keys, pulled["meta"].get("preBalances"), pulled["meta"].get("postBalances"), fee if isinstance(fee, int) else -1)
     if native.get("ok") is not True:
         return refused | {"reason": native.get("reason")}
     if native["proceeds"] < route["min_out"]:
         return refused | {"reason": "proceeds_below_min"}
-    pool = None
-    for key in route["keys"]:
-        found = _pool(body.get("accounts"), key, route["source_mint"])
-        if found is not None:
-            pool = found
-            break
-    if pool is None:
-        return refused | {"reason": "pool_unbound"}
-    dex_raw = jupiter_route_v2.whirlpool_fee(route["in_amount"], pool["fee_rate"])
-    dex_lamports = None if dex_raw is None else jupiter_route_v2.token_raw_to_lamports(dex_raw, pool["sqrt_price"], pool["token_is_a"])
-    if dex_lamports is None:
-        return refused | {"reason": "dex_fee_unproven"}
-    priced = __import__("pyth_sponsored").lamports_usd(dex_lamports + fee, sol_leg)
-    if priced is None:
-        return refused | {"reason": "usd_source_unbound"}
-    if priced > __import__("memecoin_desk").MAX_FEE:
-        return refused | {"reason": "fee_cap", "fee_usd": format(priced, "f")}
-    message_hash = hashlib.sha256(solana_tx.message_bytes(body["transaction"])).hexdigest()
     return {
         "ok": True,
         "reason": None,
         "signature": signature,
-        "slot": body["slot"],
-        "message_sha256": message_hash,
-        "network_fee_lamports": fee,
-        "dex_fee_lamports": dex_lamports,
-        "fee_usd": format(priced, "f"),
-        "sol_proceeds": native["proceeds"],
+        "slot": pulled["slot"],
+        "message_sha256": digest,
         "token_in": sold,
+        "sol_proceeds": native["proceeds"],
+        "network_fee_lamports": fee,
         "min_out": route["min_out"],
+        "holds": False,
+        "resend": False,
         "live_ready": False,
         "send": False,
-        "holds": False,
+        "live_ledger": True,
     }
+
+
+def plan_slices(raw: int, sqrt_price: int, token_is_a: bool, sol_leg: dict, cap: str = "8") -> dict:
+    """Split a token balance into reduce-only slices whose SOL value is at most the ticket."""
+    from decimal import Decimal
+    limit = Decimal(cap)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return {"ok": False, "reason": "quantity", "slices": []}
+
+    def dollars(qty: int):
+        lamports = jupiter_route_v2.token_raw_to_lamports(qty, sqrt_price, token_is_a)
+        if lamports is None:
+            return None
+        return __import__("pyth_sponsored").lamports_usd(lamports, sol_leg)
+
+    one = dollars(1)
+    if one is None:
+        return {"ok": False, "reason": "usd_source_unbound", "slices": []}
+    if one > limit:
+        return {"ok": False, "reason": "unit_above_cap", "slices": []}
+    slices = []
+    left = raw
+    while left > 0:
+        lo, hi, best = 1, left, 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            value = dollars(mid)
+            if value is not None and value <= limit:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        slices.append(best)
+        left -= best
+        if len(slices) > 64:
+            return {"ok": False, "reason": "too_many_slices", "slices": slices}
+    return {"ok": True, "reason": None, "slices": slices, "cap": cap, "whole_raw": raw}
 
 
 def _route(decoded) -> dict | None:

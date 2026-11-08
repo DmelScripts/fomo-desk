@@ -107,9 +107,10 @@ def scout(pair: dict, now: float | None = None) -> dict:
         if open_row is not None:
             return {"ok": False, "reason": "already_open", "case_id": open_row["id"], "stage": open_row["stage"], "mint": mint}
         case_id = mint
-        taken = conn.execute("SELECT id FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
-        if taken is not None:
-            case_id = mint + ":" + str(int(moment))
+        suffix = 0
+        while conn.execute("SELECT id FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone() is not None:
+            suffix += 1
+            case_id = mint + ":" + str(suffix)
         conn.execute(
             "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at) VALUES (?, ?, 'scout_passed', ?, ?, ?)",
             (case_id, mint, json.dumps(snapshot, sort_keys=True), moment, moment),
@@ -331,55 +332,178 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
         "fee_usd": format(fee, "f"),
         "fee_counted_once": True,
     }
+    snap["remaining_raw"] = tokens
+    snap["live_ledger"] = False
     snap["peak_price_usd"] = snap["entry_price_usd"]
     snap["trail_armed"] = False
     return _advance(row, "filled", "executor", snap["fill"], snap)
 
 
 def record_exit_receipt(case_id: str, body: dict, price_transport=None, now: float | None = None) -> dict:
-    """Bind one chain receipt. A fee decimal is not accepted and a failure does not book zero."""
+    """A caller document is not a receipt."""
+    row = _case(case_id)
+    if row is None:
+        return _kill(case_id, None, "risk", "stage", None)
+    return _note(row, "risk", "receipt_unbound")
+
+
+def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_transport=None, now: float | None = None) -> dict:
+    """Claim one reduce-only slice of the remaining tokens. A second claim waits."""
+    import jupiter_route_v2
     import memecoin_exit
     import pyth_sponsored
     row = _case(case_id)
-    if row is None or row["stage"] != "filled":
+    if row is None or row["stage"] not in {"filled", "partial", "exit_intent"}:
         return _kill(case_id, None, "risk", "stage", None)
+    if not isinstance(snapshot, jupiter_route_v2.Snapshot):
+        return _note(row, "risk", "snapshot_unbound")
+    if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
+        return _note(row, "risk", "quantity")
     moment = time.time() if now is None else now
     prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
     sol = prices.get("sol") if isinstance(prices, dict) else None
     if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
         return _note(row, "risk", prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound")
-    bound = memecoin_exit.bind(row["mint"], body, sol)
-    if bound.get("ok") is not True:
-        return _note(row, "risk", bound.get("reason") or "receipt_unbound")
+    try:
+        digest = hashlib.sha256(solana_tx.message_bytes(message_b64)).hexdigest()
+        decoded = solana_tx.decode_transaction(__import__("base64").b64decode(message_b64, validate=True))
+    except Exception:
+        return _note(row, "risk", "message")
+    route = memecoin_exit._route(decoded)
+    if route is None or route["source_mint"] != row["mint"] or route["in_amount"] != qty:
+        return _note(row, "risk", "exit_mint")
+    cursor = 7
+    if route["keys"][cursor] != jupiter_route_v2.EVENT:
+        cursor += 1
+    pool_key = route["keys"][cursor + 5]
+    record = snapshot.accounts.get(pool_key)
+    if not isinstance(record, tuple) or record[0] != __import__("solana_whirlpool").PROGRAM_ID:
+        return _note(row, "risk", "pool_unbound")
+    state = __import__("solana_whirlpool").pool_state(record[1])
+    fields = __import__("solana_whirlpool").pool_fields(record[1])
+    if state is None or fields is None or row["mint"] not in {fields[0], fields[2]}:
+        return _note(row, "risk", "pool_unbound")
+    token_is_a = fields[0] == row["mint"]
+    dex_raw = jupiter_route_v2.whirlpool_fee(qty, state["fee_rate"])
+    dex_lamports = None if dex_raw is None else jupiter_route_v2.token_raw_to_lamports(dex_raw, state["sqrt_price"], token_is_a)
+    notional = jupiter_route_v2.token_raw_to_lamports(qty, state["sqrt_price"], token_is_a)
+    if dex_lamports is None or notional is None:
+        return _note(row, "risk", "exit_dimension")
+    fee_usd = pyth_sponsored.lamports_usd(dex_lamports, sol)
+    exposure = pyth_sponsored.lamports_usd(notional, sol)
+    if fee_usd is None or exposure is None:
+        return _note(row, "risk", "usd_source_unbound")
+    if fee_usd > MAX_FEE:
+        return _note(row, "risk", "fee_cap")
+    if exposure > TICKET:
+        return _note(row, "risk", "exposure_cap")
     snap = _snapshot(row)
-    if snap.get("exit_signature") is not None:
-        return _note(row, "risk", "exit_duplicate")
-    snap["exit_fee_usd"] = bound["fee_usd"]
-    snap["exit_fee_source"] = "exit_receipt"
-    snap["exit_signature"] = bound["signature"]
-    snap["exit_message_sha256"] = bound["message_sha256"]
-    snap["exit_sol_proceeds"] = bound["sol_proceeds"]
-    snap["exit_network_fee_lamports"] = bound["network_fee_lamports"]
-    snap["exit_dex_fee_lamports"] = bound["dex_fee_lamports"]
 
     def work(conn):
         _ensure_conn(conn)
-        current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
-        if current is None or current["stage"] != "filled":
+        current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None or current["stage"] not in {"filled", "partial", "exit_intent"}:
             return {"ok": False, "reason": "stage", "case_id": row["id"]}
-        seen = conn.execute("SELECT case_id FROM memecoin_exit_receipts WHERE signature = ?", (bound["signature"],)).fetchone()
+        fresh = json.loads(current["snapshot_json"])
+        if fresh.get("inflight"):
+            return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True}
+        remaining = fresh.get("remaining_raw")
+        if not isinstance(remaining, int) or remaining < qty:
+            return {"ok": False, "reason": "quantity", "case_id": row["id"]}
+        fresh["inflight"] = {
+            "message_sha256": digest,
+            "qty": qty,
+            "pool": pool_key,
+            "mint": row["mint"],
+            "min_out": route["min_out"],
+            "dex_fee_lamports": dex_lamports,
+            "status": "reserved",
+            "signature": None,
+        }
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(fresh, sort_keys=True), moment, row["id"]),
+        )
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_reserve", {"qty": qty, "message_sha256": digest}, moment)
+        return {"ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest, "live_ready": False, "send": False, "resend": False}
+
+    return db.exclusive(work)
+
+
+def confirm_exit(case_id: str, signature: str, transport, now: float | None = None) -> dict:
+    """Read getTransaction and book only the landed reserved slice."""
+    import memecoin_exit
+    row = _case(case_id)
+    if row is None or row["stage"] not in {"filled", "partial", "exit_intent"}:
+        return _kill(case_id, None, "risk", "stage", None)
+    snap = _snapshot(row)
+    inflight = snap.get("inflight")
+    if not isinstance(inflight, dict):
+        return _note(row, "risk", "exit_not_reserved")
+    if inflight.get("status") == "unknown":
+        return {"ok": False, "reason": "receipt_unknown", "holds": True, "resend": False, "case_id": row["id"], "stage": row["stage"]}
+    pulled = memecoin_exit.pull(signature, transport)
+    moment = time.time() if now is None else now
+    if pulled.get("ok") is not True:
+        snap["inflight"]["status"] = "unknown"
+        snap["inflight"]["signature"] = signature
+
+        def hold(conn):
+            conn.execute(
+                "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = ?",
+                (json.dumps(snap, sort_keys=True), moment, row["id"], row["stage"]),
+            )
+            _log(conn, row["id"], row["mint"], "risk", "kill", pulled.get("reason"), None, {"holds": True, "resend": False}, moment)
+            return {"ok": False, "reason": pulled.get("reason"), "holds": True, "resend": False, "case_id": row["id"], "stage": row["stage"]}
+
+        return db.exclusive(hold)
+    proven = memecoin_exit.match_landed(inflight, signature, pulled)
+    if proven.get("ok") is not True:
+        return _note(row, "risk", proven.get("reason") or "receipt_unbound")
+    qty = inflight["qty"]
+
+    def work(conn):
+        _ensure_conn(conn)
+        current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None or current["stage"] not in {"filled", "partial", "exit_intent"}:
+            return {"ok": False, "reason": "stage", "case_id": row["id"]}
+        fresh = json.loads(current["snapshot_json"])
+        flight = fresh.get("inflight") or {}
+        if flight.get("message_sha256") != proven["message_sha256"]:
+            return {"ok": False, "reason": "message_mismatch", "case_id": row["id"], "resend": False, "holds": True}
+        seen = conn.execute("SELECT signature FROM memecoin_exit_receipts WHERE signature = ? OR (case_id = ? AND message_sha256 = ?)", (signature, row["id"], proven["message_sha256"])).fetchone()
         if seen is not None:
-            return {"ok": False, "reason": "exit_duplicate", "case_id": row["id"], "stage": "filled"}
+            return {"ok": False, "reason": "exit_duplicate", "case_id": row["id"], "resend": False}
+        remaining = int(fresh.get("remaining_raw") or 0) - qty
+        if remaining < 0:
+            return {"ok": False, "reason": "quantity", "case_id": row["id"]}
+        fresh["remaining_raw"] = remaining
+        fresh.pop("inflight", None)
+        receipts = list(fresh.get("live_receipts") or [])
+        receipts.append({
+            "signature": signature,
+            "qty": qty,
+            "sol_proceeds": proven["sol_proceeds"],
+            "network_fee_lamports": proven["network_fee_lamports"],
+            "slot": proven["slot"],
+            "live_ledger": True,
+        })
+        fresh["live_receipts"] = receipts
+        fresh["live_ledger"] = True
+        fresh["fill_fixture_is_not_live"] = fresh.get("fill", {}).get("fixture") is True
+        stage = "exited" if remaining == 0 else "partial"
+        if remaining == 0:
+            fresh["reserved_usd"] = "0.00"
         conn.execute(
             "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd) VALUES (?, ?, ?, ?, ?)",
-            (bound["signature"], row["id"], bound["message_sha256"], bound["slot"], bound["fee_usd"]),
+            (signature, row["id"], proven["message_sha256"], proven["slot"], "lamports:" + str(proven["sol_proceeds"])),
         )
         conn.execute(
-            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled'",
-            (json.dumps(snap, sort_keys=True), moment, row["id"]),
+            "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (stage, json.dumps(fresh, sort_keys=True), moment, row["id"]),
         )
-        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_receipt", {"exit_fee_usd": bound["fee_usd"], "signature": bound["signature"]}, moment)
-        return {"ok": True, "reason": None, "case_id": row["id"], "stage": "filled", "exit_fee_usd": bound["fee_usd"], "live_ready": False, "send": False}
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_receipt", {"signature": signature, "qty": qty, "sol_proceeds": proven["sol_proceeds"]}, moment)
+        return {"ok": True, "reason": None, "case_id": row["id"], "stage": stage, "remaining_raw": remaining, "sol_proceeds": proven["sol_proceeds"], "live_ledger": True, "send": False, "live_ready": False, "resend": False}
 
     return db.exclusive(work)
 
@@ -426,25 +550,35 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         "trail_breakeven_guaranteed": False,
         "loss_stop_blocks_exit": False,
     }
-    exit_fee = _money(snap.get("exit_fee_usd")) if action != "hold" else None
-    fee_ready = action == "hold" or (exit_fee is not None and exit_fee > 0)
-    if fee_ready and action != "hold":
-        notional = _money(snap.get("notional_usd")) or TICKET
-        proceeds = (notional * price / entry)
-        entry_fee = _money(snap["fill"]["fee_usd"])
-        realized = proceeds - notional - entry_fee - exit_fee
-        snap["exit"] = {
-            "proceeds_usd": format(proceeds, "f"),
-            "entry_fee_usd": format(entry_fee, "f"),
-            "exit_fee_usd": format(exit_fee, "f"),
-            "realized_pnl": format(realized, "f"),
-            "fee_counted_once": True,
-            "exit_fee_is_separate": True,
-        }
-        snap["realized_pnl"] = format(realized, "f")
-        snap["reserved_usd"] = "0.00"
-        evidence = evidence | snap["exit"]
-    target = "filled" if action == "hold" else "exited"
+    if action != "hold":
+        paper = snap.get("fill", {}).get("fixture") is True
+        snap["live_ledger"] = False
+        if paper:
+            notional = _money(snap.get("notional_usd")) or TICKET
+            entry_fee = _money(snap["fill"]["fee_usd"]) or Decimal("0")
+            projection = (notional * price / entry) - notional - entry_fee
+            snap["paper_exit"] = {
+                "action": action,
+                "mark_price_usd": format(price, "f"),
+                "paper_realized_pnl": format(projection, "f"),
+                "exit_fee_unpriced": True,
+                "live_ledger": False,
+                "receipt_proceeds": None,
+                "reason": "paper_projection_is_not_a_fill",
+            }
+            target = "paper_exited"
+        else:
+            snap["exit_intent"] = {
+                "action": action,
+                "mark_price_usd": format(price, "f"),
+                "remaining_raw": snap.get("remaining_raw"),
+                "live_ledger": False,
+                "receipt_proceeds": None,
+            }
+            target = "exit_intent"
+        evidence = evidence | {"live_ledger": False, "receipt_proceeds": None}
+    else:
+        target = "filled"
 
     def work(conn):
         current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
@@ -453,9 +587,6 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         if _halted_conn(conn):
             _log(conn, row["id"], row["mint"], "risk", "kill", "kill_switch", None, {"reason": "kill_switch"}, moment)
             return {"ok": False, "reason": "kill_switch", "case_id": row["id"], "stage": "filled", "mint": row["mint"]}
-        if not fee_ready:
-            _log(conn, row["id"], row["mint"], "risk", "kill", "exit_fee_missing", None, {"reason": "exit_fee_missing"}, moment)
-            return {"ok": False, "reason": "exit_fee_missing", "case_id": row["id"], "stage": "filled", "mint": row["mint"]}
         conn.execute(
             "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled'",
             (target, json.dumps(snap, sort_keys=True), moment, row["id"]),
@@ -563,8 +694,11 @@ def _held_conn(conn) -> Decimal:
 
 def _loss_conn(conn) -> Decimal:
     total = Decimal("0")
-    for item in conn.execute("SELECT snapshot_json FROM memecoin_cases WHERE stage = 'exited'"):
-        realized = _num(json.loads(item["snapshot_json"]).get("realized_pnl"))
+    for item in conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE stage IN ('exited', 'paper_exited')"):
+        body = json.loads(item["snapshot_json"])
+        realized = _num(body.get("realized_pnl"))
+        if item["stage"] == "paper_exited":
+            realized = _num((body.get("paper_exit") or {}).get("paper_realized_pnl"))
         if realized is not None and realized < 0:
             total -= realized
     return total
