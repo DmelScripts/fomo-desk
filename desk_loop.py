@@ -617,7 +617,11 @@ def _preflight_report(**extra) -> dict:
         "quoted_out_amount": None, "candidate_min_out": None, "api_sample_min_out": None,
         "min_out_bound_proven": False, "program_rounding_proven": False,
         "network_fee_instruction_proven": False, "network_lamports_instruction": None,
-        "dex_fee_proven": False, "combined_fee_usd_proven": False, "allocation_proven": False,
+        "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
+        "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
+        "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
+        "input_transfer_fee_unsupported": False, "pool_fee_reason": None,
+        "combined_fee_usd_proven": False, "allocation_proven": False,
         "lookup_unresolved": False, "instruction_unproven": True, "economic_reason": None,
         "sig_verify": False, "replace_recent_blockhash": False, "message_rewritten": False,
         "holds": True, "resend": False, "operation": "unimplemented", "reason": None,
@@ -849,6 +853,132 @@ def _fee_for_message(transport, message: bytes, tip: int) -> dict:
     }
 
 
+def _hop_pool(decoded) -> dict | None:
+    """The whirlpool hop named by the reserved message. A caller pool is not used."""
+    import jupiter_route_v2
+    import memecoin_exit
+    import solana_jupiter
+    import solana_whirlpool
+    route = memecoin_exit._route(decoded)
+    if route is None:
+        return None
+    parsed = None
+    for instruction in decoded.instructions:
+        if decoded.static_keys[instruction.program_index] == solana_jupiter.PROGRAM_ID:
+            parsed = jupiter_route_v2.parse(bytes(instruction.data))
+            break
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("a_to_b"), bool):
+        return None
+    keys = route["keys"]
+    cursor = 7
+    if cursor >= len(keys) or keys[cursor] != jupiter_route_v2.EVENT:
+        cursor += 1
+    pool_index = cursor + 5
+    if pool_index + 4 >= len(keys) or pool_index < 3:
+        return None
+    if keys[pool_index - 3] != solana_whirlpool.PROGRAM_ID:
+        return None
+    amount = route.get("in_amount")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or amount >= 2**64:
+        return None
+    return {
+        "pool": keys[pool_index],
+        "token_program": keys[pool_index - 2],
+        "vault_a": keys[pool_index + 2],
+        "vault_b": keys[pool_index + 4],
+        "source_mint": route["source_mint"],
+        "destination_mint": route["destination_mint"],
+        "in_amount": amount,
+        "a_to_b": parsed["a_to_b"],
+    }
+
+
+def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
+    """Static Whirlpool fee rate on the reserved hop's pool account.
+
+    The ceiling is ceil(input * fee_rate / 1_000_000) in input-mint raw units.
+    It is a pretrade bound from the published static rate. An adaptive fee or a
+    Token-2022 transfer fee is not that amount, and nothing here is the fee a
+    landed swap charged.
+    """
+    import base64
+    import jupiter_route_v2
+    import solana_tx
+    import solana_whirlpool
+    blank = {
+        "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
+        "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
+        "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
+        "input_transfer_fee_unsupported": False, "pool_fee_reason": "pool_fee_unobserved",
+    }
+    hop = _hop_pool(decoded)
+    reserved = proof["pool"] if isinstance(proof, dict) else None
+    if hop is None or (isinstance(reserved, str) and reserved != "" and reserved != hop["pool"]):
+        return blank | {"pool_fee_reason": "pool_unbound"}
+    if hop["token_program"] == solana_tx.TOKEN_2022:
+        return blank | {"pool_fee_reason": "token_2022_unsupported", "input_transfer_fee_unsupported": True}
+    if hop["token_program"] != solana_tx.TOKEN_PROGRAM:
+        return blank | {"pool_fee_reason": "pool_unbound"}
+    try:
+        response = transport({
+            "method": "getAccountInfo",
+            "purpose": "whirlpool_pool",
+            "account": hop["pool"],
+            "commitment": "confirmed",
+            "minContextSlot": tip,
+            "blockhash": proof["blockhash"],
+        })
+    except Exception:
+        return blank | {"pool_fee_reason": "pool_transport"}
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return blank | {"pool_fee_reason": "pool_account_malformed"}
+    echoed = result.get("blockhash", body.get("blockhash") if isinstance(body, dict) else None)
+    if echoed is not None and echoed != proof["blockhash"]:
+        return blank | {"pool_fee_reason": "pool_hash_mismatch"}
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return blank | {"pool_fee_reason": "pool_context_missing"}
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return blank | {"pool_fee_reason": "pool_context_malformed"}
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        return blank | {"pool_fee_reason": "pool_context_stale" if slot < tip else "pool_context_future"}
+    value = result.get("value")
+    if value is None:
+        return blank | {"pool_fee_reason": "pool_account_missing"}
+    if not isinstance(value, dict) or value.get("owner") != solana_whirlpool.PROGRAM_ID:
+        return blank | {"pool_fee_reason": "pool_owner"}
+    raw = _decoded_account_data(value.get("data"))
+    if raw is None or solana_whirlpool.pool_fields(raw) is None or solana_whirlpool.pool_state(raw) is None:
+        return blank | {"pool_fee_reason": "pool_layout"}
+    mint_a, vault_a, mint_b, vault_b = solana_whirlpool.pool_fields(raw)
+    if hop["a_to_b"]:
+        mint_ok = hop["source_mint"] == mint_a and hop["destination_mint"] == mint_b
+    else:
+        mint_ok = hop["source_mint"] == mint_b and hop["destination_mint"] == mint_a
+    if not mint_ok or hop["vault_a"] != vault_a or hop["vault_b"] != vault_b:
+        return blank | {"pool_fee_reason": "pool_direction"}
+    if not solana_whirlpool.pool_pda_matches(hop["pool"], raw):
+        return blank | {"pool_fee_reason": "pool_pda"}
+    state = solana_whirlpool.pool_state(raw)
+    rate = state.get("fee_rate")
+    if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0 or rate > 65535:
+        return blank | {"pool_fee_reason": "pool_layout"}
+    observed = blank | {"dex_fee_rate_observed": True, "dex_fee_rate": rate, "dex_fee_charged_proven": False, "dex_fee_proven": False}
+    if state.get("adaptive_fee") is True:
+        return observed | {"adaptive_fee_unsupported": True, "pool_fee_reason": "adaptive_fee_unsupported"}
+    estimate = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
+    if estimate is None or estimate >= 2**64 or estimate > hop["in_amount"]:
+        return observed | {"pool_fee_reason": "pool_fee_overflow"}
+    return observed | {
+        "dex_fee_estimate_raw": estimate,
+        "dex_fee_estimate_proven": True,
+        "pool_fee_reason": None,
+    }
+
+
 def preflight_reserved(case_id: str, message_sha256: str, transport, now: float) -> dict:
     """Unsigned simulateTransaction of the stored message. The bytes are not replaced.
 
@@ -881,6 +1011,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     tip = tip_body.get("result") if isinstance(tip_body, dict) else None
     if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
         return _preflight_report(reason="simulation_context_missing", case_id=case_id, message_sha256=message_sha256)
+    pool_fee = _reserved_pool_fee(transport, proof, decoded, tip)
     fee_quote = _fee_for_message(transport, solana_tx.message_bytes(encoded), tip) if decoded.required_signatures == 1 else {
         "fee_for_message_observed": False, "fee_for_message_lamports": None,
         "charged_fee_proven": False, "fee_for_message_reason": "extra_signer",
@@ -942,8 +1073,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
         fee_lamports_match=False, fee_composition_proven=False, rent_unproven=True, fee_usd_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
         context_slot=parsed["slot"], lookups_resolved=False, signature_validated=False,
-        **fee_quote,
-        **economics,
+        **(fee_quote | economics | pool_fee),
     )
 
 
@@ -1558,7 +1688,7 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") in {"simulateTransaction", "getFeeForMessage"}:
+    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") == "whirlpool_pool":
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

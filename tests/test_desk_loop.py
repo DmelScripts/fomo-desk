@@ -350,11 +350,12 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "POST", "url": "https://api.jup.ag/swap/v2/execute", "json": {"token": MINT}},
             {"method": "simulateTransaction", "transaction": "abc"},
             {"method": "getFeeForMessage", "message": "abc"},
+            {"method": "getAccountInfo", "purpose": "whirlpool_pool", "account": MINT},
         ):
             posted = len(posts)
             with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
-            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"}:
+            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") == "whirlpool_pool":
                 self.assertEqual(str(refused.exception), "method_refused")
                 self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
@@ -1982,6 +1983,33 @@ conn.close()
                 elif mode in data_overrides:
                     account["data"] = data_overrides[mode]
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": None, "unitsConsumed": 1000, "accounts": [account]}}}}
+            if method == "getAccountInfo" and request.get("purpose") == "whirlpool_pool":
+                address = request.get("account")
+                mode = chain.get("pool_mode")
+                if request.get("blockhash") not in (None, chain["blockhash"]) or mode == "hash":
+                    echoed = "other-hash"
+                else:
+                    echoed = request.get("blockhash")
+                slot = 1 if mode == "context" else 2_000_028
+                if address not in accounts or mode == "missing":
+                    value = None
+                else:
+                    owner, raw = accounts[address]
+                    raw = bytearray(raw)
+                    if mode == "owner":
+                        owner = solana_tx.TOKEN_PROGRAM
+                    elif mode == "layout":
+                        raw = bytearray(b"\x00" * 8)
+                    elif mode == "pda":
+                        raw[40] = (raw[40] + 1) % 256
+                    elif mode == "direction":
+                        start_a, start_b = solana_whirlpool._MINT_A, solana_whirlpool._MINT_B
+                        raw[start_a:start_a + 32], raw[start_b:start_b + 32] = raw[start_b:start_b + 32], raw[start_a:start_a + 32]
+                    elif mode == "adaptive":
+                        at = solana_whirlpool._TICK_SPACING + 2
+                        raw[at] ^= 0xFF
+                    value = {"owner": owner, "data": [__import__("base64").b64encode(bytes(raw)).decode("ascii"), "base64"], "executable": False, "lamports": 1, "rentEpoch": 0}
+                return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": value, "blockhash": echoed}, "blockhash": echoed}}
             if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
                 shape = chain.get("fee_payer_shape")
                 payer_data = {
@@ -2127,6 +2155,19 @@ conn.close()
         self.assertTrue(entry_preflight["fee_for_message_observed"], entry_preflight)
         self.assertEqual(entry_preflight["fee_for_message_lamports"], 5000)
         self.assertFalse(entry_preflight["charged_fee_proven"])
+        entry_route = __import__("memecoin_exit")._route(solana_tx.decode_transaction(__import__("base64").b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])))
+        entry_rate = solana_whirlpool.pool_state(accounts[pool][1])["fee_rate"]
+        self.assertFalse(solana_whirlpool.pool_state(accounts[pool][1])["adaptive_fee"])
+        self.assertTrue(entry_preflight["dex_fee_rate_observed"], entry_preflight)
+        self.assertEqual(entry_preflight["dex_fee_rate"], entry_rate)
+        self.assertEqual(entry_preflight["dex_fee_estimate_raw"], jupiter_route_v2.whirlpool_fee(entry_route["in_amount"], entry_rate))
+        self.assertLessEqual(entry_preflight["dex_fee_estimate_raw"], entry_route["in_amount"])
+        self.assertTrue(entry_preflight["dex_fee_estimate_proven"], entry_preflight)
+        self.assertFalse(entry_preflight["dex_fee_charged_proven"])
+        self.assertFalse(entry_preflight["dex_fee_proven"])
+        self.assertFalse(entry_preflight["adaptive_fee_unsupported"])
+        self.assertIsNone(entry_preflight["pool_fee_reason"])
+        self.assertNotIn("dex_fee_estimate_raw", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
         self.assertNotEqual(chain["fee_messages"][-1], db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])
         self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])).decode("ascii"))
         self.assertFalse(entry_preflight["min_out_bound_proven"])
@@ -2194,6 +2235,43 @@ conn.close()
             self.assertFalse(quoted_fee["preflight_ready"], label)
         chain["fee_mode"] = "clear"
         chain.pop("fee_value", None)
+        for mode, reason in (
+            ("owner", "pool_owner"),
+            ("layout", "pool_layout"),
+            ("pda", "pool_pda"),
+            ("direction", "pool_direction"),
+            ("context", "pool_context_stale"),
+            ("hash", "pool_hash_mismatch"),
+            ("missing", "pool_account_missing"),
+        ):
+            chain["pool_mode"] = mode
+            pooled = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
+            self.assertEqual(pooled["pool_fee_reason"], reason, pooled)
+            self.assertFalse(pooled["dex_fee_estimate_proven"], mode)
+            self.assertFalse(pooled["dex_fee_charged_proven"], mode)
+            self.assertFalse(pooled["dex_fee_proven"], mode)
+            self.assertFalse(pooled["preflight_ready"], mode)
+            self.assertFalse(pooled["fee_usd_proven"], mode)
+        chain["pool_mode"] = None
+        adaptive_raw = bytearray(accounts[pool][1])
+        adaptive_raw[solana_whirlpool._TICK_SPACING + 2] ^= 0xFF
+        seed = bytes(adaptive_raw[solana_whirlpool._TICK_SPACING + 2:solana_whirlpool._TICK_SPACING + 4])
+        derived, bump = solana_tx.find_program_address(
+            [b"whirlpool", bytes(adaptive_raw[8:40]), bytes(adaptive_raw[solana_whirlpool._MINT_A:solana_whirlpool._MINT_A + 32]), bytes(adaptive_raw[solana_whirlpool._MINT_B:solana_whirlpool._MINT_B + 32]), seed],
+            solana_tx.b58decode(solana_whirlpool.PROGRAM_ID),
+        )
+        adaptive_raw[40] = bump
+        adaptive_address = solana_tx.b58encode(derived)
+        accounts[adaptive_address] = (solana_whirlpool.PROGRAM_ID, bytes(adaptive_raw))
+        adaptive_decoded = solana_tx.decode_transaction(__import__("base64").b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (entry_hash["message_sha256"],))[0]["message_b64"]))
+        adaptive_decoded.static_keys = [adaptive_address if key == pool else key for key in adaptive_decoded.static_keys]
+        adaptive_fee = desk_loop._reserved_pool_fee(transport, {"pool": adaptive_address, "blockhash": chain["blockhash"]}, adaptive_decoded, 2_000_028)
+        self.assertTrue(adaptive_fee["dex_fee_rate_observed"], adaptive_fee)
+        self.assertTrue(adaptive_fee["adaptive_fee_unsupported"], adaptive_fee)
+        self.assertFalse(adaptive_fee["dex_fee_estimate_proven"])
+        self.assertFalse(adaptive_fee["dex_fee_charged_proven"])
+        self.assertEqual(adaptive_fee["pool_fee_reason"], "adaptive_fee_unsupported")
+        self.assertIsNone(jupiter_route_v2.whirlpool_fee(entry_route["in_amount"], 1_000_001))
         attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
         self.assertEqual(attempt["case_id"], case_id)
         self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
@@ -3071,6 +3149,21 @@ conn.close()
         self.assertTrue(exit_preflight["fee_for_message_observed"], exit_preflight)
         self.assertEqual(exit_preflight["fee_for_message_lamports"], 5000)
         self.assertFalse(exit_preflight["charged_fee_proven"])
+        exit_route = __import__("memecoin_exit")._route(solana_tx.decode_transaction(__import__("base64").b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])))
+        self.assertTrue(exit_preflight["dex_fee_rate_observed"], exit_preflight)
+        self.assertEqual(exit_preflight["dex_fee_rate"], entry_rate)
+        self.assertEqual(exit_preflight["dex_fee_estimate_raw"], jupiter_route_v2.whirlpool_fee(exit_route["in_amount"], entry_rate))
+        self.assertTrue(exit_preflight["dex_fee_estimate_proven"], exit_preflight)
+        self.assertFalse(exit_preflight["dex_fee_charged_proven"])
+        self.assertFalse(exit_preflight["dex_fee_proven"])
+        self.assertFalse(exit_preflight["fee_usd_proven"])
+        self.assertNotIn("dex_fee_estimate_raw", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
+        chain["pool_mode"] = "direction"
+        exit_direction = desk_loop.preflight_reserved(case_id, stored["message_sha256"], transport, WHEN)
+        chain["pool_mode"] = None
+        self.assertEqual(exit_direction["pool_fee_reason"], "pool_direction")
+        self.assertFalse(exit_direction["dex_fee_estimate_proven"])
+        self.assertFalse(exit_direction["dex_fee_charged_proven"])
         self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])).decode("ascii"))
         for label, amount in (("zero", 0), ("max", 2**64 - 1)):
             chain["fee_mode"] = "value"
