@@ -181,6 +181,40 @@ class DiagnosticServiceTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.calls if call[:2] == ["solana", "send"]]), 2)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM phantom_reservations WHERE intent_id = 'diagnostic-sol-usdc'")[0]["n"], 1)
 
+    def test_exit_halt_flip_after_identity_does_not_send(self):
+        usdc_valuation.install_harness(_harness())
+        diagnostic_lifecycle.RUNNER = self.runner
+        self.assertEqual(self.client.post("/api/phantom/diagnostic/tick", headers=AUTH, json={}).status_code, 200)
+        spawned = self.client.post("/api/phantom/diagnostic/tick", headers=AUTH, json={})
+        self.assertEqual(spawned.status_code, 200, spawned.text)
+        view = self.client.get("/api/phantom/diagnostic", headers=AUTH).json()["intent"]
+        self._plant_entry(view)
+        confirmed = self.client.post("/api/phantom/diagnostic/tick", headers=AUTH, json={})
+        self.assertEqual(confirmed.json()["stage"], "confirmed", confirmed.text)
+        opened = self.client.get("/api/phantom/diagnostic", headers=AUTH).json()["intent"]["opened_at"]
+        diagnostic_lifecycle.CLOCK = lambda: opened + 3 * 3600 + 5
+        armed = {"n": 0}
+
+        def runner(argv, _env, _timeout):
+            self.calls.append(argv[1:4])
+            if argv[1:3] == ["wallet", "addresses"]:
+                armed["n"] += 1
+                if armed["n"] >= 2:
+                    phantom_runner.set_halt({"halted": True})
+                return 0, _identity()
+            raise AssertionError("exit send")
+
+        diagnostic_lifecycle.RUNNER = runner
+        refused = self.client.post("/api/phantom/diagnostic/tick", headers=AUTH, json={})
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["reason"], "kill_switch")
+        self.assertFalse(refused.json()["send"])
+        self.assertFalse(refused.json()["loss_stop_blocks_exit"])
+        intent = self.client.get("/api/phantom/diagnostic", headers=AUTH).json()["intent"]
+        self.assertEqual(intent["status"], "confirmed")
+        self.assertEqual([call for call in self.calls if call[:2] == ["solana", "send"] and call != ["solana", "send", "--transaction"]], [])
+        self.assertEqual(len([call for call in self.calls if call[:2] == ["solana", "send"]]), 1)
+
     def test_an_unknown_entry_is_not_resent_after_restart(self):
         usdc_valuation.install_harness(_harness())
         diagnostic_lifecycle.RUNNER = self.runner

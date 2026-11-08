@@ -144,11 +144,13 @@ def policy_stamp() -> dict:
     fee = _stamp(_FEE)
     loss = _stamp(_AGGREGATE)
     halt = db.query("SELECT value, updated_at FROM phantom_control WHERE key = 'halt'")
+    exit_row = db.query("SELECT updated_at FROM phantom_control WHERE key = 'exit_policy_approval'")
     return {
         "fee": fee,
         "loss": loss,
         "halt": None if not halt else halt[0]["value"],
         "halt_at": None if not halt else halt[0]["updated_at"],
+        "exit": None if not exit_row else exit_row[0]["updated_at"],
     }
 
 

@@ -247,10 +247,9 @@ def _risk(row) -> dict:
     rebuilt = _rebuild_exit(mark)
     if rebuilt.get("ok") is not True:
         return _stop(rebuilt.get("reason") or "message_unbound", resend=False, action=signal["action"])
-    if not _claim_exit():
-        return _stop("not_claimable", resend=False)
     sent = _send_held(rebuilt["tx"])
-    _drop_stash()
+    if sent.get("send") is True:
+        _drop_stash()
     return {
         "ok": sent.get("ok") is True,
         "stage": "exit_unknown",
@@ -318,33 +317,8 @@ def _rebuild_exit(mark: int) -> dict:
     return {"ok": True, "tx": tx, "mark": mark}
 
 
-def _claim_exit() -> bool:
-    def work(conn):
-        row = conn.execute("SELECT status, result_json FROM phantom_reservations WHERE intent_id = ?", (INTENT,)).fetchone()
-        if row is None or row["status"] != "confirmed":
-            return False
-        try:
-            stored = json.loads(row["result_json"] or "{}")
-        except json.JSONDecodeError:
-            stored = {}
-        if not isinstance(stored, dict) or stored.get("exit_claimed") is True:
-            return False
-        if _stamp_changed(stored):
-            return False
-        if phantom_runner.halted():
-            return False
-        stored["exit_claimed"] = True
-        stored["resend"] = False
-        updated = conn.execute(
-            "UPDATE phantom_reservations SET status = 'exit_unknown', result_json = ?, updated_at = ? WHERE intent_id = ? AND status = 'confirmed'",
-            (json.dumps(stored, separators=(",", ":"), sort_keys=True), time.time(), INTENT),
-        )
-        return updated.rowcount == 1
-
-    return db.exclusive(work) is True
-
-
 def _send_held(tx: str) -> dict:
+    """Identity, then the same claim window as an entry, then one send."""
     if RUNNER is None:
         return {"ok": False, "reason": "runner_missing", "send": False}
     try:
@@ -355,14 +329,29 @@ def _send_held(tx: str) -> dict:
     if code != 0 or identity.get("ok") is not True:
         return {"ok": False, "reason": "wallet_mismatch" if code == 0 else "auth_expired", "send": False}
     try:
+        message_sha = hashlib.sha256(solana_tx.message_bytes(tx)).hexdigest()
+    except ValueError:
+        return {"ok": False, "reason": "bytes", "send": False}
+    stored = _stored(_row())
+    last_valid = stored.get("exit_last_valid_block_height")
+    height = None
+    if isinstance(last_valid, int) and not isinstance(last_valid, bool):
+        height = execution_transport.fresh_block_height()
+    reason = execution_transport.claim_after_identity(
+        INTENT, hashlib.sha256(tx.encode("ascii")).hexdigest(),
+        message_sha256=message_sha, expect_status="confirmed", last_valid=last_valid, block_height=height,
+    )
+    if reason:
+        return {"ok": False, "reason": reason, "send": False, "post_claim_toctou": False}
+    try:
         code, text = RUNNER(execution_transport.send_argv("phantom", tx), {}, 30)
     except (OSError, TimeoutError):
-        return {"ok": False, "reason": "timeout", "send": False}
+        return {"ok": False, "reason": "timeout", "send": False, "post_claim_toctou": True}
     signature = execution_transport._signature(text) if code == 0 else None
     if signature is None:
-        return {"ok": False, "reason": "ambiguous", "send": False}
+        return {"ok": False, "reason": "ambiguous", "send": False, "post_claim_toctou": True}
     _merge({"exit_signature": signature, "resend": False})
-    return {"ok": True, "send": True, "signature": signature, "reason": None}
+    return {"ok": True, "send": True, "signature": signature, "reason": None, "post_claim_toctou": True}
 
 
 def _preconditions() -> dict | None:
