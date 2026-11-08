@@ -75,10 +75,27 @@ def normalize(body) -> dict:
     for key in NAMED:
         if key in data:
             named[key] = data[key]
+    proven = {}
+    unproven = list(UNPROVEN)
+    for key in (
+        "lp_burned_or_locked", "dev_holding_pct", "dev_rugs", "bundled_launch_pct",
+    ):
+        if key in data:
+            proven[key] = data[key]
+            if key in unproven:
+                unproven.remove(key)
+    components = data.get("components") if isinstance(data.get("components"), dict) else {}
+    synthetic = bool(proven or components)
+    reason = None if not unproven and components else "response_fields_unpublished"
     return refused | {
         "ok": True,
-        "reason": "response_fields_unpublished",
+        "reason": reason,
         "named": named,
+        "proven": proven,
+        "unproven": unproven,
+        "components": components,
+        "synthetic_fields": synthetic,
+        "live_mcp": False,
         "fdv_used_as_market_cap": False,
     }
 
@@ -127,6 +144,10 @@ def read_mint(mint: str, transport) -> dict:
         return public | {"ok": False, "reason": "stalkchain_transport_missing"}
     secret = os.environ.get(ENV, "").strip()
     named = {}
+    proven = {}
+    components = {}
+    synthetic = False
+    unproven = list(UNPROVEN)
     for tool in TOOLS:
         request = request_for(tool, mint)
         request["headers"] = {"authorization": "Bearer " + secret}
@@ -143,9 +164,19 @@ def read_mint(mint: str, transport) -> dict:
         if parsed.get("ok") is not True:
             return public | {"ok": False, "reason": parsed.get("reason"), "called": True}
         named.update(parsed["named"])
+        proven.update(parsed.get("proven") or {})
+        components.update(parsed.get("components") or {})
+        synthetic = synthetic or parsed.get("synthetic_fields") is True
+        unproven = parsed.get("unproven") or unproven
+    published = not synthetic and bool(unproven)
     return public | {
         "ok": False,
         "called": True,
-        "reason": "response_fields_unpublished",
+        "reason": "response_fields_unpublished" if published or unproven else "synthetic_features",
         "named": named,
+        "proven": proven,
+        "unproven": unproven,
+        "components": components,
+        "synthetic_fields": synthetic,
+        "live_mcp": False,
     }

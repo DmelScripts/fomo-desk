@@ -102,16 +102,18 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
         return stopped | {"reason": selected.get("reason"), "source": selected.get("source"), "mint": None, "caller_named_mint": False, "kills": []}
     kills = list(selected.get("skipped") or [])
     ranked = []
+    screened = []
     for mint in selected["mints"]:
         result = run_once(mint, transport, now, stalk_transport)
+        screened.append({
+            "mint": mint,
+            "reason": result.get("reason"),
+            "stage": result.get("stage"),
+            "quote": result.get("quote"),
+            "jupiter_called": result.get("jupiter_called") is True,
+        })
         if result.get("reason"):
-            kills.append({
-                "mint": mint,
-                "reason": result.get("reason"),
-                "source": result.get("source") or dexscreener_public.SOURCE,
-                "quote": result.get("quote"),
-                "jupiter_called": result.get("jupiter_called") is True,
-            })
+            kills.append(screened[-1] | {"source": result.get("source") or dexscreener_public.SOURCE})
             continue
         ranked.append(result)
     ranked.sort(key=lambda item: item.get("liquidity_ratio") or 0, reverse=True)
@@ -122,6 +124,7 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
         "caller_named_mint": False,
         "candidates": len(selected["mints"]),
         "kills": kills,
+        "screened": screened,
         "ranked": [item.get("mint") for item in ranked],
         "score_measured": False,
         "holder_growth_unproven": True,
@@ -200,7 +203,7 @@ def _observe(mint: str, source: str, metric: str, value: str, fetched_at: float)
     db.exclusive(work)
 
 
-def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
+def run_supervised(transport, now: float, *, rounds: int = 1, stalk_transport=None) -> dict:
     """The loop the server would start. Tests call it with a mock. Production does not."""
     if _runtime["running"]:
         return {"ok": False, "reason": "already_running", "started": True, "agents_enabled": False, "live_ready": False}
@@ -213,7 +216,7 @@ def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
     try:
         for _ in range(rounds):
             try:
-                last = run_discovery(transport, now)
+                last = run_discovery(transport, now, stalk_transport)
                 _runtime["passes"] += 1
             except Exception as exc:
                 _runtime["faults"] += 1
@@ -254,12 +257,12 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
     _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
     opened = memecoin_desk.scout(parsed["scout"], now=now)
-    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
     if opened.get("ok") is not True:
+        quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
         return stopped | {
             "reason": opened.get("reason"), "stage": opened.get("stage"), "case_id": opened.get("case_id"),
             "quote": quote, "jupiter_called": quote.get("jupiter_called") is True, "score_measured": False,
-            "quote_expiry_proven": False,
+            "quote_expiry_proven": False, "sources_are_live_mcp": False,
         }
     try:
         rpc = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})
@@ -270,16 +273,47 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         value = (rpc["body"].get("result") or {}).get("value") if isinstance(rpc["body"].get("result"), dict) else None
         if isinstance(value, dict):
             account = solana_mint_read.parse_account(value, mint)
-    coverage = stalkchain_adapter.read_mint(mint, stalk_transport)
-    onchain = {"source": solana_mint_read.SOURCE, "fetched_at": now}
+    coverage = stalkchain_adapter.read_mint(mint, stalk_transport if stalk_transport is not None else transport)
+    onchain = {"source": "synthetic_test_adapter" if coverage.get("synthetic_fields") else solana_mint_read.SOURCE, "fetched_at": now}
+    if not isinstance(onchain["source"], str):
+        onchain["source"] = solana_mint_read.SOURCE
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
         onchain["freeze_authority_revoked"] = account["freeze_authority_revoked"]
+    for key, value in (coverage.get("proven") or {}).items():
+        onchain[key] = value
     filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
+    if filtered.get("ok") is not True:
+        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": filtered.get("reason"), "send": False, "live_ready": False, "sources_are_live_mcp": False}
+        return stopped | {
+            "reason": filtered.get("reason"), "stage": filtered.get("stage"), "case_id": opened["case_id"],
+            "stalkchain": coverage, "mint_account_ok": account.get("ok") is True,
+            "quote": blocked, "jupiter_called": False, "score_measured": False, "quote_expiry_proven": False,
+            "effectual_entry": False, "sources_are_live_mcp": False, "usd_live": False,
+        }
+    components = coverage.get("components") if isinstance(coverage.get("components"), dict) else {}
+    missing = [name for name in memecoin_desk.COMPONENTS if not isinstance(components.get(name), dict)]
+    if missing:
+        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": missing[0] + "_unproven", "send": False, "live_ready": False}
+        return stopped | {"reason": missing[0] + "_unproven", "stage": "filter_passed", "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
+    analyzed = memecoin_desk.analyze(opened["case_id"], components, now=now)
+    if analyzed.get("ok") is not True:
+        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": analyzed.get("reason"), "send": False}
+        return stopped | {"reason": analyzed.get("reason"), "stage": analyzed.get("stage"), "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
+    proof = _account_rent(transport, mint)
+    if proof.get("ok") is not True:
+        blocked = {"attempted": False, "jupiter_called": False, "reason": proof.get("reason"), "score_measured": False, "send": False}
+        return stopped | {"reason": proof.get("reason"), "stage": "analyst_passed", "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
+    _fresh_sol(transport, now)
+    protected = memecoin_desk.protect(opened["case_id"], now=now, rent_proof=proof)
+    if protected.get("ok") is not True:
+        blocked = {"attempted": False, "jupiter_called": False, "reason": protected.get("reason"), "score_measured": False, "send": False}
+        return stopped | {"reason": protected.get("reason"), "stage": protected.get("stage"), "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
+    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
     return {
         "ok": False,
-        "reason": filtered.get("reason") or coverage["reason"],
-        "stage": filtered.get("stage"),
+        "reason": quote.get("reason"),
+        "stage": "protected" if quote.get("jupiter_called") is True else protected.get("stage"),
         "case_id": opened["case_id"],
         "mint": mint,
         "stalkchain": coverage,
@@ -321,6 +355,21 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict) -> dict:
     intent = _quote_intent(mint, identity["pool"])
     if intent.get("ok") is not True:
         return quiet | {"attempted": True, "reason": intent.get("reason"), "pool": identity["pool"]}
+    if intent["side"] == "entry":
+        sol = _fresh_sol(transport, now)
+        leg = sol.get("sol") if isinstance(sol, dict) and sol.get("fresh") is True else None
+        if not isinstance(leg, dict):
+            return quiet | {"attempted": True, "reason": (sol or {}).get("reason") if isinstance(sol, dict) else "sol_usd_unpriced", "pool": identity["pool"]}
+        rent = _account_rent(transport, mint)
+        if rent.get("ok") is not True:
+            return quiet | {"attempted": True, "reason": rent.get("reason"), "pool": identity["pool"]}
+        sized = memecoin_desk._entry_lamports(leg, rent["lamports"])
+        if sized.get("ok") is not True:
+            return quiet | {"attempted": True, "reason": sized.get("reason"), "pool": identity["pool"]}
+        refreshed = memecoin_desk.refresh_entry_intent(intent["case_id"], sized, now)
+        if refreshed.get("ok") is not True:
+            return quiet | {"attempted": True, "reason": refreshed.get("reason"), "pool": identity["pool"], "previous_amount": refreshed.get("amount")}
+        intent = intent | {"amount": refreshed["amount"], "version": refreshed.get("version")}
     import jupiter_route_v2
     try:
         first = jupiter_route_v2.read_snapshot(transport, [identity["pool"]], now)
@@ -389,6 +438,83 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict) -> dict:
     }
 
 
+def _fresh_sol(transport, now: float) -> dict:
+    """Read the sponsored SOL/USD accounts through this round's transport."""
+    import pyth_sponsored
+    try:
+        return pyth_sponsored.read_accounts(transport, now)
+    except Exception:
+        return {"fresh": False, "reason": "sol_usd_unpriced"}
+
+
+def _account_rent(transport, mint: str) -> dict:
+    """Rent-exemption lamports for the token accounts this entry would create.
+
+    A missing read is a refusal. An account that is absent is counted. An
+    account that is already a token account is not counted again.
+    """
+    import phantom_transport
+    import solana_tx
+    refused = {"ok": False, "reason": "rent_unpriced"}
+    try:
+        response = transport({"kind": "rpc", "method": "getMinimumBalanceForRentExemption", "size": solana_tx.TOKEN_ACCOUNT_SPACE})
+    except Exception:
+        return refused
+    body = response.get("body") if isinstance(response, dict) else None
+    each = body.get("result") if isinstance(body, dict) else None
+    if isinstance(each, bool) or not isinstance(each, int) or each < 1:
+        return refused
+    wallet = phantom_transport.REQUIRED_WALLET
+    keys = [
+        solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM),
+        solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM),
+    ]
+    try:
+        listed = transport({"kind": "rpc", "method": "getMultipleAccounts", "accounts": keys})
+    except Exception:
+        return refused
+    listed_body = listed.get("body") if isinstance(listed, dict) else None
+    result = listed_body.get("result") if isinstance(listed_body, dict) else None
+    value = result.get("value") if isinstance(result, dict) else None
+    if not isinstance(value, list) or len(value) != len(keys):
+        return refused
+    count = 0
+    for item in value:
+        if item is None:
+            count += 1
+            continue
+        if isinstance(item, dict) and item.get("owner") == solana_tx.TOKEN_PROGRAM:
+            continue
+        return refused
+    return {"ok": True, "lamports": each * count, "each": each, "count": count, "space": solana_tx.TOKEN_ACCOUNT_SPACE}
+
+
+def _receipt_remaining(case_id: str, snap: dict) -> int | None:
+    """Token quantity still held, from the entry receipt minus booked exit slices."""
+    import db
+    funding = snap.get("entry_funding") if isinstance(snap.get("entry_funding"), dict) else {}
+    if funding.get("source") != "entry_receipt" or funding.get("proven") is not True:
+        return None
+    signature = funding.get("signature")
+    if not isinstance(signature, str):
+        return None
+    try:
+        rows = db.query(
+            "SELECT qty FROM memecoin_entry_receipts WHERE signature = ? AND case_id = ? AND failed = 0",
+            (signature, case_id),
+        )
+    except Exception:
+        return None
+    if len(rows) != 1 or isinstance(rows[0]["qty"], bool) or not isinstance(rows[0]["qty"], int):
+        return None
+    sold = 0
+    for item in snap.get("live_receipts") or []:
+        if isinstance(item, dict) and item.get("exit_chain_proven") is True and isinstance(item.get("qty"), int) and not isinstance(item.get("qty"), bool):
+            sold += item["qty"]
+    left = rows[0]["qty"] - sold
+    return left if left > 0 else None
+
+
 def _quote_intent(mint: str, pool: str) -> dict:
     """Quantity from an open protected entry or a filled exit. No invented size."""
     import db
@@ -411,8 +537,11 @@ def _quote_intent(mint: str, pool: str) -> dict:
     if not isinstance(snap, dict):
         return refused
     stage = rows[0]["stage"]
-    if stage in {"filled", "partial"} and isinstance(snap.get("remaining_raw"), int) and snap["remaining_raw"] > 0:
-        return {"ok": True, "side": "exit", "amount": snap["remaining_raw"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
+    if stage in {"filled", "partial"}:
+        left = _receipt_remaining(rows[0]["id"], snap)
+        if left is None:
+            return refused | {"reason": "exit_receipt_unproven"}
+        return {"ok": True, "side": "exit", "amount": left, "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
     amount = snap.get("entry_amount_raw")
     if stage == "protected" and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
         return {"ok": True, "side": "entry", "amount": amount, "input_mint": solana_tx.NATIVE_MINT, "output_mint": mint, "a_to_b": True, "case_id": rows[0]["id"], "pool": pool}
@@ -449,7 +578,7 @@ def public_reader(request: dict) -> dict:
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
     method = request.get("method")
-    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash"}:
+    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash"}:
         if method == "getAccountInfo":
             params = [request.get("mint"), {"encoding": "base64", "commitment": "confirmed"}]
         elif method == "getMultipleAccounts":
@@ -457,6 +586,11 @@ def public_reader(request: dict) -> dict:
             if not isinstance(accounts, list) or not accounts or not all(isinstance(item, str) for item in accounts):
                 raise RuntimeError("method_refused")
             params = [accounts, {"encoding": "base64", "commitment": "confirmed"}]
+        elif method == "getMinimumBalanceForRentExemption":
+            size = request.get("size")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise RuntimeError("method_refused")
+            params = [size]
         elif method == "getSlot":
             params = [{"commitment": "confirmed"}]
         elif method == "getTransaction":

@@ -226,15 +226,22 @@ def set_entry_amount(case_id: str, amount: int) -> dict:
     return {"ok": False, "reason": "server_amount_required", "case_id": case_id, "send": False, "live_ready": False}
 
 
-def _entry_lamports(sol_leg: dict) -> dict:
+def _entry_lamports(sol_leg: dict, rent_lamports: int | None = None) -> dict:
     """Largest raw input whose rent, input, and fee ceiling stay inside $8.
 
     $8 is the maximum. The search stops at the largest integer that still fits.
-    It does not invent a price.
+    It does not invent a price. Rent must be the proved lamport sum, not a guess.
     """
     import pyth_sponsored
     refused = {"ok": False, "reason": "sol_usd_unpriced"}
-    rent = solana_tx.TOKEN_ACCOUNT_RENT
+    if rent_lamports is None:
+        rent = solana_tx.TOKEN_ACCOUNT_RENT
+        rent_proved = False
+    elif isinstance(rent_lamports, bool) or not isinstance(rent_lamports, int) or rent_lamports < 0:
+        return refused | {"reason": "rent_unpriced"}
+    else:
+        rent = rent_lamports
+        rent_proved = True
     room = TICKET - MAX_FEE
     if room <= 0:
         return refused | {"reason": "ticket"}
@@ -262,13 +269,62 @@ def _entry_lamports(sol_leg: dict) -> dict:
         "ok": True,
         "lamports": raw,
         "rent_lamports": rent,
+        "rent_proved": rent_proved,
         "exposure_usd": format(exposure, "f"),
         "fee_usd": format(MAX_FEE, "f"),
         "total_usd": format(exposure + MAX_FEE, "f"),
     }
 
 
-def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None, now: float | None = None) -> dict:
+def refresh_entry_intent(case_id: str, sized: dict, now: float) -> dict:
+    """Replace a quotable size that no longer fits. An inflight message is not edited."""
+    row = _case(case_id)
+    refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "case_id": case_id}
+    if row is None or row["stage"] != "protected":
+        return refused | {"reason": "stage"}
+    if sized.get("ok") is not True:
+        return refused | {"reason": sized.get("reason") or "sol_usd_unpriced", "jupiter_called": False}
+
+    def work(conn):
+        current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None or current["stage"] != "protected":
+            return refused | {"reason": "stage"}
+        snap = json.loads(current["snapshot_json"])
+        if isinstance(snap.get("entry_inflight"), dict):
+            return refused | {"reason": "intent_inflight", "amount": snap.get("entry_amount_raw")}
+        previous = snap.get("entry_amount_raw")
+        version = snap.get("entry_intent_version")
+        version = version if isinstance(version, int) and not isinstance(version, bool) and version > 0 else 0
+        fresh = sized["lamports"]
+        if previous == fresh and snap.get("entry_rent_lamports") == sized["rent_lamports"] and version > 0:
+            return {"ok": True, "amount": fresh, "version": version, "rebuilt": False, "case_id": row["id"], "send": False, "live_ready": False}
+        held = _held_conn(conn)
+        old_reserved = _reserved_amount(snap.get("reserved_usd")) or Decimal("0")
+        new_reserved = _money(sized["total_usd"]) or TICKET
+        if held - old_reserved + new_reserved > ALLOCATION:
+            return refused | {"reason": "allocation"}
+        snap["entry_amount_raw"] = fresh
+        snap["entry_intent_version"] = version + 1
+        snap["entry_amount_previous"] = previous
+        snap["entry_amount_source"] = "server_ticket"
+        snap["entry_amount_locked"] = True
+        snap["entry_rent_lamports"] = sized["rent_lamports"]
+        snap["entry_rent_proved"] = sized.get("rent_proved") is True
+        snap["entry_exposure_usd"] = sized["exposure_usd"]
+        snap["entry_fee_usd"] = sized["fee_usd"]
+        snap["entry_total_usd"] = sized["total_usd"]
+        snap["reserved_usd"] = sized["total_usd"]
+        snap["entry_intent_rebuilt_at"] = now
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'protected'",
+            (json.dumps(snap, sort_keys=True), now, row["id"]),
+        )
+        return {"ok": True, "amount": fresh, "version": version + 1, "rebuilt": previous != fresh, "previous": previous, "case_id": row["id"], "send": False, "live_ready": False}
+
+    return db.exclusive(work)
+
+
+def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None, now: float | None = None, rent_proof: dict | None = None) -> dict:
     """Persist the stop and the 12/12 trail before an entry can become eligible."""
     row = _case(case_id)
     if row is None or row["stage"] != "analyst_passed":
@@ -306,11 +362,21 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
         "deposit_usd": snap.get("deposit_usd"),
         "reserved_includes_deposit": snap.get("reserved_includes_deposit"),
     }
-    if snap.get("reserved_includes_deposit") is not True:
-        return {"ok": False, "reason": "deposit_unpriced", "case_id": row["id"], "stage": row["stage"], "mint": row["mint"], "send": False, "live_ready": False}
     moment = time.time() if now is None else now
     import pyth_sponsored
-    sized = _entry_lamports(pyth_sponsored.sol_leg(moment))
+    if isinstance(rent_proof, dict) and rent_proof.get("ok") is True and isinstance(rent_proof.get("lamports"), int) and rent_proof["lamports"] > 0:
+        deposit = pyth_sponsored.lamports_usd(rent_proof["lamports"], pyth_sponsored.sol_leg(moment))
+        if deposit is not None and deposit < TICKET:
+            snap["deposit_usd"] = format(deposit, "f")
+            snap["reserved_includes_deposit"] = True
+            snap["rent_account_count"] = rent_proof.get("count")
+            snap["rent_proof"] = "getMinimumBalanceForRentExemption"
+    if snap.get("reserved_includes_deposit") is not True:
+        return {"ok": False, "reason": "deposit_unpriced", "case_id": row["id"], "stage": row["stage"], "mint": row["mint"], "send": False, "live_ready": False}
+    rent_for_size = None
+    if isinstance(rent_proof, dict) and rent_proof.get("ok") is True and isinstance(rent_proof.get("lamports"), int):
+        rent_for_size = rent_proof["lamports"]
+    sized = _entry_lamports(pyth_sponsored.sol_leg(moment), rent_for_size)
     snap["sources_are_live_mcp"] = False
     snap["readiness_not_implied"] = True
     snap["wallet"] = phantom_transport.REQUIRED_WALLET
@@ -321,8 +387,10 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
     snap["live_ready"] = False
     if sized.get("ok") is True:
         snap["entry_amount_raw"] = sized["lamports"]
+        snap["entry_intent_version"] = 1
         snap["entry_amount_source"] = "server_ticket"
         snap["entry_amount_locked"] = True
+        snap["entry_rent_proved"] = sized.get("rent_proved") is True
         snap["entry_rent_lamports"] = sized["rent_lamports"]
         snap["entry_exposure_usd"] = sized["exposure_usd"]
         snap["entry_fee_usd"] = sized["fee_usd"]
