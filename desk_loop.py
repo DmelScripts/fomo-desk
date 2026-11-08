@@ -720,13 +720,58 @@ def record_deposit_liability(case_id: str, message_sha256: str, transport, now: 
     return reported
 
 
+def _exact_ratio(numerator: int, places: int) -> str:
+    """numerator / 10**places as a decimal string. No binary float and no context precision."""
+    if isinstance(numerator, bool) or not isinstance(numerator, int) or isinstance(places, bool) or not isinstance(places, int):
+        raise ValueError("ratio")
+    if places < 0:
+        raise ValueError("ratio")
+    sign = "-" if numerator < 0 else ""
+    remainder = -numerator if numerator < 0 else numerator
+    scale = 10 ** places
+    whole, frac = divmod(remainder, scale)
+    if frac == 0:
+        return sign + str(whole)
+    digits = f"{frac:0{places}d}".rstrip("0")
+    return sign + f"{whole}.{digits}"
+
+
+def deposit_usd_bounds(lamports: int, price: int, conf: int, expo: int) -> dict | None:
+    """Exact floor and ceiling for lamports at the existing price-plus-or-minus-confidence rate.
+
+    The rate is (price ± confidence) * 10**exponent / 10**9. The exponent is the
+    one the sponsored account already allows, -12 through 0. This is not a future bound.
+    """
+    if isinstance(lamports, bool) or isinstance(price, bool) or isinstance(conf, bool) or isinstance(expo, bool):
+        return None
+    if not isinstance(lamports, int) or not isinstance(price, int) or not isinstance(conf, int) or not isinstance(expo, int):
+        return None
+    if lamports < 1 or lamports >= 2**64 or price <= 0 or conf < 0 or expo < -12 or expo > 0:
+        return None
+    if price - conf <= 0:
+        return None
+    places = 9 - expo
+    ceiling_num = lamports * (price + conf)
+    floor_num = lamports * (price - conf)
+    unit_places = -expo
+    unit_ceiling = price + conf
+    unit_floor = price - conf
+    if expo > 0:
+        return None
+    return {
+        "ceiling": _exact_ratio(ceiling_num, places),
+        "floor": _exact_ratio(floor_num, places),
+        "upper": _exact_ratio(unit_ceiling, unit_places),
+        "lower": _exact_ratio(unit_floor, unit_places),
+    }
+
+
 def value_deposit_potential(message_sha256: str, transport, now: float) -> dict:
     """Price this message's historical lamport maximum with one current SOL/USD read.
 
     The quantity is the stored maximum. The price is the read taken now. A caller
     price is not accepted. Distinct messages are not added together.
     """
-    from decimal import Decimal
     import pyth_sponsored
     quiet = {
         "deposit_potential_usd_ceiling": None,
@@ -781,17 +826,15 @@ def value_deposit_potential(message_sha256: str, transport, now: float) -> dict:
         return quiet | {"deposit_valuation_reason": "valuation_scale", "deposit_valued_lamports": quantity}
     if conf < 0 or expo < -12 or expo > 0:
         return quiet | {"deposit_valuation_reason": "valuation_scale", "deposit_valued_lamports": quantity}
-    scale = Decimal(10) ** expo
-    ceiling_rate = (Decimal(price) + Decimal(conf)) * scale
-    floor_rate = (Decimal(price) - Decimal(conf)) * scale
-    if floor_rate <= 0 or ceiling_rate <= 0:
+    executable = read.get("account_executable")
+    if not isinstance(executable, list) or len(executable) != 2 or any(flag is not False for flag in executable):
+        return quiet | {"deposit_valuation_reason": "price_account_executable", "deposit_valued_lamports": quantity}
+    bounds = deposit_usd_bounds(quantity, price, conf, expo)
+    if bounds is None:
         return quiet | {"deposit_valuation_reason": "valuation_not_positive", "deposit_valued_lamports": quantity}
-    lamports = Decimal(quantity)
-    ceiling = lamports * ceiling_rate / Decimal(1_000_000_000)
-    floor = lamports * floor_rate / Decimal(1_000_000_000)
     return quiet | {
-        "deposit_potential_usd_ceiling": format(ceiling, "f"),
-        "deposit_potential_usd_floor": format(floor, "f"),
+        "deposit_potential_usd_ceiling": bounds["ceiling"],
+        "deposit_potential_usd_floor": bounds["floor"],
         "deposit_valued_lamports": quantity,
         "deposit_price_used": True,
         "deposit_valuation_reason": None,
@@ -804,10 +847,9 @@ def value_deposit_potential(message_sha256: str, transport, now: float) -> dict:
         "deposit_oracle_expo": expo,
         "deposit_oracle_publish_time": sol.get("publish_time"),
         "deposit_oracle_observed_at": read.get("observed_at"),
-        "deposit_oracle_age_s": sol.get("age_s"),
         "deposit_oracle_slot": read.get("slot"),
-        "deposit_oracle_upper": sol.get("upper"),
-        "deposit_oracle_lower": format(floor_rate, "f"),
+        "deposit_oracle_upper": bounds["upper"],
+        "deposit_oracle_lower": bounds["lower"],
         "deposit_price_is_future_guarantee": False,
     }
 

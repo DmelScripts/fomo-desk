@@ -2092,6 +2092,19 @@ conn.close()
                     chain["oracle_calls"] = chain.get("oracle_calls", 0) + 1
                     mode = chain.get("oracle_mode")
                     found = _prices()(request)
+                    for item in found["body"]["result"]["value"]:
+                        item["executable"] = False
+                    if mode == "executable_true":
+                        found["body"]["result"]["value"][0]["executable"] = True
+                    elif mode == "executable_usdc":
+                        found["body"]["result"]["value"][1]["executable"] = True
+                    elif mode == "executable_missing":
+                        for item in found["body"]["result"]["value"]:
+                            item.pop("executable", None)
+                    elif mode == "executable_type":
+                        found["body"]["result"]["value"][0]["executable"] = "false"
+                    elif mode == "executable_zero":
+                        found["body"]["result"]["value"][0]["executable"] = 0
                     if mode == "malformed":
                         return {"status": 200, "body": {"result": {"context": {"slot": 466835746}, "value": [{"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": ["", "base64"]}, found["body"]["result"]["value"][1]]}}}
                     if mode == "cross_feed":
@@ -2293,14 +2306,16 @@ conn.close()
         self.assertFalse(liability["permission_from_ledger"])
         self.assertEqual(liability["liability_kind"], "potential")
         self.assertNotIn("deposit_potential_lamports", memecoin_desk.view(case_id)["snapshot"])
-        from decimal import Decimal
+        from decimal import Decimal, getcontext, localcontext
         valued = entry_supervised["execution"]
-        ceiling = Decimal(valued["deposit_potential_usd_ceiling"])
-        floor = Decimal(valued["deposit_potential_usd_floor"])
-        rate = (Decimal(valued["deposit_oracle_price"]) + Decimal(valued["deposit_oracle_conf"])) * (Decimal(10) ** valued["deposit_oracle_expo"])
-        self.assertEqual(ceiling, Decimal(liability["potential_lamports"]) * rate / Decimal(1_000_000_000))
-        self.assertGreater(ceiling, floor)
-        self.assertNotEqual(ceiling, ceiling.quantize(Decimal("0.01")))
+        priced = desk_loop.deposit_usd_bounds(
+            liability["potential_lamports"], valued["deposit_oracle_price"], valued["deposit_oracle_conf"], valued["deposit_oracle_expo"],
+        )
+        self.assertEqual(valued["deposit_potential_usd_ceiling"], priced["ceiling"])
+        self.assertEqual(valued["deposit_potential_usd_floor"], priced["floor"])
+        self.assertEqual(valued["deposit_oracle_upper"], priced["upper"])
+        self.assertEqual(valued["deposit_oracle_lower"], priced["lower"])
+        self.assertNotEqual(priced["ceiling"], format(Decimal(priced["ceiling"]).quantize(Decimal("0.01")), "f"))
         self.assertEqual(valued["deposit_valued_lamports"], liability["potential_lamports"])
         self.assertNotEqual(valued["deposit_valued_lamports"], liability["potential_lamports"] + liability["latest_observed_lamports"])
         self.assertEqual(valued["deposit_oracle_source"], "pyth_sponsored")
@@ -2343,6 +2358,11 @@ conn.close()
             ("overflow", "valuation_not_positive"),
             ("context_missing", "slot_unproven"),
             ("posted_future", "posted_slot_future"),
+            ("executable_true", "price_account_executable"),
+            ("executable_usdc", "price_account_executable"),
+            ("executable_missing", "price_account_executable"),
+            ("executable_type", "price_account_executable"),
+            ("executable_zero", "price_account_executable"),
         ):
             chain["oracle_mode"] = mode
             bad = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], transport, WHEN)
@@ -2355,6 +2375,17 @@ conn.close()
             self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["potential_lamports"], liability["potential_lamports"])
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], held_usd_at_value)
         self.assertGreater(chain.get("oracle_calls", 0), calls_before)
+        with localcontext() as low:
+            low.prec = 8
+            wide = desk_loop.deposit_usd_bounds(2**64 - 1, 2**62, 0, 0)
+            tight = desk_loop.deposit_usd_bounds(2**64 - 1, 2**63 - 1, 2**63 - 2, -12)
+        self.assertEqual(wide["ceiling"], "85070591730234615861231965839.51466496")
+        self.assertEqual(wide["floor"], wide["ceiling"])
+        self.assertEqual(getcontext().prec, 28)
+        self.assertEqual(tight["upper"], desk_loop._exact_ratio((2**63 - 1) + (2**63 - 2), 12))
+        self.assertEqual(tight["lower"], desk_loop._exact_ratio(1, 12))
+        self.assertEqual(tight["ceiling"], desk_loop._exact_ratio((2**64 - 1) * ((2**63 - 1) + (2**63 - 2)), 21))
+        self.assertEqual(tight["floor"], desk_loop._exact_ratio(2**64 - 1, 21))
         forged = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], {
             "deposit_observed": True,
             "deposit_reason": "deposit_hold_unpinned",

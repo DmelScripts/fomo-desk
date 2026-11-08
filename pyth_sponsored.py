@@ -302,6 +302,10 @@ def read_accounts(transport, now: float) -> dict:
         "age_s": None if sol.get("publish_time") is None else float(now) - sol["publish_time"],
         "usdc": {key: usdc.get(key) for key in ("valid", "fresh", "used", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
         "sol": {key: sol.get(key) for key in ("valid", "fresh", "used", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
+        "account_executable": [
+            value[0].get("executable") if isinstance(value[0], dict) else None,
+            value[1].get("executable") if isinstance(value[1], dict) else None,
+        ],
         "rpc": RPC,
     }
     _LAST = {
