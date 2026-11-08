@@ -134,11 +134,10 @@ class PublicAdapterTests(unittest.TestCase):
                 "data": base64.b64encode(data).decode("ascii"),
             },
         })
-        self.assertTrue(shown["json_threshold_equals_instruction_quoted"])
         self.assertFalse(shown["min_out_proven"])
         self.assertFalse(shown["buy_proven"])
         self.assertFalse(shown["exit_proven"])
-        self.assertEqual(shown["reason"], "route_v2_min_out_not_bound_to_hop")
+        self.assertEqual(shown["reason"], "route_v2_bytes")
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",

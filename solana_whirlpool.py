@@ -153,10 +153,12 @@ def start_tick_index(tick: int, spacing: int) -> int:
 
 
 def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]], created: set[str] | None = None) -> None:
-    """Check one Orca swap account list. route_v2's signer is the user."""
-    # Orca's swap struct is 11 accounts. A live Jupiter route_v2 had 12 remaining
-    # accounts. No published Jupiter layout says the extra one is a program-id
-    # prefix, so a longer tail is rejected rather than stripped.
+    """Check one Orca swap account list. route_v2's signer is the user.
+
+    This is the 11-account swap. Jupiter's route_v2 hop puts the Whirlpool
+    program id in front of these 11. That prefix is checked by the route
+    decoder before this function sees the list.
+    """
     if len(remaining) != 11:
         raise WhirlpoolError("whirlpool swap account count is not the published swap layout", "whirlpool_accounts_unbound")
     if keys[remaining[0]] != solana_tx.TOKEN_PROGRAM:
