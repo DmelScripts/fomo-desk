@@ -500,11 +500,63 @@ def _bind_provider_window(window: dict, order: dict, message_blockhash: str, now
     }
 
 
-def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> dict:
-    """Unsigned eligibility for one durable reservation and the exact message hash.
+def _current_deposit(transport, decoded, blockhash: str) -> dict:
+    """The deposit on this exact message. A stored preflight attempt is not read."""
+    try:
+        tip_response = transport({"method": "getSlot"})
+    except Exception:
+        return _deposit_blank(deposit_reason="deposit_transport")
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return _deposit_blank(deposit_reason="deposit_context_missing")
+    return _deposit_hold(transport, decoded, tip, blockhash)
 
-    The snapshot is not read. Signing and sending are not implemented. A failed
-    proof does not rewrite the stored message or release the hold.
+
+def _deposit_permission(deposit: dict, *, operation: str = "unimplemented") -> dict:
+    """A deposit observation is not permission to sign or send.
+
+    Unsafe, malformed, unpriced, and unpinned results all fail closed. An
+    operation label is not evidence and cannot grant permission.
+    """
+    reason = deposit.get("deposit_reason") if isinstance(deposit, dict) else None
+    ready = (
+        isinstance(deposit, dict)
+        and deposit.get("rent_bound_proven") is True
+        and deposit.get("ticket_limit_proven") is True
+        and deposit.get("allocation_proven") is True
+        and reason is None
+    )
+    label = operation if isinstance(operation, str) and operation != "" else "unimplemented"
+    return {
+        "execution_eligible": ready is True,
+        "sign": False,
+        "send": False,
+        "operation": label,
+        "operation_grants_permission": False,
+        "execution_blocker": None if ready else (reason or "deposit_unobserved"),
+        "deposit_safety_refusal": ready is not True and reason != "deposit_hold_unpinned",
+    }
+
+
+def execution_permission(case_id: str, message_sha256: str, transport, now: float, *, operation: str = "unimplemented") -> dict:
+    """Re-read the exact message. Caller flags are not accepted."""
+    gate = execution_gate(case_id, message_sha256, transport, now)
+    refused = {
+        "execution_eligible": False, "sign": False, "send": False,
+        "operation": operation if isinstance(operation, str) and operation != "" else "unimplemented",
+        "operation_grants_permission": False, "holds": True, "resend": False,
+    }
+    if gate.get("reservation_valid") is not True:
+        return gate | refused
+    return gate | _deposit_permission(gate, operation=refused["operation"]) | {"reservation_valid": True, "holds": True, "resend": False}
+
+
+def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> dict:
+    """Reservation validity for one exact message. That is not permission to sign.
+
+    The snapshot is not read. A failed proof does not rewrite the stored message
+    or release the hold. Deposit evidence is read now and is not a stored attempt.
     """
     import hashlib
     import memecoin_desk
@@ -515,6 +567,8 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
         "inclusion_window_proven": False, "height_proof": False, "gate_complete": False,
         "expire_at_enforced": False, "holds": True, "resend": False, "rewritten": False,
         "requoted": False, "live_ready": False, "internal_time_limit": None,
+        "reservation_valid": False, "execution_blocker": None,
+        "operation_grants_permission": False, "deposit_safety_refusal": False,
     }
     if not isinstance(message_sha256, str) or message_sha256 == "":
         return base | {"reason": "message_mismatch", "case_id": case_id}
@@ -580,9 +634,10 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
             "blockhash_valid": validity.get("blockhash_valid"),
         }
     height_proof = isinstance(stored_last, int) and not isinstance(stored_last, bool) and validity.get("block_height") <= stored_last
-    eligible = height_proof if router in _AGGREGATOR_ROUTERS else True
-    return base | identity | {
-        "execution_eligible": eligible, "reason": None if eligible else "height_proof_missing",
+    reservation_valid = height_proof if router in _AGGREGATOR_ROUTERS else True
+    window = {
+        "reservation_valid": reservation_valid,
+        "reason": None if reservation_valid else "height_proof_missing",
         "blockhash": embedded,
         "last_valid_block_height": stored_last, "last_valid_provenance": proof["last_valid_provenance"],
         "block_height": validity.get("block_height"), "latest_blockhash": validity.get("latest_blockhash"),
@@ -591,6 +646,10 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
         "blockhash_still_valid": True, "expire_at_enforced": isinstance(expire_at, int) and not isinstance(expire_at, bool),
         "blockhash_validity_source": "isBlockhashValid", "context_slot": validity.get("context_slot"),
     }
+    if reservation_valid is not True:
+        return base | identity | window
+    deposit = _current_deposit(transport, decoded, embedded)
+    return base | identity | window | deposit | _deposit_permission(deposit)
 
 
 def recheck_bound(case_id: str, message_sha256: str, transport, now: float) -> dict:
@@ -1294,7 +1353,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     import memecoin_desk
     import solana_tx
     gate = execution_gate(case_id, message_sha256, transport, now)
-    if gate.get("execution_eligible") is not True:
+    if gate.get("reservation_valid") is not True:
         return _preflight_report(attempted=False, reason=gate.get("reason"), holds=gate.get("holds", True), resend=False, case_id=case_id, message_sha256=message_sha256)
     rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
     proof = rows[0]
@@ -1783,7 +1842,7 @@ def _supervise_reservations(transport, now: float) -> list:
                 "simulate": False, "operation": "unimplemented", "message_sha256": proof["message_sha256"],
                 "price_freshness_proven": False, "gate_complete": False,
             }
-        if decision.get("reason") == "reservation_unknown" or decision.get("execution_eligible") is not True:
+        if decision.get("reason") == "reservation_unknown" or decision.get("reservation_valid") is not True:
             preflight = _preflight_report(attempted=False, reason=decision.get("reason"), holds=True, resend=False)
         else:
             try:
