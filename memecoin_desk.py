@@ -210,7 +210,7 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     return _advance(row, "analyst_passed", "analyst", evidence, snap)
 
 
-def protect(case_id: str) -> dict:
+def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None) -> dict:
     """Persist the stop and the 12/12 trail before an entry can become eligible."""
     row = _case(case_id)
     if row is None or row["stage"] != "analyst_passed":
@@ -232,7 +232,10 @@ def protect(case_id: str) -> dict:
         "trail_breakeven_guaranteed": False,
         "entry_price_usd": format(price, "f"),
         "ticket_usd": format(TICKET, "f"),
-        "reserved_usd": format(TICKET, "f"),
+        "notional_usd": format(_notional(canonical_pool, quote), "f") if _notional(canonical_pool, quote) is not None else None,
+        "deposit_usd": format(_deposit(canonical_pool, quote), "f") if _deposit(canonical_pool, quote) is not None else None,
+        "reserved_usd": format(TICKET, "f") if _deposit(canonical_pool, quote) is not None else None,
+        "reserved_includes_deposit": _deposit(canonical_pool, quote) is not None,
         "fee_cap_usd": format(MAX_FEE, "f"),
         "live_ready": False,
         "send": False,
@@ -242,7 +245,11 @@ def protect(case_id: str) -> dict:
         "trail_arm_price_usd": snap["trail_arm_price_usd"],
         "trail_floor_if_armed_at_threshold": snap["trail_floor_if_armed_at_threshold"],
         "trail_breakeven_guaranteed": False,
+        "deposit_usd": snap.get("deposit_usd"),
+        "reserved_includes_deposit": snap.get("reserved_includes_deposit"),
     }
+    if snap.get("reserved_includes_deposit") is not True:
+        return {"ok": False, "reason": "deposit_unpriced", "case_id": row["id"], "stage": row["stage"], "mint": row["mint"], "send": False, "live_ready": False}
     moment = time.time()
 
     def work(conn):
@@ -372,10 +379,18 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         "loss_stop_blocks_exit": False,
     }
     if action != "hold":
-        proceeds = (TICKET * price / entry)
+        notional = _money(snap.get("notional_usd")) or TICKET
+        proceeds = (notional * price / entry)
+        entry_fee = _money(snap["fill"]["fee_usd"])
         exit_fee = _money(snap["route"]["fee_usd"])
-        realized = proceeds - TICKET - exit_fee - exit_fee
-        snap["exit"] = {"proceeds_usd": format(proceeds, "f"), "fee_usd": format(exit_fee, "f"), "realized_pnl": format(realized, "f"), "fee_counted_once": True}
+        realized = proceeds - notional - entry_fee - exit_fee
+        snap["exit"] = {
+            "proceeds_usd": format(proceeds, "f"),
+            "entry_fee_usd": format(entry_fee, "f"),
+            "exit_fee_usd": format(exit_fee, "f"),
+            "realized_pnl": format(realized, "f"),
+            "fee_counted_once": True,
+        }
         snap["realized_pnl"] = format(realized, "f")
         snap["reserved_usd"] = "0.00"
         evidence = evidence | snap["exit"]
@@ -523,11 +538,34 @@ def _snapshot(row) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _deposit(canonical_pool, quote) -> Decimal | None:
+    if not isinstance(canonical_pool, (bytes, bytearray)) or not isinstance(quote, dict):
+        return None
+    if quote.get("usable") is not True or quote.get("origin") not in {"test_harness", "hermes"}:
+        return None
+    import jupiter_route_v2
+    import usdc_valuation
+    sol_micro = jupiter_route_v2.sol_micro_from_pool(canonical_pool)
+    if sol_micro is None:
+        return None
+    micro = jupiter_route_v2.lamports_to_micro_usdc(1_488_440 * 2, sol_micro)
+    return None if micro is None else usdc_valuation.usd_ceiling(micro, quote)
+
+
+def _notional(canonical_pool, quote) -> Decimal | None:
+    deposit = _deposit(canonical_pool, quote)
+    if deposit is None or deposit >= TICKET:
+        return None
+    return TICKET - deposit
+
+
 def _log(conn, case_id, mint, stage: str, verdict: str, reason, source, evidence, moment: float) -> None:
-    conn.execute(
+    cursor = conn.execute(
         "INSERT INTO memecoin_log (ts, case_id, mint, stage, verdict, reason, source, evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (moment, case_id, mint, stage, verdict, reason, source, json.dumps(evidence, sort_keys=True)),
     )
+    if cursor.rowcount != 1:
+        raise RuntimeError("log_failed")
 
 
 def _ensure() -> None:

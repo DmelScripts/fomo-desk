@@ -35,6 +35,7 @@ DISC = bytes([187, 100, 250, 204, 49, 196, 175, 20])
 WHIRLPOOL = 17
 FEE_DENOMINATOR = 1_000_000
 BASE_FEE_LAMPORTS = 5_000
+LAMPORTS_PER_SOL = 1_000_000_000
 # Payload bytes after the variant tag. None cannot be walked. Absent means 0.
 _PAYLOAD = {
     8: 1, 12: None, 15: None, 16: None, 17: 1, 18: 1, 21: 1, 23: 1, 24: None,
@@ -52,18 +53,32 @@ _PAYLOAD = {
 }
 
 
-def minimum_out(quoted: int, slippage_bps: int) -> int | None:
-    """Floor enforced by the instruction fields. A JSON threshold is not read."""
+def candidate_floors(quoted: int, slippage_bps: int) -> tuple[int, int] | None:
+    """Two integer readings of the same fields. The program's choice is not in the IDL.
+
+    `lower` is quoted * (10000 - bps) // 10000. `higher` subtracts the truncated
+    slippage and is 1 raw unit larger when there is a remainder. A keyless API
+    sample matched `higher`. That sample is not the deployed comparison.
+    """
     if isinstance(quoted, bool) or isinstance(slippage_bps, bool):
         return None
     if not isinstance(quoted, int) or not isinstance(slippage_bps, int):
         return None
     if quoted <= 0 or not 0 <= slippage_bps < 10_000:
         return None
-    slip = quoted * slippage_bps // 10_000
-    if slip >= quoted:
+    lower = quoted * (10_000 - slippage_bps) // 10_000
+    higher = quoted - quoted * slippage_bps // 10_000
+    if lower <= 0 or higher <= 0:
         return None
-    return quoted - slip
+    return lower, higher
+
+
+def minimum_out(quoted: int, slippage_bps: int) -> int | None:
+    """The lower reading. We do not claim the program uses it."""
+    floors = candidate_floors(quoted, slippage_bps)
+    if floors is None:
+        return None
+    return floors[0]
 
 
 def parse(data: bytes) -> dict:
@@ -72,9 +87,10 @@ def parse(data: bytes) -> dict:
         return refused | {"reason": "route_v2_bytes"}
     quoted = int.from_bytes(data[16:24], "little")
     slippage = int.from_bytes(data[24:26], "little")
-    floor = minimum_out(quoted, slippage)
-    if floor is None:
-        return refused | {"reason": "min_out", "quoted_out_amount": quoted, "slippage_bps": slippage}
+    floors = candidate_floors(quoted, slippage)
+    if floors is None:
+        return refused | {"reason": "min_out", "quoted_out_amount": quoted, "slippage_bps": slippage, "program_rounding_proven": False}
+    floor, api_floor = floors
     count = int.from_bytes(data[30:34], "little")
     if count != 1:
         return refused | {"reason": "route_steps", "min_out": floor}
@@ -99,6 +115,8 @@ def parse(data: bytes) -> dict:
         "platform_fee_bps": int.from_bytes(data[26:28], "little"),
         "positive_slippage_bps": int.from_bytes(data[28:30], "little"),
         "min_out": floor,
+        "api_sample_floor": api_floor,
+        "program_rounding_proven": False,
         "min_out_proven": True,
         "a_to_b": bool(data[35]) if variant == WHIRLPOOL else None,
         "bytes_consumed": True,
@@ -144,7 +162,7 @@ def network_fee(instructions: list[bytes]) -> dict:
 
 
 def whirlpool_fee(amount_in: int, fee_rate: int) -> int | None:
-    """Ceiling of the Whirlpool input fee. fee_rate is hundredths of a basis point."""
+    """Ceiling of the Whirlpool input fee, in the input mint's raw units."""
     if isinstance(amount_in, bool) or isinstance(fee_rate, bool):
         return None
     if not isinstance(amount_in, int) or not isinstance(fee_rate, int):
@@ -154,7 +172,112 @@ def whirlpool_fee(amount_in: int, fee_rate: int) -> int | None:
     return (amount_in * fee_rate + FEE_DENOMINATOR - 1) // FEE_DENOMINATOR
 
 
-def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], sol_micro_usdc: int | None, quote: dict | None) -> dict:
+def lamports_to_micro_usdc(lamports: int, micro_usdc_per_sol: int) -> int | None:
+    """Ceiling. micro_usdc_per_sol prices 1 SOL, which is 1e9 lamports, not 1e6."""
+    if isinstance(lamports, bool) or isinstance(micro_usdc_per_sol, bool):
+        return None
+    if not isinstance(lamports, int) or not isinstance(micro_usdc_per_sol, int):
+        return None
+    if lamports < 0 or micro_usdc_per_sol <= 0:
+        return None
+    return (lamports * micro_usdc_per_sol + LAMPORTS_PER_SOL - 1) // LAMPORTS_PER_SOL
+
+
+def token_raw_to_lamports(raw: int, sqrt_price: int, token_is_mint_a: bool) -> int | None:
+    """Ceiling SOL lamports for a token-denominated Whirlpool fee. Not a lamport count."""
+    if isinstance(raw, bool) or isinstance(sqrt_price, bool) or isinstance(token_is_mint_a, bool) is False and not isinstance(token_is_mint_a, bool):
+        return None
+    if not isinstance(raw, int) or not isinstance(sqrt_price, int) or not isinstance(token_is_mint_a, bool):
+        return None
+    if raw <= 0 or sqrt_price <= 0:
+        return None
+    square = sqrt_price * sqrt_price
+    if token_is_mint_a:
+        return (raw * square + (1 << 128) - 1) // (1 << 128)
+    return (raw * (1 << 128) + square - 1) // square
+
+
+def sol_micro_from_pool(pool_data: bytes) -> int | None:
+    """Micro-USDC per SOL from the canonical SOL/USDC pool bytes. A caller integer is not accepted."""
+    import solana_direct_swap
+    fields = solana_whirlpool.pool_fields(pool_data)
+    if fields is None:
+        return None
+    mints = {fields[0], fields[2]}
+    if mints != {solana_tx.NATIVE_MINT, solana_tx.USDC_MINT}:
+        return None
+    sqrt_price = solana_whirlpool.sqrt_price(pool_data)
+    if sqrt_price is None or sqrt_price <= 0:
+        return None
+    try:
+        return solana_direct_swap.marginal_micro_usdc_per_sol(sqrt_price)
+    except ValueError:
+        return None
+
+
+def _amm_bound(parsed: dict, state: dict, a_to_b: bool) -> dict:
+    """Independent Whirlpool quote. The instruction's quoted output cannot exceed it."""
+    import solana_whirlpool_quote
+    spacing = state["tick_spacing"]
+    current = state["tick_current_index"]
+    base = solana_whirlpool.start_tick_index(current, spacing)
+    step = solana_whirlpool.TICK_ARRAY_SIZE * spacing
+    starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
+    arrays = [
+        {"start_tick_index": start, "ticks": [{"initialized": False, "liquidity_net": 0} for _ in range(solana_whirlpool.TICK_ARRAY_SIZE)]}
+        for start in sorted(starts)
+    ]
+    try:
+        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, parsed["in_amount"], a_to_b, parsed["slippage_bps"], 0, 1)
+    except solana_whirlpool_quote.QuoteError:
+        return {"ok": False, "reason": "amm_quote_failed"}
+    if quoted.get("token_est_out", 0) <= 0:
+        return {"ok": False, "reason": "amm_quote_zero"}
+    if parsed["quoted_out_amount"] > quoted["token_est_out"]:
+        return {"ok": False, "reason": "quoted_above_amm"}
+    if parsed["min_out"] < quoted["token_min_out"]:
+        return {"ok": False, "reason": "min_below_amm"}
+    return {"ok": True, "est_out": quoted["token_est_out"], "min_out": quoted["token_min_out"]}
+
+
+def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote: dict | None, *, side: str, mint: str) -> dict:
+    """Read compute budget and the swap from the message. A side blob is not the fee."""
+    import base64
+    refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "message_bound": False}
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(tx_b64, validate=True))
+    except Exception:
+        return refused | {"reason": "message"}
+    if decoded.lookups:
+        return refused | {"reason": "lookup_unresolved", "message_bound": True}
+    compute = []
+    swap = None
+    for instruction in decoded.instructions:
+        program = decoded.static_keys[instruction.program_index]
+        if program == solana_tx.COMPUTE_BUDGET:
+            compute.append(bytes(instruction.data))
+        elif program == solana_jupiter.PROGRAM_ID:
+            if swap is not None:
+                return refused | {"reason": "extra_swap", "message_bound": True}
+            swap = instruction
+        else:
+            return refused | {"reason": "sibling_unverified", "message_bound": True}
+    if swap is None:
+        return refused | {"reason": "swap_missing", "message_bound": True}
+    accounts = []
+    for index in swap.account_indexes:
+        try:
+            signer, writable = decoded.account_flags(index)
+        except ValueError:
+            return refused | {"reason": "accounts", "message_bound": True}
+        accounts.append({"pubkey": decoded.static_keys[index], "isSigner": signer, "isWritable": writable})
+    return decode(
+        accounts, bytes(swap.data), side=side, mint=mint, account_data=account_data,
+        compute=compute, canonical_pool=canonical_pool, quote=quote, message_bound=True,
+    )
+
+
+def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], canonical_pool: bytes, quote: dict | None, message_bound: bool = False) -> dict:
     """One Whirlpool route_v2. SOL/USDC is recognized and is not a memecoin fill."""
     parsed = parse(data)
     result = {
@@ -173,9 +296,13 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         "combined_fee_usd_proven": False,
         "dex_fee_counted_in_input": True,
         "network_fee_added_once": True,
+        "message_bound": message_bound,
+        "program_rounding_proven": False,
         "diagnostic_sol_usdc_is_not_this_buy": False,
         "wallet": phantom_transport.REQUIRED_WALLET,
     }
+    if message_bound is not True:
+        return result | {"reason": "message_unbound", "min_out": parsed.get("min_out"), "min_out_proven": parsed.get("min_out_proven") is True}
     if parsed.get("bytes_consumed") is not True or parsed.get("hop") != "Whirlpool":
         return result | {"reason": parsed.get("reason") or "route_v2_bytes"}
     if parsed["platform_fee_bps"] != 0 or parsed["positive_slippage_bps"] != 0:
@@ -212,26 +339,44 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     if fee is None:
         return result | {"reason": "dex_fee", "min_out": parsed["min_out"], "min_out_proven": True}
     priced = network_fee(compute)
-    result["dex_fee_lamports"] = fee
+    result["dex_fee_raw"] = fee
+    result["dex_fee_unit"] = "lamports" if bound["source_mint"] == solana_tx.NATIVE_MINT else "token_raw"
     result["dex_fee_proven"] = True
     result["network_fee_proven"] = priced.get("network_fee_proven") is True
     result["network_lamports"] = priced.get("network_lamports")
     if priced.get("ok") is not True:
         return result | {"reason": priced.get("reason"), "min_out": parsed["min_out"], "min_out_proven": True}
-    if isinstance(sol_micro_usdc, bool) or not isinstance(sol_micro_usdc, int) or sol_micro_usdc <= 0 or not isinstance(quote, dict):
+    sol_micro = sol_micro_from_pool(canonical_pool) if isinstance(canonical_pool, (bytes, bytearray)) else None
+    if sol_micro is None or not isinstance(quote, dict) or quote.get("usable") is not True or quote.get("origin") not in {"test_harness", "hermes"}:
         return result | {"reason": "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
-    micro = (fee + priced["network_lamports"]) * sol_micro_usdc // 1_000_000
+    mint_a, _vault_a, mint_b, _vault_b = solana_whirlpool.pool_fields(account_data[pool][1])
+    if bound["source_mint"] == solana_tx.NATIVE_MINT:
+        dex_lamports = fee
+    else:
+        dex_lamports = token_raw_to_lamports(fee, state["sqrt_price"], mint_a == bound["source_mint"])
+    if dex_lamports is None:
+        return result | {"reason": "dex_fee_dimension", "min_out": parsed["min_out"], "min_out_proven": True}
+    micro = lamports_to_micro_usdc(dex_lamports + priced["network_lamports"], sol_micro)
+    result["dex_fee_lamports"] = dex_lamports
     ceiling = usdc_valuation.usd_ceiling(micro, quote)
-    if ceiling is None:
+    if ceiling is None or micro is None:
         return result | {"reason": quote.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
     result["combined_fee_usd"] = format(ceiling, "f")
     result["combined_fee_usd_proven"] = True
+    result["usd_live"] = quote.get("authenticated_live") is True
     if ceiling > Decimal("0.05"):
         return result | {"reason": "fee_cap", "min_out": parsed["min_out"]}
+    quoted_ok = _amm_bound(parsed, state, parsed["a_to_b"] is True)
+    if quoted_ok.get("ok") is not True:
+        return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"]}
+    result["amm_est_out"] = quoted_ok.get("est_out")
+    result["amm_min_out"] = quoted_ok.get("min_out")
     return result | {
         "ok": True,
         "reason": None,
         "decoded": True,
+        "buy_proven": side == "buy",
+        "exit_proven": side == "exit",
         "min_out": parsed["min_out"],
         "min_out_proven": True,
         "in_amount": parsed["in_amount"],
@@ -257,8 +402,9 @@ def _fixed_accounts(accounts: list[dict]) -> dict:
         return {"ok": False, "reason": "token_program"}
     cursor = 7
     if keys[cursor] != EVENT:
-        if accounts[cursor].get("isWritable") is True or accounts[cursor].get("isSigner") is True:
-            return {"ok": False, "reason": "optional_account_writable"}
+        identified = keys[cursor] == solana_jupiter.PROGRAM_ID and accounts[cursor].get("isWritable") is not True and accounts[cursor].get("isSigner") is not True
+        if not identified:
+            return {"ok": False, "reason": "unidentified_account"}
         cursor += 1
     if cursor + 1 >= len(keys) or keys[cursor] != EVENT or keys[cursor + 1] != solana_jupiter.PROGRAM_ID:
         return {"ok": False, "reason": "event_authority"}

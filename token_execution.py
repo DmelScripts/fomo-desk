@@ -14,8 +14,8 @@ USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 NATIVE = "So11111111111111111111111111111111111111112"
 DIAGNOSTIC = {SOL_USDC_POOL, USDC, NATIVE}
 
-# There is no documented strict buy decoder for a scanner mint in this process.
-DECODER = None
+# A mint alone is not a route. decode_message is the Whirlpool route_v2 decoder.
+DECODER = "jupiter_route_v2_whirlpool"
 
 REMAINING = (
     "route_v2 Whirlpool is decoded from the JUP6 IDL. The minimum is quoted_out_amount minus the instruction slippage. Other hops do not publish remaining accounts. A build without SetComputeUnitLimit cannot price the network fee.",
@@ -40,7 +40,7 @@ def supported_exit(mint: str) -> dict:
 
 
 def _decision(mint: str, side: str) -> dict:
-    reason = "unsupported_buy_route" if side == "buy" else "unsupported_exit_route"
+    reason = "message_required" if side == "buy" else "message_required"
     if not isinstance(mint, str) or not mint:
         reason = "mint"
     elif mint in DIAGNOSTIC:
@@ -57,7 +57,7 @@ def _decision(mint: str, side: str) -> dict:
         "signer_enabled": False,
         "effectful": False,
         "decoder": DECODER,
-        "jupiter_route_v2": "not_enabled",
+        "jupiter_route_v2": "message_required",
         "jupiter_swap_v2": "refused",
         "mobile_phantom_is_server_auth": False,
         "diagnostic_sol_usdc_is_not_this_buy": True,

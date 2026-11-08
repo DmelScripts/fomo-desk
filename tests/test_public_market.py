@@ -11,6 +11,7 @@ import public_market
 import solana_jupiter
 import solana_mint_read
 import solana_tx
+import solana_whirlpool
 import token_execution
 from tests.support import temp_desk_env
 
@@ -157,13 +158,20 @@ class PublicAdapterTests(unittest.TestCase):
             for name in memecoin_desk.COMPONENTS
         }
         self.assertTrue(memecoin_desk.analyze(opened["case_id"], components, now=NOW)["ok"])
-        self.assertEqual(memecoin_desk.protect(opened["case_id"])["stage"], "protected")
+        pool = solana_whirlpool.reference_pool(
+            solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
+            solana_tx.USDC_MINT, solana_tx.b58encode(b"\x12" * 32),
+            sqrt_price=5531210526019943285,
+        )
+        quote = {"usable": True, "upper": "1", "lower": "1", "origin": "test_harness"}
+        self.assertEqual(memecoin_desk.protect(opened["case_id"], pool, quote)["stage"], "protected")
         blocked = memecoin_desk.record_jupiter_block(opened["case_id"], shown)
         self.assertEqual(blocked["reason"], "jupiter_instruction_unproven")
         self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "protected")
         self.assertFalse(memecoin_desk.view(opened["case_id"])["snapshot"]["send"])
         closed = token_execution.supported_buy(MINT)
-        self.assertEqual(closed["jupiter_route_v2"], "not_enabled")
+        self.assertEqual(closed["jupiter_route_v2"], "message_required")
+        self.assertEqual(closed["decoder"], "jupiter_route_v2_whirlpool")
         self.assertEqual(closed["jupiter_swap_v2"], "refused")
         self.assertFalse(closed["mobile_phantom_is_server_auth"])
         exited = token_execution.supported_exit(MINT)

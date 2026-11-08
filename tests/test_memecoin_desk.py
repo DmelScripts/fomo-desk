@@ -1,4 +1,5 @@
 """Six-stage memecoin desk. Fixtures are not a live provider and nothing is sent."""
+import json
 import os
 import threading
 import time
@@ -10,6 +11,7 @@ import memecoin_desk
 import phantom_transport
 import raydium_cpmm
 import solana_tx
+import solana_whirlpool
 import token_execution
 from fastapi.testclient import TestClient
 from tests.support import temp_desk_env
@@ -60,6 +62,16 @@ def _components(value="70", **over):
     }
     body.update(over)
     return body
+
+
+def _protect(case_id: str):
+    pool = solana_whirlpool.reference_pool(
+        solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
+        solana_tx.USDC_MINT, solana_tx.b58encode(b"\x12" * 32),
+        sqrt_price=5531210526019943285,
+    )
+    quote = {"usable": True, "upper": "1", "lower": "1", "origin": "test_harness"}
+    return memecoin_desk.protect(case_id, pool, quote)
 
 
 def _buy(mint: str, amount: int = 1000, minimum: int = 50) -> str:
@@ -113,7 +125,7 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def _filled(self, number: int):
         case_id = self._analyzed(number)
-        protected = memecoin_desk.protect(case_id)
+        protected = _protect(case_id)
         self.assertEqual(protected["stage"], "protected", protected)
         tx = _buy(_mint(number))
         offered = memecoin_desk.offer_fixture_route(case_id, tx, amount_in=1000, minimum_out=50, fee_usd="0.05")
@@ -203,7 +215,7 @@ class MemecoinDeskTests(unittest.TestCase):
         case_id = self._analyzed(36)
         early = memecoin_desk.offer_fixture_route(case_id, _buy(_mint(36)), amount_in=1000, minimum_out=50, fee_usd="0.05")
         self.assertEqual(early["reason"], "stage")
-        protected = memecoin_desk.protect(case_id)
+        protected = _protect(case_id)
         self.assertEqual(protected["stage"], "protected")
         snap = memecoin_desk.view(case_id)["snapshot"]
         self.assertEqual(Decimal(snap["stop_price_usd"]), Decimal("0.94"))
@@ -215,7 +227,7 @@ class MemecoinDeskTests(unittest.TestCase):
         priced = memecoin_desk.offer_fixture_route(case_id, _buy(_mint(36)), amount_in=1000, minimum_out=50, fee_usd="0.0500001")
         self.assertEqual(priced["reason"], "fee_cap")
         case_id = self._analyzed(37)
-        memecoin_desk.protect(case_id)
+        _protect(case_id)
         missing = memecoin_desk.offer_fixture_route(case_id, _buy(_mint(37)), amount_in=1000, minimum_out=50, fee_usd="NaN")
         self.assertEqual(missing["reason"], "fee_unpriced")
         case_id = self._filled(38)
@@ -244,20 +256,20 @@ class MemecoinDeskTests(unittest.TestCase):
             stopped = memecoin_desk.mark(case_id, "0.01", source="fixture_price", fetched_at=NOW, now=NOW)
             self.assertEqual(stopped["action"], "stop")
         blocked = self._analyzed(43)
-        self.assertEqual(memecoin_desk.protect(blocked)["reason"], "stop_new_entries")
+        self.assertEqual(_protect(blocked)["reason"], "stop_new_entries")
         stopped = memecoin_desk.mark(live, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(stopped["action"], "stop")
         self.assertTrue(memecoin_desk.view(live)["snapshot"]["exit"]["fee_counted_once"])
 
     def test_allocation_restart_and_one_winner(self):
         for number in range(50, 61):
-            self.assertEqual(memecoin_desk.protect(self._analyzed(number))["stage"], "protected")
+            self.assertEqual(_protect(self._analyzed(number))["stage"], "protected")
         left = self._analyzed(61)
         right = self._analyzed(62)
         results = []
 
         def race(case_id):
-            results.append(memecoin_desk.protect(case_id))
+            results.append(_protect(case_id))
 
         threads = [threading.Thread(target=race, args=(case_id,)) for case_id in (left, right)]
         for thread in threads:
@@ -278,6 +290,32 @@ class MemecoinDeskTests(unittest.TestCase):
             thread.join()
         self.assertCountEqual([item["reason"] for item in raced], [None, "already_open"])
 
+    def test_a_failed_log_does_not_leave_a_pass(self):
+        original = memecoin_desk._log
+        def fail(conn, case_id, mint, stage, verdict, reason, source, evidence, moment):
+            raise RuntimeError("log_failed")
+        memecoin_desk._log = fail
+        try:
+            with self.assertRaises(RuntimeError):
+                memecoin_desk.scout(_pair(_mint(90)), now=NOW)
+        finally:
+            memecoin_desk._log = original
+        self.assertIsNone(memecoin_desk.view(_mint(90)))
+
+    def test_exit_pnl_counts_the_entry_fee_and_the_exit_fee_once_each(self):
+        case_id = self._filled(91)
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap["fill"]["fee_usd"] = "0.02"
+        snap["route"]["fee_usd"] = "0.03"
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
+        closed = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
+        self.assertEqual(closed["action"], "stop")
+        body = memecoin_desk.view(case_id)["snapshot"]["exit"]
+        notional = Decimal(memecoin_desk.view(case_id)["snapshot"]["notional_usd"])
+        proceeds = notional * Decimal("0.94")
+        self.assertEqual(Decimal(body["realized_pnl"]), proceeds - notional - Decimal("0.02") - Decimal("0.03"))
+        self.assertTrue(body["fee_counted_once"])
+
     def test_a_restart_keeps_the_fill_and_does_not_send_again(self):
         kept = self._filled(63)
         db.init_db()
@@ -295,8 +333,9 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertFalse(checked["live_ready"])
         wrong = raydium_cpmm.inspect_buy(_buy(_mint(80)), payer=phantom_transport.REQUIRED_WALLET, output_mint=_mint(80), amount_in=1001, minimum_out=50)
         self.assertEqual(wrong["reason"], "amount")
-        self.assertEqual(token_execution.supported_buy(_mint(80))["reason"], "unsupported_buy_route")
-        self.assertEqual(token_execution.supported_buy(_mint(80))["jupiter_route_v2"], "not_enabled")
+        self.assertEqual(token_execution.supported_buy(_mint(80))["reason"], "message_required")
+        self.assertEqual(token_execution.supported_buy(_mint(80))["decoder"], "jupiter_route_v2_whirlpool")
+        self.assertEqual(token_execution.supported_buy(_mint(80))["jupiter_route_v2"], "message_required")
         import server
         client = TestClient(server.app)
         client.__enter__()
