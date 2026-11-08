@@ -3746,28 +3746,6 @@ def _install_deposit_liability(conn) -> None:
         CREATE TRIGGER memecoin_deposit_observations_insert
         BEFORE INSERT ON memecoin_deposit_observations
         FOR EACH ROW
-        WHEN NEW.deposit_reason != 'deposit_hold_unpinned'
-        OR NEW.observed_lamports != NEW.rent_lamports
-        OR NEW.space != 165
-        OR NEW.context_slot IS NULL OR NEW.context_slot <= 0
-        OR NEW.rent_lamports IS NULL OR NEW.rent_lamports <= 0
-        OR NEW.account = '' OR NEW.mint = '' OR NEW.payer = ''
-        OR NEW.side NOT IN ('entry', 'exit')
-        OR EXISTS (
-            SELECT 1 FROM memecoin_deposit_observation_pin
-            WHERE message_sha256 = NEW.message_sha256
-              AND account = NEW.account
-              AND context_slot = NEW.context_slot
-              AND rent_lamports = NEW.rent_lamports
-              AND deposit_reason = NEW.deposit_reason
-        )
-        OR NOT EXISTS (
-            SELECT 1 FROM memecoin_reservations
-            WHERE message_sha256 = NEW.message_sha256
-              AND case_id = NEW.case_id
-              AND side = NEW.side
-              AND blockhash = NEW.blockhash
-        )
         BEGIN
             SELECT RAISE(ABORT, 'deposit_liability');
         END
@@ -3840,6 +3818,212 @@ def _install_deposit_liability(conn) -> None:
         ("memecoin_deposit_observation_anchor_delete", "memecoin_deposit_observation_anchor", "DELETE"),
         ("memecoin_deposit_observation_seal_update", "memecoin_deposit_observation_seal", "UPDATE"),
         ("memecoin_deposit_observation_seal_delete", "memecoin_deposit_observation_seal", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'deposit_liability');
+            END
+            """
+        )
+    _install_deposit_exact(conn)
+
+
+def _install_deposit_exact(conn) -> None:
+    """Exact decimal lamports. The signed integer table is no longer appended.
+
+    Values from 2**63 through 2**64-1 do not fit a SQLite INTEGER. The text is
+    the canonical decimal, with no leading zero. Old integer rows stay in place.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_deposit_exact (
+            id INTEGER PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            account TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            payer TEXT NOT NULL,
+            context_slot INTEGER NOT NULL,
+            rent_exact TEXT NOT NULL,
+            observed_exact TEXT NOT NULL,
+            space INTEGER NOT NULL,
+            blockhash TEXT NOT NULL,
+            deposit_reason TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE (message_sha256, account, context_slot, rent_exact, deposit_reason)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_deposit_exact_pin (
+            id INTEGER PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            account TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            payer TEXT NOT NULL,
+            context_slot INTEGER NOT NULL,
+            rent_exact TEXT NOT NULL,
+            observed_exact TEXT NOT NULL,
+            space INTEGER NOT NULL,
+            blockhash TEXT NOT NULL,
+            deposit_reason TEXT NOT NULL,
+            UNIQUE (message_sha256, account, context_slot, rent_exact, deposit_reason)
+        )
+        """
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS memecoin_deposit_exact_anchor (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE IF NOT EXISTS memecoin_deposit_exact_seal (id INTEGER PRIMARY KEY)")
+    for name in (
+        "memecoin_deposit_exact_insert",
+        "memecoin_deposit_exact_record",
+        "memecoin_deposit_exact_update",
+        "memecoin_deposit_exact_delete",
+        "memecoin_deposit_exact_pin_insert",
+        "memecoin_deposit_exact_pin_update",
+        "memecoin_deposit_exact_pin_delete",
+        "memecoin_deposit_exact_anchor_insert",
+        "memecoin_deposit_exact_anchor_update",
+        "memecoin_deposit_exact_anchor_delete",
+        "memecoin_deposit_exact_seal_update",
+        "memecoin_deposit_exact_seal_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_deposit_exact_pin (
+            id, message_sha256, case_id, side, account, mint, payer, context_slot,
+            rent_exact, observed_exact, space, blockhash, deposit_reason
+        )
+        SELECT id, message_sha256, case_id, side, account, mint, payer, context_slot,
+               rent_exact, observed_exact, space, blockhash, deposit_reason
+        FROM memecoin_deposit_exact
+        WHERE id NOT IN (SELECT id FROM memecoin_deposit_exact_pin)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_deposit_exact_anchor (id)
+        SELECT id FROM memecoin_deposit_exact_pin
+        WHERE id NOT IN (SELECT id FROM memecoin_deposit_exact_anchor)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_deposit_exact_seal (id)
+        SELECT id FROM memecoin_deposit_exact_anchor
+        WHERE id NOT IN (SELECT id FROM memecoin_deposit_exact_seal)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_deposit_exact_insert
+        BEFORE INSERT ON memecoin_deposit_exact
+        FOR EACH ROW
+        WHEN NEW.deposit_reason != 'deposit_hold_unpinned'
+        OR NEW.observed_exact != NEW.rent_exact
+        OR NEW.space != 165
+        OR NEW.context_slot IS NULL OR NEW.context_slot <= 0
+        OR NEW.account = '' OR NEW.mint = '' OR NEW.payer = ''
+        OR NEW.side NOT IN ('entry', 'exit')
+        OR length(NEW.rent_exact) < 1 OR length(NEW.rent_exact) > 20
+        OR NEW.rent_exact GLOB '*[^0-9]*'
+        OR NEW.rent_exact GLOB '0*'
+        OR (length(NEW.rent_exact) = 20 AND NEW.rent_exact > '18446744073709551615')
+        OR EXISTS (
+            SELECT 1 FROM memecoin_deposit_exact_pin
+            WHERE message_sha256 = NEW.message_sha256
+              AND account = NEW.account
+              AND context_slot = NEW.context_slot
+              AND rent_exact = NEW.rent_exact
+              AND deposit_reason = NEW.deposit_reason
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_reservations
+            WHERE message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id
+              AND side = NEW.side
+              AND blockhash = NEW.blockhash
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'deposit_liability');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_deposit_exact_record
+        AFTER INSERT ON memecoin_deposit_exact
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_deposit_exact_pin (
+                id, message_sha256, case_id, side, account, mint, payer, context_slot,
+                rent_exact, observed_exact, space, blockhash, deposit_reason
+            ) VALUES (
+                NEW.id, NEW.message_sha256, NEW.case_id, NEW.side, NEW.account, NEW.mint, NEW.payer,
+                NEW.context_slot, NEW.rent_exact, NEW.observed_exact, NEW.space, NEW.blockhash,
+                NEW.deposit_reason
+            );
+            INSERT INTO memecoin_deposit_exact_anchor (id) VALUES (NEW.id);
+            INSERT INTO memecoin_deposit_exact_seal (id) VALUES (NEW.id);
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_deposit_exact_pin_insert
+        BEFORE INSERT ON memecoin_deposit_exact_pin
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM memecoin_deposit_exact_anchor WHERE id = NEW.id)
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_deposit_exact
+            WHERE id = NEW.id
+              AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id
+              AND side = NEW.side
+              AND account = NEW.account
+              AND mint = NEW.mint
+              AND payer = NEW.payer
+              AND context_slot = NEW.context_slot
+              AND rent_exact = NEW.rent_exact
+              AND observed_exact = NEW.observed_exact
+              AND space = NEW.space
+              AND blockhash = NEW.blockhash
+              AND deposit_reason = NEW.deposit_reason
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'deposit_liability');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_deposit_exact_anchor_insert
+        BEFORE INSERT ON memecoin_deposit_exact_anchor
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM memecoin_deposit_exact_seal WHERE id = NEW.id)
+        OR NOT EXISTS (SELECT 1 FROM memecoin_deposit_exact_pin WHERE id = NEW.id)
+        BEGIN
+            SELECT RAISE(ABORT, 'deposit_liability');
+        END
+        """
+    )
+    for name, table, kind in (
+        ("memecoin_deposit_exact_update", "memecoin_deposit_exact", "UPDATE"),
+        ("memecoin_deposit_exact_delete", "memecoin_deposit_exact", "DELETE"),
+        ("memecoin_deposit_exact_pin_update", "memecoin_deposit_exact_pin", "UPDATE"),
+        ("memecoin_deposit_exact_pin_delete", "memecoin_deposit_exact_pin", "DELETE"),
+        ("memecoin_deposit_exact_anchor_update", "memecoin_deposit_exact_anchor", "UPDATE"),
+        ("memecoin_deposit_exact_anchor_delete", "memecoin_deposit_exact_anchor", "DELETE"),
+        ("memecoin_deposit_exact_seal_update", "memecoin_deposit_exact_seal", "UPDATE"),
+        ("memecoin_deposit_exact_seal_delete", "memecoin_deposit_exact_seal", "DELETE"),
     ):
         conn.execute(
             f"""

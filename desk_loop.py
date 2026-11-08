@@ -539,23 +539,70 @@ def _deposit_permission(deposit: dict, *, operation: str = "unimplemented") -> d
     }
 
 
-def deposit_liability(message_sha256: str) -> dict:
-    """Potential lamports already observed for this message. This is not a debit or a refund."""
+def _u64_text(value):
+    """Canonical decimal for 1 .. 2**64-1. A float is not a lamport amount."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 1 or value >= 2**64:
+        return None
+    return str(value)
+
+
+def _u64_parse(value):
+    if isinstance(value, bool) or isinstance(value, float):
+        return None
+    if isinstance(value, int):
+        if 1 <= value <= 2**63 - 1:
+            return value
+        return None
+    if isinstance(value, str) and value.isascii() and value.isdigit() and not value.startswith("0"):
+        if len(value) > 20:
+            return None
+        number = int(value)
+        if 1 <= number < 2**64 and str(number) == value:
+            return number
+    return None
+
+
+def _liability_rows(message_sha256: str) -> list[tuple[str, int, int]]:
+    """Account, exact lamports, and row order from both storages."""
     import db
-    import memecoin_desk
-    memecoin_desk._ensure()
-    rows = db.query(
+    found = []
+    for row in db.query(
         "SELECT account, observed_lamports, id FROM memecoin_deposit_observations WHERE message_sha256 = ? ORDER BY id",
         (message_sha256,),
-    )
+    ):
+        amount = _u64_parse(row["observed_lamports"])
+        if amount is None:
+            continue
+        found.append((row["account"], amount, int(row["id"])))
+    for row in db.query(
+        "SELECT account, observed_exact, id FROM memecoin_deposit_exact WHERE message_sha256 = ? ORDER BY id",
+        (message_sha256,),
+    ):
+        amount = _u64_parse(row["observed_exact"])
+        if amount is None:
+            continue
+        found.append((row["account"], amount, 10**12 + int(row["id"])))
+    return found
+
+
+def deposit_liability(message_sha256: str) -> dict:
+    """Potential lamports already observed for this message. This is not a debit or a refund."""
+    import memecoin_desk
+    memecoin_desk._ensure()
+    rows = _liability_rows(message_sha256)
     by_account = {}
     latest = None
-    for row in rows:
-        by_account[row["account"]] = max(by_account.get(row["account"], 0), int(row["observed_lamports"]))
-        latest = row
+    latest_order = -1
+    for account, amount, order in rows:
+        by_account[account] = max(by_account.get(account, 0), amount)
+        if order >= latest_order:
+            latest = amount
+            latest_order = order
     return {
         "potential_lamports": sum(by_account.values()) if by_account else 0,
-        "latest_observed_lamports": None if latest is None else int(latest["observed_lamports"]),
+        "latest_observed_lamports": latest,
         "observation_count": len(rows),
         "account_count": len(by_account),
         "landed_lamports": None,
@@ -568,48 +615,97 @@ def deposit_liability(message_sha256: str) -> dict:
     }
 
 
-def _persist_deposit_observation(case_id: str, proof, deposit: dict, now: float) -> dict:
-    """Record one server observation. The same proof does not add a second liability."""
+def record_deposit_liability(case_id: str, message_sha256: str, transport, now: float) -> dict:
+    """Read the frozen message and the current rent. A caller line is not an argument.
+
+    The transport has to be callable. One account read produces the observation
+    that is stored and returned. This does not call the execution gate.
+    """
+    import base64
     import db
+    import hashlib
     import memecoin_desk
     import sqlite3
-    digest = proof["message_sha256"]
-    if deposit.get("deposit_observed") is not True or deposit.get("deposit_reason") != "deposit_hold_unpinned":
-        return deposit_liability(digest)
-    lines = deposit.get("deposit_lines")
-    if not isinstance(lines, list) or not lines:
-        return deposit_liability(digest)
+    import solana_tx
+    quiet = _deposit_blank(deposit_reason="deposit_source", recorded=False)
+    if not callable(transport):
+        return quiet
+    if not isinstance(message_sha256, str) or message_sha256 == "":
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False)
     memecoin_desk._ensure()
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1 or rows[0]["case_id"] != case_id:
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False)
+    proof = rows[0]
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
+        again = hashlib.sha256(solana_tx.message_bytes(proof["message_b64"])).hexdigest()
+    except Exception:
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False)
+    if again != message_sha256 or decoded.blockhash != proof["blockhash"] or proof["side"] not in {"entry", "exit"}:
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False)
+    plan = _classic_deposit_plan(decoded)
+    hold = _current_deposit(transport, decoded, proof["blockhash"])
+    lines = hold.get("deposit_lines")
+    public = {key: value for key, value in hold.items() if key != "deposit_lines"}
+    if hold.get("deposit_observed") is not True or hold.get("deposit_reason") != "deposit_hold_unpinned":
+        return public | deposit_liability(message_sha256) | _ledger_fields(message_sha256) | {"recorded": False}
+    if plan.get("ok") is not True or not isinstance(lines, list) or not lines:
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False) | _ledger_fields(message_sha256)
+    allowed = {item["address"]: item for item in plan["creates"]}
+    checked = []
+    for line in lines:
+        if not isinstance(line, dict):
+            return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False) | _ledger_fields(message_sha256)
+        created = allowed.get(line.get("account"))
+        text = _u64_text(line.get("rent_lamports"))
+        if (
+            created is None
+            or created.get("mint") != line.get("mint")
+            or created.get("payer") != line.get("payer")
+            or created.get("space") != 165
+            or line.get("space") != 165
+            or line.get("observed_lamports") != line.get("rent_lamports")
+            or text is None
+            or not isinstance(line.get("context_slot"), int)
+            or isinstance(line.get("context_slot"), bool)
+            or line["context_slot"] <= 0
+        ):
+            return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False) | _ledger_fields(message_sha256)
+        checked.append((created, line, text))
+    if sum(int(text) for _created, _line, text in checked) != hold.get("deposit_lamports"):
+        return _deposit_blank(deposit_reason="deposit_unobserved", recorded=False) | _ledger_fields(message_sha256)
 
     def work(conn):
-        for line in lines:
-            if not isinstance(line, dict) or line.get("observed_lamports") != line.get("rent_lamports"):
-                raise ValueError("deposit_line")
-            rent = line.get("rent_lamports")
-            slot = line.get("context_slot")
-            if isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0:
-                raise ValueError("deposit_line")
-            if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0 or line.get("space") != 165:
-                raise ValueError("deposit_line")
-            existing = conn.execute(
+        for created, line, text in checked:
+            prior = conn.execute(
                 """
-                SELECT case_id FROM memecoin_deposit_observations
-                WHERE message_sha256 = ? AND account = ? AND context_slot = ? AND rent_lamports = ? AND deposit_reason = ?
+                SELECT 1 FROM memecoin_deposit_exact
+                WHERE message_sha256 = ? AND account = ? AND context_slot = ? AND rent_exact = ? AND deposit_reason = ?
                 """,
-                (digest, line.get("account"), slot, rent, "deposit_hold_unpinned"),
+                (message_sha256, created["address"], line["context_slot"], text, "deposit_hold_unpinned"),
             ).fetchone()
-            if existing is not None:
+            if prior is not None:
+                continue
+            legacy = conn.execute(
+                """
+                SELECT observed_lamports FROM memecoin_deposit_observations
+                WHERE message_sha256 = ? AND account = ? AND context_slot = ? AND deposit_reason = ?
+                """,
+                (message_sha256, created["address"], line["context_slot"], "deposit_hold_unpinned"),
+            ).fetchone()
+            if legacy is not None and _u64_text(legacy["observed_lamports"]) == text:
                 continue
             conn.execute(
                 """
-                INSERT INTO memecoin_deposit_observations (
+                INSERT INTO memecoin_deposit_exact (
                     message_sha256, case_id, side, account, mint, payer, context_slot,
-                    rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deposit_hold_unpinned', ?)
+                    rent_exact, observed_exact, space, blockhash, deposit_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 165, ?, 'deposit_hold_unpinned', ?)
                 """,
                 (
-                    digest, case_id, proof["side"], line["account"], line["mint"], line["payer"],
-                    slot, rent, rent, 165, proof["blockhash"], float(now),
+                    message_sha256, case_id, proof["side"], created["address"], created["mint"], created["payer"],
+                    line["context_slot"], text, text, proof["blockhash"], float(now),
                 ),
             )
 
@@ -618,9 +714,22 @@ def _persist_deposit_observation(case_id: str, proof, deposit: dict, now: float)
     except sqlite3.IntegrityError as exc:
         if "deposit_liability" not in str(exc):
             raise
-    except ValueError:
-        return deposit_liability(digest) | {"deposit_ledger_reason": "deposit_line"}
-    return deposit_liability(digest)
+    reported = public | _ledger_fields(message_sha256) | {"recorded": True}
+    reported["deposit_lines"] = None
+    return reported
+
+
+def _ledger_fields(message_sha256: str) -> dict:
+    ledger = deposit_liability(message_sha256)
+    return {
+        "deposit_potential_lamports": ledger["potential_lamports"],
+        "deposit_latest_observed_lamports": ledger["latest_observed_lamports"],
+        "deposit_observation_count": ledger["observation_count"],
+        "deposit_landed_lamports": None,
+        "deposit_refunded_lamports": None,
+        "deposit_funds_spent": False,
+        "deposit_permission_from_ledger": False,
+    }
 
 
 def execution_permission(case_id: str, message_sha256: str, transport, now: float, *, operation: str = "unimplemented") -> dict:
@@ -732,17 +841,8 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     }
     if reservation_valid is not True:
         return base | identity | window
-    deposit = _current_deposit(transport, decoded, embedded)
-    ledger = _persist_deposit_observation(case_id, proof, deposit, now)
-    return base | identity | window | deposit | {
-        "deposit_potential_lamports": ledger["potential_lamports"],
-        "deposit_latest_observed_lamports": ledger["latest_observed_lamports"],
-        "deposit_observation_count": ledger["observation_count"],
-        "deposit_landed_lamports": None,
-        "deposit_refunded_lamports": None,
-        "deposit_funds_spent": False,
-        "deposit_permission_from_ledger": False,
-    } | _deposit_permission(deposit)
+    observed = record_deposit_liability(case_id, message_sha256, transport, now)
+    return base | identity | window | observed | _deposit_permission(observed)
 
 
 def recheck_bound(case_id: str, message_sha256: str, transport, now: float) -> dict:
@@ -1479,7 +1579,13 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
         return _preflight_report(reason="simulation_context_missing", case_id=case_id, message_sha256=message_sha256)
     pool_fee = _reserved_pool_fee(transport, proof, decoded, tip)
-    deposit = _deposit_hold(transport, decoded, tip, proof["blockhash"])
+    deposit = {
+        key: gate[key] for key in (
+            "deposit_observed", "deposit_lamports", "deposit_space", "deposit_account_count",
+            "deposit_rent_each", "deposit_principal_lamports", "deposit_refund_credited",
+            "deposit_counts_as_fee", "preexisting_close_refused", "deposit_reason", "rent_bound_proven",
+        ) if key in gate
+    }
     fee_quote = _fee_for_message(transport, solana_tx.message_bytes(encoded), tip) if decoded.required_signatures == 1 else {
         "fee_for_message_observed": False, "fee_for_message_lamports": None,
         "charged_fee_proven": False, "fee_for_message_reason": "extra_signer",
