@@ -480,32 +480,41 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
         owned = db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ?", (case_id,))
         return base | {"reason": "message_mismatch" if owned or rows else "reservation_proof_missing", "case_id": case_id, "message_sha256": message_sha256}
     proof = rows[0]
-    try:
-        again = hashlib.sha256(solana_tx.message_bytes(proof["message_b64"])).hexdigest()
-    except Exception:
-        return base | {"reason": "reservation_proof_missing", "case_id": case_id, "message_sha256": message_sha256, "side": proof["side"]}
-    if again != proof["message_sha256"] or again != message_sha256:
-        return base | {"reason": "message_mismatch", "case_id": case_id, "message_sha256": message_sha256, "side": proof["side"]}
-    router = proof["router"]
-    stored_hash = proof["blockhash"]
-    stored_last = proof["last_valid_block_height"]
-    expire_at = proof["expire_at"]
     identity = {
         "case_id": case_id, "message_sha256": message_sha256, "side": proof["side"],
-        "blockhash": stored_hash, "pool": proof["pool"], "intent_id": proof["intent_id"],
-        "router": router, "reservation_id": proof["message_sha256"],
+        "pool": proof["pool"], "intent_id": proof["intent_id"], "router": proof["router"],
+        "reservation_id": proof["message_sha256"],
     }
+    try:
+        import base64
+        decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
+        again = hashlib.sha256(solana_tx.message_bytes(proof["message_b64"])).hexdigest()
+    except Exception:
+        return base | identity | {"reason": "reservation_proof_malformed"}
+    embedded = decoded.blockhash
+    if again != proof["message_sha256"] or again != message_sha256 or embedded != proof["blockhash"] or proof["side"] not in {"entry", "exit"} or proof["case_id"] != case_id:
+        return base | identity | {"reason": "reservation_proof_mismatch", "blockhash": embedded}
+    router = proof["router"]
+    stored_last = proof["last_valid_block_height"]
+    expire_at = proof["expire_at"]
     if router in _AGGREGATOR_ROUTERS and (isinstance(stored_last, bool) or not isinstance(stored_last, int) or stored_last <= 0):
-        return base | identity | {"reason": "reservation_proof_missing"}
+        return base | identity | {"reason": "reservation_proof_missing", "blockhash": embedded}
     if router in _RFQ_ROUTERS and (isinstance(expire_at, bool) or not isinstance(expire_at, int) or expire_at <= 0):
-        return base | identity | {"reason": "reservation_proof_missing"}
+        return base | identity | {"reason": "reservation_proof_missing", "blockhash": embedded}
     if router not in _AGGREGATOR_ROUTERS | _RFQ_ROUTERS:
-        return base | identity | {"reason": "reservation_proof_missing"}
+        return base | identity | {"reason": "reservation_proof_missing", "blockhash": embedded}
     if proof["side"] == "exit":
         intent = memecoin_desk._matching_intent(case_id)
         if intent is None or intent["pool"] != proof["pool"] or (proof["intent_id"] not in (None, intent["id"])):
-            return base | identity | {"reason": "intent_unbound"}
-    validity = read_message_validity(transport, stored_hash, now)
+            return base | identity | {"reason": "intent_unbound", "blockhash": embedded}
+    status = db.exclusive(lambda conn: memecoin_desk._reservation_status(conn, proof))
+    if status == "consumed":
+        return base | identity | {"reason": "reservation_consumed", "blockhash": embedded, "active": False}
+    if status == "failed":
+        return base | identity | {"reason": "reservation_failed", "blockhash": embedded, "active": False}
+    if status == "unknown":
+        return base | identity | {"reason": "reservation_unknown", "blockhash": embedded, "active": True}
+    validity = read_message_validity(transport, embedded, now)
     if validity.get("ok") is not True:
         return base | identity | {"reason": validity.get("reason") or "blockhash_validity_missing", "blockhash_valid": validity.get("blockhash_valid")}
     expired = isinstance(stored_last, int) and not isinstance(stored_last, bool) and validity.get("block_height") > stored_last
@@ -519,6 +528,7 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     eligible = height_proof if router in _AGGREGATOR_ROUTERS else True
     return base | identity | {
         "execution_eligible": eligible, "reason": None if eligible else "height_proof_missing",
+        "blockhash": embedded,
         "last_valid_block_height": stored_last, "last_valid_provenance": proof["last_valid_provenance"],
         "block_height": validity.get("block_height"), "latest_blockhash": validity.get("latest_blockhash"),
         "latest_blockhash_paired": validity.get("latest_blockhash_paired") is True,
@@ -899,11 +909,15 @@ def _open_positions() -> list:
 
 
 def _durable_reservation(case_id: str, side: str):
+    """The unconsumed reservation for this side. A landed slice does not block the next one."""
     import db
     import memecoin_desk
     memecoin_desk._ensure()
     rows = db.query("SELECT * FROM memecoin_reservations WHERE case_id = ? AND side = ?", (case_id, side))
-    return rows[0] if rows else None
+    for proof in rows:
+        if db.exclusive(lambda conn, item=proof: memecoin_desk._reservation_status(conn, item)) in {"active", "unknown"}:
+            return proof
+    return None
 
 
 def _supervise_reservations(transport, now: float) -> list:
@@ -919,7 +933,23 @@ def _supervise_reservations(transport, now: float) -> list:
     except Exception:
         rows = []
     for proof in rows:
+        status = db.exclusive(lambda conn, item=proof: memecoin_desk._reservation_status(conn, item))
+        if status in {"consumed", "failed"}:
+            continue
         seen.add((proof["case_id"], proof["message_sha256"]))
+        if status == "unknown":
+            found.append({
+                "case_id": proof["case_id"], "mint": None if memecoin_desk._case(proof["case_id"]) is None else memecoin_desk._case(proof["case_id"])["mint"],
+                "side": proof["side"], "jupiter_called": False, "requoted": False, "supervised": True,
+                "message_sha256": proof["message_sha256"], "active": True,
+                "execution": {
+                    "execution_eligible": False, "reason": "reservation_unknown", "holds": True, "resend": False,
+                    "rewritten": False, "requoted": False, "sign": False, "send": False, "simulate": False,
+                    "operation": "unimplemented", "message_sha256": proof["message_sha256"],
+                    "price_freshness_proven": False, "gate_complete": False, "quote_expiry_proven": False, "active": True,
+                },
+            })
+            continue
         try:
             decision = execution_gate(proof["case_id"], proof["message_sha256"], transport, now)
         except Exception:

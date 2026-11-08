@@ -1707,6 +1707,60 @@ conn.close()
         self.assertEqual(durable["side"], "entry")
         with self.assertRaises(sqlite3.IntegrityError):
             db.execute("UPDATE memecoin_reservations SET blockhash = ? WHERE message_sha256 = ?", (chain["latest_blockhash"], digest))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT OR REPLACE INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) SELECT message_sha256, case_id, side, message_b64, router, blockhash, 9000000, last_valid_provenance, ledger, ledger_provenance, created_at FROM memecoin_reservations WHERE message_sha256 = ?",
+                (digest,),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM memecoin_reservations WHERE message_sha256 = ?", (digest,))
+        self.assertEqual(db.query("SELECT last_valid_block_height FROM memecoin_reservations WHERE message_sha256 = ?", (digest,))[0]["last_valid_block_height"], 1_000_000)
+        spare_tx, _, _ = message("buy", 1_000, chain["blockhash"])
+        spare = __import__("hashlib").sha256(solana_tx.message_bytes(spare_tx)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'spare-case', 'entry', ?, 'metis', ?, 1000200, 'jupiter_order', 'live', 'server', ?)",
+            (spare, spare_tx, chain["blockhash"], WHEN),
+        )
+        db.execute("DROP TRIGGER IF EXISTS memecoin_reservations_delete")
+        db.execute(
+            "INSERT OR REPLACE INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'spare-case', 'entry', ?, 'metis', ?, 9000000, 'jupiter_order', 'live', 'server', ?)",
+            (spare, spare_tx, chain["blockhash"], WHEN),
+        )
+        self.assertEqual(db.query("SELECT last_valid_block_height FROM memecoin_reservations WHERE message_sha256 = ?", (spare,))[0]["last_valid_block_height"], 9_000_000)
+        memecoin_desk._ensure()
+        trigger = db.query("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'memecoin_reservations_delete'")[0]["sql"]
+        self.assertIn("BEFORE DELETE", trigger)
+        self.assertNotIn("IF NOT EXISTS", trigger)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT OR REPLACE INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'spare-case', 'entry', ?, 'metis', ?, 42, 'jupiter_order', 'live', 'server', ?)",
+                (spare, spare_tx, chain["blockhash"], WHEN),
+            )
+        self.assertEqual(db.query("SELECT last_valid_block_height FROM memecoin_reservations WHERE message_sha256 = ?", (spare,))[0]["last_valid_block_height"], 9_000_000)
+        lied = message("buy", 1_000, chain["latest_blockhash"])[0]
+        lied_hash = __import__("hashlib").sha256(solana_tx.message_bytes(lied)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'lied-case', 'entry', ?, 'metis', ?, 1000000, 'jupiter_order', 'live', 'server', ?)",
+            (lied_hash, lied, chain["blockhash"], WHEN),
+        )
+        calls = []
+
+        def counting(request):
+            calls.append(request.get("method"))
+            raise AssertionError("rpc")
+
+        lied_gate = desk_loop.execution_gate("lied-case", lied_hash, counting, WHEN)
+        self.assertEqual(lied_gate["reason"], "reservation_proof_mismatch")
+        self.assertEqual(calls, [])
+        self.assertFalse(lied_gate["execution_eligible"])
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES ('spare-fail', 'spare-case', ?, 1, 1, 1, 1, 1, '0.01', 1, 'live', 'server')",
+            (spare,),
+        )
+        failed_gate = desk_loop.execution_gate("spare-case", spare, counting, WHEN)
+        self.assertEqual(failed_gate["reason"], "reservation_failed")
+        self.assertEqual(calls, [])
+        self.assertNotEqual(failed_gate["reason"], "reservation_consumed")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (original_snap, case_id))
         chain["height"] = 999_100
         again = desk_loop._screen_quote(transport, WHEN + 5, mint, evidence)
@@ -1836,8 +1890,57 @@ conn.close()
         self.assertEqual(stored["qty"], 1_000)
         self.assertEqual(stored["pool"], pool)
         self.assertEqual(stored["blockhash"], chain["blockhash"])
-        self.assertEqual(desk_loop.execution_gate(case_id, digest, transport, WHEN)["side"], "entry")
-        self.assertEqual(desk_loop.execution_gate(case_id, stored["message_sha256"], transport, WHEN)["side"], "exit")
+        self.assertEqual(db.query("SELECT side FROM memecoin_reservations WHERE message_sha256 = ?", (digest,))[0]["side"], "entry")
         self.assertNotEqual(digest, stored["message_sha256"])
+        spent = []
+
+        def counting(request):
+            method = request.get("method")
+            if method in {"isBlockhashValid", "getSlot", "getBlockHeight", "getLatestBlockhash", "getGenesisHash"}:
+                spent.append(method)
+                raise AssertionError(method)
+            return transport(request)
+
+        consumed_entry = desk_loop.execution_gate(case_id, digest, counting, WHEN)
+        self.assertEqual(consumed_entry["reason"], "reservation_consumed")
+        self.assertEqual(spent, [])
+        self.assertFalse(consumed_entry["execution_eligible"])
+        exit_hash = stored["message_sha256"]
+        self.assertEqual(desk_loop.execution_gate(case_id, exit_hash, transport, WHEN)["side"], "exit")
+        body = memecoin_desk.view(case_id)["snapshot"]
+        body.pop("inflight", None)
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
+        db.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES ('exit-slice-1', ?, ?, 2, '0.01', 400, 'live', 'server')",
+            (case_id, exit_hash),
+        )
+        consumed_exit = desk_loop.execution_gate(case_id, exit_hash, counting, WHEN)
+        self.assertEqual(consumed_exit["reason"], "reservation_consumed")
+        self.assertEqual(spent, [])
+        self.assertEqual(db.query("SELECT last_valid_block_height FROM memecoin_reservations WHERE message_sha256 = ?", (exit_hash,))[0]["last_valid_block_height"], 1_000_000)
+        chain["boosts_fail"] = True
+        quiet = desk_loop.run_supervised(counting, WHEN, rounds=1)
+        chain["boosts_fail"] = False
+        self.assertIsNotNone(quiet.get("discovery"), quiet)
+        self.assertFalse(any(item.get("message_sha256") in {digest, exit_hash} for item in quiet["discovery"]["reservations"]))
+        self.assertFalse(any(item in {"isBlockhashValid", "getBlockHeight", "getLatestBlockhash"} for item in spent))
+        chain["blockhash"] = solana_tx.b58encode(b"\x4a" * 32)
+        chain["height"] = 999_000
+        chain["side"] = "exit"
+        nxt = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        self.assertTrue(nxt.get("discovery"), nxt)
+        follow = next(item for item in nxt["discovery"]["positions"] if item.get("mint") == mint)
+        self.assertTrue(follow["quote"]["reserved"], follow)
+        self.assertEqual(follow["quote"]["amount"], 600)
+        self.assertFalse(follow["quote"]["price_freshness_proven"])
+        self.assertFalse(follow["quote"]["gate_complete"])
+        self.assertEqual(follow["execution"]["operation"], "unimplemented")
+        fresh = db.query("SELECT message_sha256, blockhash FROM memecoin_reservations WHERE case_id = ? AND side = 'exit' AND message_sha256 != ?", (case_id, exit_hash))
+        self.assertEqual(len(fresh), 1)
+        self.assertNotEqual(fresh[0]["message_sha256"], exit_hash)
+        self.assertEqual(fresh[0]["blockhash"], chain["blockhash"])
+        self.assertNotEqual(fresh[0]["blockhash"], chain["latest_blockhash"])
+        self.assertEqual(desk_loop.execution_gate(case_id, exit_hash, counting, WHEN)["reason"], "reservation_consumed")
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        self.assertEqual(db.query("SELECT message_sha256 FROM memecoin_reservations WHERE message_sha256 = ?", (exit_hash,))[0]["message_sha256"], exit_hash)
         self.assertFalse(desk_loop.scheduler_status()["armed"])

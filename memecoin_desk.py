@@ -738,11 +738,14 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         if current is None or current["stage"] != "protected":
             return {"ok": False, "reason": "stage", "case_id": row["id"], "send": False, "live_ready": False}
         fresh = json.loads(current["snapshot_json"])
-        stored = conn.execute("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (row["id"],)).fetchone()
-        if stored is not None:
+        priors = conn.execute("SELECT * FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (row["id"],)).fetchall()
+        for stored in priors:
             if stored["message_sha256"] == digest:
-                return _reservation_view(row["id"], reservation, idempotent=True)
-            return {"ok": False, "reason": "entry_inflight", "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False, "live_ready": False}
+                if _same_reservation(stored, case_id=row["id"], side="entry", digest=digest, chain=chain, pool=pool_key):
+                    return _reservation_view(row["id"], reservation, idempotent=True)
+                return {"ok": False, "reason": "reservation_conflict", "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False, "live_ready": False}
+            if _reservation_status(conn, stored) in {"active", "unknown"}:
+                return {"ok": False, "reason": "entry_inflight", "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False, "live_ready": False}
         existing = fresh.get("entry_inflight")
         if isinstance(existing, dict):
             if existing.get("message_sha256") == digest:
@@ -800,6 +803,8 @@ def confirm_entry(case_id: str, signature: str, now: float | None = None) -> dic
         snap["entry_inflight"]["signature"] = signature
 
         def hold(conn):
+            _ensure_conn(conn)
+            _note_unknown_signature(conn, row["id"], inflight.get("message_sha256"), signature, moment)
             conn.execute(
                 "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'protected'",
                 (json.dumps(snap, sort_keys=True), moment, row["id"]),
@@ -1042,11 +1047,14 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             if fresh.get("inflight"):
                 return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
             return {"ok": False, "reason": "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing"), "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False}
-        stored = conn.execute("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'exit'", (row["id"],)).fetchone()
-        if stored is not None:
+        priors = conn.execute("SELECT * FROM memecoin_reservations WHERE case_id = ? AND side = 'exit'", (row["id"],)).fetchall()
+        for stored in priors:
             if stored["message_sha256"] == digest:
-                return {"ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest, "idempotent": True, "resend": False, "rewritten": False, "send": False, "quote_expiry_proven": False, "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True}
-            return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
+                if _same_reservation(stored, case_id=row["id"], side="exit", digest=digest, chain=chain, pool=pool_key):
+                    return {"ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest, "idempotent": True, "resend": False, "rewritten": False, "send": False, "quote_expiry_proven": False, "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True}
+                return {"ok": False, "reason": "reservation_conflict", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
+            if _reservation_status(conn, stored) in {"active", "unknown"}:
+                return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
         if fresh.get("inflight"):
             return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
         remaining = fresh.get("remaining_raw")
@@ -1156,6 +1164,8 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
         snap["inflight"]["signature"] = signature
 
         def hold(conn):
+            _ensure_conn(conn)
+            _note_unknown_signature(conn, row["id"], inflight.get("message_sha256"), signature, moment)
             conn.execute(
                 "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = ?",
                 (json.dumps(snap, sort_keys=True), moment, row["id"], row["stage"]),
@@ -2777,7 +2787,18 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS memecoin_reservations_case_side ON memecoin_reservations(case_id, side)")
+    conn.execute("DROP INDEX IF EXISTS memecoin_reservations_case_side")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservation_signatures (
+            signature TEXT PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
     _install_lineage_triggers(conn)
     _classify_ledgers(conn)
 
@@ -2830,6 +2851,56 @@ def _replace_lineage_triggers(conn) -> None:
     )
 
 
+def _reservation_status(conn, proof) -> str:
+    """Receipts decide the reservation. The snapshot does not."""
+    if proof["side"] == "entry":
+        receipt = conn.execute(
+            "SELECT failed FROM memecoin_entry_receipts WHERE case_id = ? AND message_sha256 = ?",
+            (proof["case_id"], proof["message_sha256"]),
+        ).fetchone()
+        if receipt is not None:
+            return "consumed" if receipt["failed"] == 0 else "failed"
+    else:
+        receipt = conn.execute(
+            "SELECT signature FROM memecoin_exit_receipts WHERE case_id = ? AND message_sha256 = ?",
+            (proof["case_id"], proof["message_sha256"]),
+        ).fetchone()
+        if receipt is not None:
+            return "consumed"
+    note = conn.execute(
+        "SELECT kind FROM memecoin_reservation_signatures WHERE message_sha256 = ? AND case_id = ?",
+        (proof["message_sha256"], proof["case_id"]),
+    ).fetchone()
+    if note is not None:
+        return "unknown"
+    return "active"
+
+
+def _same_reservation(existing, *, case_id: str, side: str, digest: str, chain, pool) -> bool:
+    if existing["case_id"] != case_id or existing["side"] != side or existing["message_sha256"] != digest:
+        return False
+    if existing["blockhash"] != (None if not isinstance(chain, dict) else chain.get("blockhash")):
+        return False
+    if existing["router"] != (None if not isinstance(chain, dict) else chain.get("router")):
+        return False
+    if existing["pool"] != pool:
+        return False
+    if existing["last_valid_block_height"] != (None if not isinstance(chain, dict) else chain.get("last_valid_block_height")):
+        return False
+    if existing["expire_at"] != (None if not isinstance(chain, dict) else chain.get("expire_at")):
+        return False
+    return True
+
+
+def _note_unknown_signature(conn, case_id: str, message_sha256: str, signature: str, moment: float) -> None:
+    if not isinstance(signature, str) or signature == "" or not isinstance(message_sha256, str):
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO memecoin_reservation_signatures (signature, message_sha256, case_id, kind, created_at) VALUES (?, ?, ?, 'unknown', ?)",
+        (signature, message_sha256, case_id, moment),
+    )
+
+
 def _store_reservation(conn, *, case_id: str, side: str, message_b64: str, digest: str, chain, pool, intent_id, ledger: str, moment: float) -> None:
     """Write the proof once. The snapshot copy is not this record."""
     if not isinstance(chain, dict) or chain.get("bind_ok") is not True:
@@ -2875,6 +2946,48 @@ def _replace_reservation_triggers(conn) -> None:
         """
         CREATE TRIGGER memecoin_reservations_immutable
         BEFORE UPDATE ON memecoin_reservations
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_delete")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservations_delete
+        BEFORE DELETE ON memecoin_reservations
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_signatures_insert")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_signatures_insert
+        BEFORE INSERT ON memecoin_reservation_signatures
+        FOR EACH ROW
+        WHEN NEW.kind != 'unknown' OR NEW.signature IS NULL OR NEW.message_sha256 IS NULL OR NEW.case_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_signature');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_signatures_update")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_signatures_update
+        BEFORE UPDATE ON memecoin_reservation_signatures
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_signatures_delete")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_signatures_delete
+        BEFORE DELETE ON memecoin_reservation_signatures
         BEGIN
             SELECT RAISE(ABORT, 'reservation_immutable');
         END
