@@ -99,7 +99,7 @@ def capability(reason: str, *, called: bool, http_status=None) -> dict:
     if http_status == 402:
         transport = "credit_limited"
     request_schema = "not_sent"
-    if called and reason in {"method_refused", "tool_refused", "body_refused", "host_refused"}:
+    if reason in {"method_refused", "tool_refused", "body_refused", "host_refused"}:
         request_schema = "rejected"
     elif called:
         request_schema = "documented"
@@ -121,10 +121,24 @@ def this_process_has_key() -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def canonical_mint(value) -> bool:
+    """A Solana address is canonical base58 of exactly 32 bytes. Curve membership is not required."""
+    if isinstance(value, bool) or not isinstance(value, str) or any(char.isspace() for char in value):
+        return False
+    try:
+        import solana_tx
+        raw = solana_tx.b58decode(value, 32)
+    except ValueError:
+        return False
+    return solana_tx.b58encode(raw) == value
+
+
 def request_for(tool: str, mint: str) -> dict:
     """The documented call. The bearer value is attached by the transport wrapper, not this dict."""
     if tool not in TOOLS:
         raise ValueError("tool")
+    if not canonical_mint(mint):
+        raise ValueError("mint")
     return {
         "method": "POST",
         "url": URL + tool,
@@ -223,6 +237,8 @@ def read_mint(mint: str, transport) -> dict:
         return public | {"ok": False, "reason": "stalkchain_credentials_missing", "capability": capability("stalkchain_credentials_missing", called=False)}
     if transport is None:
         return public | {"ok": False, "reason": "stalkchain_transport_missing", "capability": capability("stalkchain_transport_missing", called=False)}
+    if not canonical_mint(mint):
+        return public | {"ok": False, "reason": "body_refused", "called": False, "capability": capability("body_refused", called=False)}
     secret = os.environ.get(ENV, "").strip()
     named = {}
     for tool in TOOLS:

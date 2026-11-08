@@ -351,6 +351,36 @@ class DeskLoopTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 desk_loop.public_reader(bad)
+        observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
+        generated = solana_tx.b58encode(b"\x11" * 32)
+        self.assertTrue(stalkchain_adapter.canonical_mint(observed))
+        self.assertTrue(stalkchain_adapter.canonical_mint(generated))
+        posts.clear()
+        for token in (observed, generated):
+            desk_loop.public_reader({"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": token}})
+        self.assertEqual([json.loads(item.data.decode())["token"] for item in posts], [observed, generated])
+        rejected = [
+            True,
+            32,
+            " " * 44,
+            observed + " ",
+            " " + observed,
+            "0OIl" * 11,
+            observed[:-1] + "\uFF21",
+            solana_tx.b58encode(b"\x02" * 31),
+            solana_tx.b58encode(b"\x02" * 33),
+        ]
+        for token in rejected:
+            with self.assertRaises(RuntimeError) as caught:
+                desk_loop.public_reader({"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": token}})
+            self.assertEqual(str(caught.exception), "body_refused", token)
+        self.assertEqual(len(posts), 2)
+        skipped = stalkchain_adapter.read_mint(solana_tx.b58encode(b"\x02" * 31), desk_loop.public_reader)
+        self.assertEqual(skipped["reason"], "body_refused")
+        self.assertFalse(skipped["called"])
+        self.assertEqual(skipped["capability"]["transport"], "request_rejected")
+        self.assertEqual(skipped["capability"]["request_schema"], "rejected")
+        self.assertEqual(len(posts), 2)
         self.assertFalse(desk_loop.scheduler_status()["armed"])
 
     def test_observed_mcp_measurements_do_not_become_a_pass(self):

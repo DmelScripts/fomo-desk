@@ -1208,7 +1208,7 @@ def public_reader(request: dict) -> dict:
             raise RuntimeError("tool_refused")
         body = request.get("json")
         token = body.get("token") if isinstance(body, dict) else None
-        if not isinstance(body, dict) or set(body) != {"token"} or not isinstance(token, str) or not 32 <= len(token) <= 64:
+        if not isinstance(body, dict) or set(body) != {"token"} or not stalkchain_adapter.canonical_mint(token):
             raise RuntimeError("body_refused")
         secret = os.environ.get(stalkchain_adapter.ENV, "").strip()
         if secret == "":
