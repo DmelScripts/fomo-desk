@@ -2581,6 +2581,233 @@ def _halt_entries() -> None:
         return
 
 
+def _typed_chain_err(err) -> str | None:
+    import json
+    if err is None:
+        return "null"
+    if isinstance(err, str) and err != "":
+        return json.dumps(err)
+    if isinstance(err, dict):
+        return json.dumps(err, sort_keys=True, separators=(",", ":"))
+    return None
+
+
+def _typed_chain_fee(fee) -> int | None:
+    if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0 or fee >= 2**63:
+        return None
+    return fee
+
+
+def _lamport_balances_typed(meta: dict, count: int) -> bool:
+    for name in ("preBalances", "postBalances"):
+        values = meta.get(name)
+        if not isinstance(values, list) or len(values) != count:
+            return False
+        if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in values):
+            return False
+    return True
+
+
+def _token_balances_typed(meta: dict, count: int) -> bool:
+    for name in ("preTokenBalances", "postTokenBalances"):
+        if name not in meta:
+            continue
+        rows = meta.get(name)
+        if not isinstance(rows, list):
+            return False
+        for item in rows:
+            if not isinstance(item, dict):
+                return False
+            index = item.get("accountIndex")
+            mint = item.get("mint")
+            owner = item.get("owner")
+            amount = item.get("uiTokenAmount")
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= count:
+                return False
+            if not isinstance(mint, str) or mint == "" or not isinstance(owner, str) or owner == "":
+                return False
+            if not isinstance(amount, dict):
+                return False
+            raw = amount.get("amount")
+            decimals = amount.get("decimals")
+            if not isinstance(raw, str) or not raw.isdigit():
+                return False
+            if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 18:
+                return False
+    return True
+
+
+def _classic_layout(decoded) -> bool:
+    import solana_jupiter
+    import solana_tx
+    if decoded.version != "legacy" or decoded.lookups or decoded.required_signatures != 1:
+        return False
+    allowed = {solana_tx.COMPUTE_BUDGET, solana_tx.SYSTEM_PROGRAM, solana_tx.ASSOCIATED_TOKEN, solana_tx.TOKEN_PROGRAM, solana_jupiter.PROGRAM_ID}
+    try:
+        programs = [decoded.static_keys[item.program_index] for item in decoded.instructions]
+    except (IndexError, TypeError):
+        return False
+    return all(program in allowed for program in programs)
+
+
+def _landed_hold(case_id: str, signature, reason: str, now: float) -> dict:
+    import db
+    import memecoin_desk
+    if isinstance(case_id, str) and case_id != "":
+        def note(conn):
+            conn.execute(
+                "INSERT INTO memecoin_landed_notes (signature, case_id, reason, created_at) VALUES (?, ?, ?, ?)",
+                (signature if isinstance(signature, str) else None, case_id, reason, float(now)),
+            )
+        try:
+            memecoin_desk._ensure()
+            db.exclusive(note)
+        except Exception:
+            pass
+    return {
+        "ok": False, "recorded": False, "idempotent": False, "reason": reason,
+        "holds": True, "resend": False, "send": False, "sign": False, "live_ready": False,
+        "fill_proven": False, "deposit_proven": False, "refund_proven": False, "quantity_proven": False,
+        "execution_eligible": False, "ticket_limit_proven": False, "allocation_proven": False, "rent_bound_proven": False,
+    }
+
+
+def record_landed_evidence(case_id: str, signature: str, transport, now: float) -> dict:
+    """Bind one known signature to its reserved message. A caller receipt is not an argument.
+
+    This records the landed transaction and its network fee. It does not record a
+    fill, release a hold, or authorize a close. Token quantity stays unproven until
+    the mint decimals and the reserved token account are proven from account bytes.
+    """
+    import base64
+    import db
+    import hashlib
+    import memecoin_desk
+    import phantom_transport
+    import solana_inspect
+    import solana_tx
+    import sqlite3
+    if not callable(transport):
+        return _landed_hold(case_id if isinstance(case_id, str) else "", signature, "receipt_source", now)
+    if not isinstance(signature, str) or signature == "" or not isinstance(case_id, str) or case_id == "":
+        return _landed_hold(case_id if isinstance(case_id, str) else "", signature, "receipt_unknown", now)
+    memecoin_desk._ensure()
+    try:
+        genesis = transport({"method": "getGenesisHash"})
+        landed = transport({"method": "getTransaction", "signature": signature, "commitment": "confirmed"})
+        status = transport({"method": "getSignatureStatuses", "signature": signature, "commitment": "confirmed"})
+    except Exception:
+        return _landed_hold(case_id, signature, "receipt_unknown", now)
+    genesis_body = genesis.get("body") if isinstance(genesis, dict) else None
+    if not isinstance(genesis_body, dict) or genesis_body.get("result") != solana_inspect.MAINNET_GENESIS:
+        return _landed_hold(case_id, signature, "genesis", now)
+    pulled = landed.get("body") if isinstance(landed, dict) and landed.get("status") == 200 else None
+    result = pulled.get("result") if isinstance(pulled, dict) else None
+    if result is None:
+        return _landed_hold(case_id, signature, "receipt_unconfirmed", now)
+    if not isinstance(result, dict) or not isinstance(result.get("meta"), dict):
+        return _landed_hold(case_id, signature, "receipt_unknown", now)
+    meta = result["meta"]
+    err = _typed_chain_err(meta.get("err"))
+    fee = _typed_chain_fee(meta.get("fee"))
+    encoded = result.get("transaction")
+    slot = result.get("slot")
+    if err is None or fee is None or not isinstance(encoded, list) or not encoded or not isinstance(encoded[0], str):
+        return _landed_hold(case_id, signature, "receipt_unproven", now)
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return _landed_hold(case_id, signature, "slot_unproven", now)
+    status_body = status.get("body") if isinstance(status, dict) and status.get("status") == 200 else None
+    status_result = status_body.get("result") if isinstance(status_body, dict) else None
+    values = status_result.get("value") if isinstance(status_result, dict) else None
+    state = values[0] if isinstance(values, list) and len(values) == 1 else None
+    if not isinstance(state, dict):
+        return _landed_hold(case_id, signature, "receipt_unproven", now)
+    confirmation = state.get("confirmationStatus")
+    if confirmation not in {"confirmed", "finalized"} or state.get("slot") != slot or _typed_chain_err(state.get("err")) != err:
+        return _landed_hold(case_id, signature, "receipt_unproven", now)
+    try:
+        tx = encoded[0]
+        if solana_tx.first_signature(tx) != signature:
+            return _landed_hold(case_id, signature, "signature_mismatch", now)
+        message = solana_tx.message_bytes(tx)
+        digest = hashlib.sha256(message).hexdigest()
+        decoded = solana_tx.decode_transaction(base64.b64decode(tx, validate=True))
+    except Exception:
+        return _landed_hold(case_id, signature, "receipt_unproven", now)
+    if decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
+        return _landed_hold(case_id, signature, "wallet_unbound", now)
+    proofs = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?", (digest, case_id))
+    if len(proofs) != 1:
+        return _landed_hold(case_id, signature, "message_mismatch", now)
+    proof = proofs[0]
+    try:
+        stored = solana_tx.message_bytes(proof["message_b64"])
+    except Exception:
+        return _landed_hold(case_id, signature, "message_mismatch", now)
+    if stored != message or proof["side"] not in {"entry", "exit"}:
+        return _landed_hold(case_id, signature, "message_mismatch", now)
+    if not _lamport_balances_typed(meta, len(decoded.static_keys)) or not _token_balances_typed(meta, len(decoded.static_keys)):
+        return _landed_hold(case_id, signature, "balances_untyped", now)
+    layout = 1 if _classic_layout(decoded) else 0
+    existing = db.query(
+        "SELECT * FROM memecoin_landed_evidence WHERE signature = ? AND message_sha256 = ?",
+        (signature, digest),
+    )
+    if existing:
+        row = existing[0]
+        same = (
+            row["case_id"] == case_id and row["side"] == proof["side"] and row["slot"] == slot
+            and row["confirmation_status"] == confirmation and row["network_fee_lamports"] == fee
+            and row["meta_err"] == err and row["wallet"] == decoded.fee_payer and row["layout_supported"] == layout
+        )
+        if not same:
+            return _landed_hold(case_id, signature, "evidence_conflict", now)
+        return {
+            "ok": True, "recorded": True, "idempotent": True, "reason": None, "signature": signature,
+            "case_id": case_id, "side": proof["side"], "message_sha256": digest, "slot": slot,
+            "confirmation_status": confirmation, "network_fee_lamports": fee, "meta_err": err,
+            "layout_supported": layout == 1, "fill_proven": False, "deposit_proven": False,
+            "refund_proven": False, "quantity_proven": False, "holds": True, "resend": False,
+            "send": False, "sign": False, "live_ready": False, "execution_eligible": False,
+            "ticket_limit_proven": False, "allocation_proven": False, "rent_bound_proven": False,
+            "failed": err != "null",
+        }
+
+    def work(conn):
+        conn.execute(
+            """
+            INSERT INTO memecoin_landed_evidence (
+                signature, message_sha256, case_id, side, slot, confirmation_status,
+                network_fee_lamports, meta_err, wallet, layout_supported, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (signature, digest, case_id, proof["side"], slot, confirmation, fee, err, decoded.fee_payer, layout, float(now)),
+        )
+        conn.execute(
+            "INSERT INTO memecoin_landed_notes (signature, case_id, reason, created_at) VALUES (?, ?, 'landed', ?)",
+            (signature, case_id, float(now)),
+        )
+
+    try:
+        db.exclusive(work)
+    except sqlite3.IntegrityError as exc:
+        if "landed_evidence" not in str(exc):
+            raise
+        again = db.query("SELECT signature FROM memecoin_landed_evidence WHERE signature = ? AND message_sha256 = ?", (signature, digest))
+        if not again:
+            return _landed_hold(case_id, signature, "evidence_conflict", now)
+    return {
+        "ok": True, "recorded": True, "idempotent": False, "reason": None, "signature": signature,
+        "case_id": case_id, "side": proof["side"], "message_sha256": digest, "slot": slot,
+        "confirmation_status": confirmation, "network_fee_lamports": fee, "meta_err": err,
+        "layout_supported": layout == 1, "fill_proven": False, "deposit_proven": False,
+        "refund_proven": False, "quantity_proven": False, "holds": True, "resend": False,
+        "send": False, "sign": False, "live_ready": False, "execution_eligible": False,
+        "ticket_limit_proven": False, "allocation_proven": False, "rent_bound_proven": False,
+        "failed": err != "null", "next_missing": "mint_decimals_and_reserved_token_account",
+    }
+
+
 def read_transaction(signature: str) -> dict:
     """Confirmed mainnet getTransaction plus the genesis hash. This is the only confirm reader."""
     import memecoin_exit

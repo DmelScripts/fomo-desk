@@ -4102,6 +4102,124 @@ conn.close()
         self.assertEqual(final["gross_lamports"], gross + 7)
         self.assertEqual({row["id"]: row["snapshot_json"] for row in db.query("SELECT id, snapshot_json FROM memecoin_cases")}, holds)
 
+    def test_a_known_signature_records_landed_evidence_without_a_fill(self):
+        import base64
+        import hashlib
+        import sqlite3
+        import threading
+        import db
+        import phantom_transport
+        import solana_inspect
+        wallet = phantom_transport.REQUIRED_WALLET
+        block = solana_tx.b58encode(b"\x44" * 32)
+        unsigned = solana_tx.encode_legacy(
+            wallet, [wallet, solana_tx.SYSTEM_PROGRAM], 1,
+            [(1, [0], (2).to_bytes(4, "little") + (1).to_bytes(8, "little"))], block,
+        )
+        raw = bytearray(base64.b64decode(unsigned))
+        raw[1:65] = b"\x11" * 64
+        tx = base64.b64encode(bytes(raw)).decode("ascii")
+        signature = solana_tx.first_signature(tx)
+        digest = hashlib.sha256(solana_tx.message_bytes(tx)).hexdigest()
+        memecoin_desk._ensure()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('landed-case', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (solana_tx.b58encode(b"\x21" * 32), '{"reserved_usd": "8.00", "remaining_raw": 1000}'),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'landed-case', 'entry', ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+            (digest, tx, block),
+        )
+        snap = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'landed-case'")[0]["snapshot_json"]
+        chain = {"err": None, "fee": 5000, "tx": tx, "status": "finalized", "slot": 9}
+
+        def transport(request):
+            method = request.get("method")
+            if method == "getGenesisHash":
+                return {"status": 200, "body": {"result": solana_inspect.MAINNET_GENESIS}}
+            if method == "getTransaction":
+                if chain["tx"] is None:
+                    return {"status": 200, "body": {"result": None}}
+                return {"status": 200, "body": {"result": {
+                    "slot": chain["slot"],
+                    "transaction": [chain["tx"], "base64"],
+                    "meta": {
+                        "err": chain["err"], "fee": chain["fee"],
+                        "preBalances": [20, 0], "postBalances": [14, 0],
+                    },
+                }}}
+            if method == "getSignatureStatuses":
+                return {"status": 200, "body": {"result": {"context": {"slot": chain["slot"]}, "value": [{
+                    "slot": chain["slot"], "err": chain["err"], "confirmationStatus": chain["status"],
+                }]}}}
+            raise AssertionError(method)
+
+        booked = desk_loop.record_landed_evidence("landed-case", signature, transport, 1)
+        self.assertTrue(booked["recorded"], booked)
+        self.assertFalse(booked["fill_proven"])
+        self.assertFalse(booked["quantity_proven"])
+        self.assertFalse(booked["deposit_proven"])
+        self.assertFalse(booked["refund_proven"])
+        self.assertTrue(booked["holds"])
+        self.assertFalse(booked["resend"])
+        self.assertFalse(booked["execution_eligible"])
+        self.assertEqual(booked["network_fee_lamports"], 5000)
+        self.assertEqual(booked["meta_err"], "null")
+        self.assertTrue(booked["layout_supported"])
+        self.assertEqual(booked["next_missing"], "mint_decimals_and_reserved_token_account")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'landed-case'")[0]["snapshot_json"], snap)
+        again = desk_loop.record_landed_evidence("landed-case", signature, transport, 2)
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_evidence")[0]["n"], 1)
+        chain["err"] = {"InstructionError": [0, {"Custom": 1}]}
+        chain["fee"] = 7000
+        conflict = desk_loop.record_landed_evidence("landed-case", signature, transport, 3)
+        self.assertEqual(conflict["reason"], "evidence_conflict")
+        self.assertFalse(conflict["resend"])
+        self.assertEqual(db.query("SELECT network_fee_lamports, meta_err FROM memecoin_landed_evidence")[0]["network_fee_lamports"], 5000)
+        other = bytearray(raw)
+        other[1:65] = b"\x22" * 64
+        other_tx = base64.b64encode(bytes(other)).decode("ascii")
+        other_sig = solana_tx.first_signature(other_tx)
+        chain["tx"] = other_tx
+        chain["err"] = {"InstructionError": [0, "Custom"]}
+        chain["fee"] = 900
+        failed = desk_loop.record_landed_evidence("landed-case", other_sig, transport, 4)
+        self.assertTrue(failed["recorded"], failed)
+        self.assertTrue(failed["failed"])
+        self.assertFalse(failed["fill_proven"])
+        self.assertEqual(failed["network_fee_lamports"], 900)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        chain["tx"] = None
+        missing = desk_loop.record_landed_evidence("landed-case", signature, transport, 5)
+        self.assertEqual(missing["reason"], "receipt_unconfirmed")
+        self.assertTrue(missing["holds"])
+        self.assertFalse(missing["resend"])
+        self.assertFalse(missing["recorded"])
+        refused = desk_loop.record_landed_evidence("landed-case", signature, {"method": "getTransaction"}, 6)
+        self.assertEqual(refused["reason"], "receipt_source")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_landed_evidence SET network_fee_lamports = 1 WHERE signature = ?", (signature,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_landed_notes SET reason = 'landed' WHERE reason = 'receipt_unconfirmed'")
+        memecoin_desk._ensure()
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_evidence")[0]["n"], 2)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'landed-case'")[0]["snapshot_json"], snap)
+
+        def once():
+            desk_loop.record_landed_evidence("landed-case", signature, transport, 7)
+
+        chain["tx"] = tx
+        chain["err"] = None
+        chain["fee"] = 5000
+        threads = [threading.Thread(target=once) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_evidence WHERE signature = ?", (signature,))[0]["n"], 1)
+
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
         import shutil
         import sqlite3

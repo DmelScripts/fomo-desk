@@ -3484,6 +3484,7 @@ def _replace_reservation_triggers(conn) -> None:
     )
     _install_preflight_audit(conn)
     _install_deposit_liability(conn)
+    _install_landed_evidence(conn)
 
 
 def _install_preflight_audit(conn) -> None:
@@ -4032,6 +4033,236 @@ def _install_deposit_exact(conn) -> None:
             FOR EACH ROW
             BEGIN
                 SELECT RAISE(ABORT, 'deposit_liability');
+            END
+            """
+        )
+
+
+def _install_landed_evidence(conn) -> None:
+    """Append-only landed-transaction evidence. A note cannot be promoted in place.
+
+    The authoritative row is a new insert and only for a typed chain proof.
+    It cannot carry a fill, a deposit, or a refund.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_evidence (
+            signature TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            slot INTEGER NOT NULL,
+            confirmation_status TEXT NOT NULL,
+            network_fee_lamports INTEGER NOT NULL,
+            meta_err TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            layout_supported INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (signature, message_sha256)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_evidence_pin (
+            signature TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            slot INTEGER NOT NULL,
+            confirmation_status TEXT NOT NULL,
+            network_fee_lamports INTEGER NOT NULL,
+            meta_err TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            layout_supported INTEGER NOT NULL,
+            PRIMARY KEY (signature, message_sha256)
+        )
+        """
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS memecoin_landed_evidence_anchor (signature TEXT NOT NULL, message_sha256 TEXT NOT NULL, PRIMARY KEY (signature, message_sha256))")
+    conn.execute("CREATE TABLE IF NOT EXISTS memecoin_landed_evidence_seal (signature TEXT NOT NULL, message_sha256 TEXT NOT NULL, PRIMARY KEY (signature, message_sha256))")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_notes (
+            id INTEGER PRIMARY KEY,
+            signature TEXT,
+            case_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS memecoin_landed_note_pin (id INTEGER PRIMARY KEY)")
+    for name in (
+        "memecoin_landed_evidence_insert", "memecoin_landed_evidence_record",
+        "memecoin_landed_evidence_update", "memecoin_landed_evidence_delete",
+        "memecoin_landed_evidence_pin_insert", "memecoin_landed_evidence_pin_update", "memecoin_landed_evidence_pin_delete",
+        "memecoin_landed_evidence_anchor_insert", "memecoin_landed_evidence_anchor_update", "memecoin_landed_evidence_anchor_delete",
+        "memecoin_landed_evidence_seal_update", "memecoin_landed_evidence_seal_delete",
+        "memecoin_landed_notes_insert", "memecoin_landed_notes_record",
+        "memecoin_landed_notes_update", "memecoin_landed_notes_delete",
+        "memecoin_landed_note_pin_update", "memecoin_landed_note_pin_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_evidence_pin (
+            signature, message_sha256, case_id, side, slot, confirmation_status,
+            network_fee_lamports, meta_err, wallet, layout_supported
+        )
+        SELECT signature, message_sha256, case_id, side, slot, confirmation_status,
+               network_fee_lamports, meta_err, wallet, layout_supported
+        FROM memecoin_landed_evidence
+        WHERE (signature, message_sha256) NOT IN (SELECT signature, message_sha256 FROM memecoin_landed_evidence_pin)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_evidence_anchor (signature, message_sha256)
+        SELECT signature, message_sha256 FROM memecoin_landed_evidence_pin
+        WHERE (signature, message_sha256) NOT IN (SELECT signature, message_sha256 FROM memecoin_landed_evidence_anchor)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_evidence_seal (signature, message_sha256)
+        SELECT signature, message_sha256 FROM memecoin_landed_evidence_anchor
+        WHERE (signature, message_sha256) NOT IN (SELECT signature, message_sha256 FROM memecoin_landed_evidence_seal)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_note_pin (id)
+        SELECT id FROM memecoin_landed_notes
+        WHERE id NOT IN (SELECT id FROM memecoin_landed_note_pin)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_evidence_insert
+        BEFORE INSERT ON memecoin_landed_evidence
+        FOR EACH ROW
+        WHEN NEW.side NOT IN ('entry', 'exit')
+        OR NEW.confirmation_status NOT IN ('confirmed', 'finalized')
+        OR NEW.network_fee_lamports < 0
+        OR NEW.layout_supported NOT IN (0, 1)
+        OR NEW.wallet = '' OR NEW.meta_err = ''
+        OR NEW.slot <= 0
+        OR EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence_pin
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_reservations
+            WHERE message_sha256 = NEW.message_sha256 AND case_id = NEW.case_id AND side = NEW.side
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_evidence');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_evidence_record
+        AFTER INSERT ON memecoin_landed_evidence
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_landed_evidence_pin (
+                signature, message_sha256, case_id, side, slot, confirmation_status,
+                network_fee_lamports, meta_err, wallet, layout_supported
+            ) VALUES (
+                NEW.signature, NEW.message_sha256, NEW.case_id, NEW.side, NEW.slot, NEW.confirmation_status,
+                NEW.network_fee_lamports, NEW.meta_err, NEW.wallet, NEW.layout_supported
+            );
+            INSERT INTO memecoin_landed_evidence_anchor (signature, message_sha256) VALUES (NEW.signature, NEW.message_sha256);
+            INSERT INTO memecoin_landed_evidence_seal (signature, message_sha256) VALUES (NEW.signature, NEW.message_sha256);
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_evidence_pin_insert
+        BEFORE INSERT ON memecoin_landed_evidence_pin
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence_anchor
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id AND side = NEW.side AND slot = NEW.slot
+              AND confirmation_status = NEW.confirmation_status
+              AND network_fee_lamports = NEW.network_fee_lamports
+              AND meta_err = NEW.meta_err AND wallet = NEW.wallet
+              AND layout_supported = NEW.layout_supported
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_evidence');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_evidence_anchor_insert
+        BEFORE INSERT ON memecoin_landed_evidence_anchor
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence_seal
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence_pin
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_evidence');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_notes_insert
+        BEFORE INSERT ON memecoin_landed_notes
+        FOR EACH ROW
+        WHEN NEW.reason = '' OR NEW.case_id = ''
+        OR (NEW.id > 0 AND EXISTS (SELECT 1 FROM memecoin_landed_note_pin WHERE id = NEW.id))
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_evidence');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_notes_record
+        AFTER INSERT ON memecoin_landed_notes
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_landed_note_pin (id) VALUES (NEW.id);
+        END
+        """
+    )
+    for name, table, kind in (
+        ("memecoin_landed_evidence_update", "memecoin_landed_evidence", "UPDATE"),
+        ("memecoin_landed_evidence_delete", "memecoin_landed_evidence", "DELETE"),
+        ("memecoin_landed_evidence_pin_update", "memecoin_landed_evidence_pin", "UPDATE"),
+        ("memecoin_landed_evidence_pin_delete", "memecoin_landed_evidence_pin", "DELETE"),
+        ("memecoin_landed_evidence_anchor_update", "memecoin_landed_evidence_anchor", "UPDATE"),
+        ("memecoin_landed_evidence_anchor_delete", "memecoin_landed_evidence_anchor", "DELETE"),
+        ("memecoin_landed_evidence_seal_update", "memecoin_landed_evidence_seal", "UPDATE"),
+        ("memecoin_landed_evidence_seal_delete", "memecoin_landed_evidence_seal", "DELETE"),
+        ("memecoin_landed_notes_update", "memecoin_landed_notes", "UPDATE"),
+        ("memecoin_landed_notes_delete", "memecoin_landed_notes", "DELETE"),
+        ("memecoin_landed_note_pin_update", "memecoin_landed_note_pin", "UPDATE"),
+        ("memecoin_landed_note_pin_delete", "memecoin_landed_note_pin", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'landed_evidence');
             END
             """
         )
