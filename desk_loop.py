@@ -539,6 +539,90 @@ def _deposit_permission(deposit: dict, *, operation: str = "unimplemented") -> d
     }
 
 
+def deposit_liability(message_sha256: str) -> dict:
+    """Potential lamports already observed for this message. This is not a debit or a refund."""
+    import db
+    import memecoin_desk
+    memecoin_desk._ensure()
+    rows = db.query(
+        "SELECT account, observed_lamports, id FROM memecoin_deposit_observations WHERE message_sha256 = ? ORDER BY id",
+        (message_sha256,),
+    )
+    by_account = {}
+    latest = None
+    for row in rows:
+        by_account[row["account"]] = max(by_account.get(row["account"], 0), int(row["observed_lamports"]))
+        latest = row
+    return {
+        "potential_lamports": sum(by_account.values()) if by_account else 0,
+        "latest_observed_lamports": None if latest is None else int(latest["observed_lamports"]),
+        "observation_count": len(rows),
+        "account_count": len(by_account),
+        "landed_lamports": None,
+        "refunded_lamports": None,
+        "funds_spent": False,
+        "rent_bound_proven": False,
+        "permission_from_ledger": False,
+        "refund_credited": False,
+        "liability_kind": None if not rows else "potential",
+    }
+
+
+def _persist_deposit_observation(case_id: str, proof, deposit: dict, now: float) -> dict:
+    """Record one server observation. The same proof does not add a second liability."""
+    import db
+    import memecoin_desk
+    import sqlite3
+    digest = proof["message_sha256"]
+    if deposit.get("deposit_observed") is not True or deposit.get("deposit_reason") != "deposit_hold_unpinned":
+        return deposit_liability(digest)
+    lines = deposit.get("deposit_lines")
+    if not isinstance(lines, list) or not lines:
+        return deposit_liability(digest)
+    memecoin_desk._ensure()
+
+    def work(conn):
+        for line in lines:
+            if not isinstance(line, dict) or line.get("observed_lamports") != line.get("rent_lamports"):
+                raise ValueError("deposit_line")
+            rent = line.get("rent_lamports")
+            slot = line.get("context_slot")
+            if isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0:
+                raise ValueError("deposit_line")
+            if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0 or line.get("space") != 165:
+                raise ValueError("deposit_line")
+            existing = conn.execute(
+                """
+                SELECT case_id FROM memecoin_deposit_observations
+                WHERE message_sha256 = ? AND account = ? AND context_slot = ? AND rent_lamports = ? AND deposit_reason = ?
+                """,
+                (digest, line.get("account"), slot, rent, "deposit_hold_unpinned"),
+            ).fetchone()
+            if existing is not None:
+                continue
+            conn.execute(
+                """
+                INSERT INTO memecoin_deposit_observations (
+                    message_sha256, case_id, side, account, mint, payer, context_slot,
+                    rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'deposit_hold_unpinned', ?)
+                """,
+                (
+                    digest, case_id, proof["side"], line["account"], line["mint"], line["payer"],
+                    slot, rent, rent, 165, proof["blockhash"], float(now),
+                ),
+            )
+
+    try:
+        db.exclusive(work)
+    except sqlite3.IntegrityError as exc:
+        if "deposit_liability" not in str(exc):
+            raise
+    except ValueError:
+        return deposit_liability(digest) | {"deposit_ledger_reason": "deposit_line"}
+    return deposit_liability(digest)
+
+
 def execution_permission(case_id: str, message_sha256: str, transport, now: float, *, operation: str = "unimplemented") -> dict:
     """Re-read the exact message. Caller flags are not accepted."""
     gate = execution_gate(case_id, message_sha256, transport, now)
@@ -649,7 +733,16 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     if reservation_valid is not True:
         return base | identity | window
     deposit = _current_deposit(transport, decoded, embedded)
-    return base | identity | window | deposit | _deposit_permission(deposit)
+    ledger = _persist_deposit_observation(case_id, proof, deposit, now)
+    return base | identity | window | deposit | {
+        "deposit_potential_lamports": ledger["potential_lamports"],
+        "deposit_latest_observed_lamports": ledger["latest_observed_lamports"],
+        "deposit_observation_count": ledger["observation_count"],
+        "deposit_landed_lamports": None,
+        "deposit_refunded_lamports": None,
+        "deposit_funds_spent": False,
+        "deposit_permission_from_ledger": False,
+    } | _deposit_permission(deposit)
 
 
 def recheck_bound(case_id: str, message_sha256: str, transport, now: float) -> dict:
@@ -1215,7 +1308,9 @@ def _read_deposit_account(transport, address: str, mint: str, wallet: str, tip: 
         context_reason = _deposit_context(result, tip, blockhash)
         if context_reason is not None:
             return {"kind": "context", "reason": context_reason}
-        return _deposit_view(result.get("value"), mint, wallet)
+        viewed = _deposit_view(result.get("value"), mint, wallet)
+        viewed["slot"] = result["context"]["slot"]
+        return viewed
 
     first = once()
     if first["kind"] in {"transport", "context"}:
@@ -1223,7 +1318,7 @@ def _read_deposit_account(transport, address: str, mint: str, wallet: str, tip: 
     second = once()
     if second["kind"] in {"transport", "context"}:
         return second
-    if first["kind"] != second["kind"]:
+    if first["kind"] != second["kind"] or first.get("slot") != second.get("slot"):
         return {"kind": "race"}
     if first["kind"] == "present" and first.get("raw") != second.get("raw"):
         return {"kind": "race"}
@@ -1278,6 +1373,7 @@ def _deposit_hold(transport, decoded, tip: int, blockhash: str) -> dict:
     held = 0
     missing = 0
     rent_each = None
+    lines = []
     for created in plan["creates"]:
         found = view(created["address"], created["mint"])
         if found["kind"] == "transport":
@@ -1303,6 +1399,15 @@ def _deposit_hold(transport, decoded, tip: int, blockhash: str) -> dict:
                 rent_each = priced["lamports"]
             held += rent_each
             missing += 1
+            lines.append({
+                "account": created["address"],
+                "mint": created["mint"],
+                "payer": created["payer"],
+                "context_slot": found["slot"],
+                "rent_lamports": rent_each,
+                "observed_lamports": rent_each,
+                "space": created["space"],
+            })
         elif found["kind"] != "present":
             return _deposit_blank(deposit_reason="deposit_account_malformed", deposit_principal_lamports=plan["principal"])
     for address in plan["closes"]:
@@ -1337,6 +1442,7 @@ def _deposit_hold(transport, decoded, tip: int, blockhash: str) -> dict:
         preexisting_close_refused=False,
         deposit_reason="deposit_hold_unpinned",
         rent_bound_proven=False,
+        deposit_lines=lines,
     )
 
 

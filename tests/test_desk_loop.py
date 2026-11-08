@@ -2261,6 +2261,111 @@ conn.close()
         self.assertEqual(enabled["execution_blocker"], "deposit_hold_unpinned")
         self.assertTrue(enabled["holds"])
         self.assertFalse(enabled["resend"])
+        liability = desk_loop.deposit_liability(entry_supervised["message_sha256"])
+        self.assertEqual(liability["potential_lamports"], chain["rent_lamports"])
+        self.assertEqual(liability["observation_count"], 1)
+        self.assertEqual(liability["latest_observed_lamports"], chain["rent_lamports"])
+        self.assertIsNone(liability["landed_lamports"])
+        self.assertIsNone(liability["refunded_lamports"])
+        self.assertFalse(liability["funds_spent"])
+        self.assertFalse(liability["refund_credited"])
+        self.assertFalse(liability["rent_bound_proven"])
+        self.assertFalse(liability["permission_from_ledger"])
+        self.assertEqual(liability["liability_kind"], "potential")
+        self.assertNotIn("deposit_potential_lamports", memecoin_desk.view(case_id)["snapshot"])
+        repeated = desk_loop.execution_gate(case_id, entry_supervised["message_sha256"], transport, WHEN)
+        self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["observation_count"], 1)
+        self.assertEqual(repeated["deposit_potential_lamports"], chain["rent_lamports"])
+        self.assertFalse(repeated["execution_eligible"])
+        self.assertFalse(repeated["rent_bound_proven"])
+        self.assertFalse(repeated["deposit_permission_from_ledger"])
+        self.assertIsNone(repeated["deposit_landed_lamports"])
+        self.assertIsNone(repeated["deposit_refunded_lamports"])
+        counts = []
+
+        def observe():
+            desk_loop.execution_gate(case_id, entry_supervised["message_sha256"], transport, WHEN)
+            counts.append(desk_loop.deposit_liability(entry_supervised["message_sha256"])["observation_count"])
+
+        threads = [threading.Thread(target=observe) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(counts, [1, 1, 1, 1])
+        self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["potential_lamports"], chain["rent_lamports"])
+        chain["rent_lamports"] = 1_400_000
+        lowered = desk_loop.execution_gate(case_id, entry_supervised["message_sha256"], transport, WHEN)
+        chain["rent_lamports"] = 1_500_000
+        lowered_book = desk_loop.deposit_liability(entry_supervised["message_sha256"])
+        self.assertEqual(lowered_book["observation_count"], 2)
+        self.assertEqual(lowered_book["potential_lamports"], 1_500_000)
+        self.assertEqual(lowered_book["latest_observed_lamports"], 1_400_000)
+        self.assertFalse(lowered["execution_eligible"])
+        self.assertFalse(lowered["deposit_permission_from_ledger"])
+        self.assertIsNone(lowered["deposit_landed_lamports"])
+        self.assertFalse(lowered["deposit_funds_spent"])
+        held_usd_now = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], held_usd_now)
+        memecoin_desk._ensure()
+        self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["observation_count"], 2)
+        self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["potential_lamports"], 1_500_000)
+        proof_row = db.query("SELECT id, case_id, observed_lamports, account FROM memecoin_deposit_observations ORDER BY id LIMIT 1")[0]
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_deposit_observations SET observed_lamports = 1 WHERE id = ?", (proof_row["id"],))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_deposit_observations SET case_id = 'other-case' WHERE id = ?", (proof_row["id"],))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM memecoin_deposit_observations WHERE id = ?", (proof_row["id"],))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                """
+                INSERT OR REPLACE INTO memecoin_deposit_observations (
+                    id, message_sha256, case_id, side, account, mint, payer, context_slot,
+                    rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
+                )
+                SELECT id, message_sha256, case_id, side, account, mint, payer, context_slot,
+                       rent_lamports, 1, space, blockhash, deposit_reason, created_at
+                FROM memecoin_deposit_observations WHERE id = ?
+                """,
+                (proof_row["id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                """
+                INSERT INTO memecoin_deposit_observations (
+                    message_sha256, case_id, side, account, mint, payer, context_slot,
+                    rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
+                )
+                SELECT message_sha256, 'other-case', side, account, mint, payer, context_slot + 1,
+                       rent_lamports, rent_lamports, space, blockhash, deposit_reason, created_at
+                FROM memecoin_deposit_observations WHERE id = ?
+                """,
+                (proof_row["id"],),
+            )
+        raw_liability = sqlite3.connect(os.path.join(os.environ["DESK_DATA_DIR"], "desk.db"))
+        try:
+            self.assertEqual(raw_liability.execute("PRAGMA recursive_triggers").fetchone()[0], 0)
+            with self.assertRaises(sqlite3.IntegrityError):
+                raw_liability.execute(
+                    """
+                    INSERT OR REPLACE INTO memecoin_deposit_observations (
+                        id, message_sha256, case_id, side, account, mint, payer, context_slot,
+                        rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
+                    )
+                    SELECT id, message_sha256, case_id, side, account, mint, payer, context_slot,
+                           rent_lamports, 1, space, blockhash, deposit_reason, created_at
+                    FROM memecoin_deposit_observations WHERE id = ?
+                    """,
+                    (proof_row["id"],),
+                )
+                raw_liability.commit()
+        finally:
+            raw_liability.close()
+        self.assertEqual(db.query("SELECT observed_lamports FROM memecoin_deposit_observations WHERE id = ?", (proof_row["id"],))[0]["observed_lamports"], chain["rent_lamports"])
+        self.assertEqual(db.query("SELECT case_id FROM memecoin_deposit_observations WHERE id = ?", (proof_row["id"],))[0]["case_id"], case_id)
+        self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["potential_lamports"], chain["rent_lamports"])
+        self.assertFalse(desk_loop.execution_gate(case_id, entry_supervised["message_sha256"], transport, WHEN)["execution_eligible"])
         stored_snap = memecoin_desk.view(case_id)["snapshot"]
         self.assertNotIn("deposit_lamports", stored_snap)
         self.assertNotIn("deposit_observed", stored_snap.get("entry_inflight", {}))
@@ -3603,6 +3708,14 @@ conn.close()
         self.assertFalse(any(item.get("message_sha256") in {digest, exit_hash} for item in quiet["discovery"]["reservations"]))
         self.assertFalse(any(item in {"isBlockhashValid", "getBlockHeight", "getLatestBlockhash"} for item in spent))
         self.assertEqual(memecoin_desk.receipt_remaining(case_id)["remaining"], 600)
+        booked_liability = desk_loop.deposit_liability(digest)
+        self.assertEqual(booked_liability["potential_lamports"], chain["rent_lamports"])
+        self.assertNotEqual(booked_liability["potential_lamports"], 1_000)
+        self.assertNotEqual(booked_liability["potential_lamports"], 600)
+        self.assertIsNone(booked_liability["landed_lamports"])
+        self.assertIsNone(booked_liability["refunded_lamports"])
+        self.assertFalse(booked_liability["funds_spent"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
         db.execute(
             "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES ('paper-sized-exit', ?, ?, 2, '0.01', 99999, 'paper', 'legacy_default')",
             (case_id, exit_hash),
