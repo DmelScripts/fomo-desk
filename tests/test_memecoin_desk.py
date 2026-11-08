@@ -122,6 +122,30 @@ def _components(value="70", **over):
     return body
 
 
+def _arm_recorded_exit(case_id: str) -> None:
+    """Give a confirmed fill the intent row reserve_exit now requires. Snapshot flags are not enough."""
+    rows = db.query(
+        "SELECT signature, qty, cost_basis_lamports, pool FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0 AND ledger = 'live'",
+        (case_id,),
+    )
+    if not rows or not isinstance(rows[0]["pool"], str) or db.query("SELECT id FROM memecoin_risk_intents WHERE case_id = ?", (case_id,)):
+        return
+    snap = memecoin_desk.view(case_id)["snapshot"]
+    db.execute(
+        """
+        INSERT INTO memecoin_risk_intents (
+            id, case_id, ledger, entry_signature, action, pool, slot, mark_price_usd,
+            entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals,
+            evidence_json, created_at
+        ) VALUES (?, ?, 'live', ?, 'stop', ?, 1, '1', ?, '0.94', ?, ?, 6, '{}', ?)
+        """,
+        (
+            "intent-" + case_id, case_id, rows[0]["signature"], rows[0]["pool"],
+            snap.get("entry_price_usd") or "1", rows[0]["qty"], rows[0]["cost_basis_lamports"], NOW,
+        ),
+    )
+
+
 def _protect(case_id: str):
     pool = solana_whirlpool.reference_pool(
         solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
@@ -163,6 +187,14 @@ class MemecoinDeskTests(unittest.TestCase):
         db.init_db()
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         db.set_setting("agents_enabled", "0", "test")
+        original = memecoin_desk.reserve_exit
+
+        def reserve_exit(case_id, *args, **kwargs):
+            _arm_recorded_exit(case_id)
+            return original(case_id, *args, **kwargs)
+
+        memecoin_desk.reserve_exit = reserve_exit
+        self.addCleanup(lambda: setattr(memecoin_desk, "reserve_exit", original))
 
     def _open(self, number: int, **pair):
         found = memecoin_desk.scout(_pair(_mint(number), **pair), now=NOW)

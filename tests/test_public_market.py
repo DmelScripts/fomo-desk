@@ -55,6 +55,15 @@ class PublicAdapterTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
         db.init_db()
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        from tests.test_memecoin_desk import _arm_recorded_exit
+        original = memecoin_desk.reserve_exit
+
+        def reserve_exit(case_id, *args, **kwargs):
+            _arm_recorded_exit(case_id)
+            return original(case_id, *args, **kwargs)
+
+        memecoin_desk.reserve_exit = reserve_exit
+        self.addCleanup(lambda: setattr(memecoin_desk, "reserve_exit", original))
 
     def test_parser_keeps_market_cap_and_does_not_prove_the_rest(self):
         parsed = dexscreener_public.parse_pairs(_pair(), MINT, NOW)
