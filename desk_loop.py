@@ -605,6 +605,12 @@ def _preflight_report(**extra) -> dict:
         "rent_bound_proven": False, "rent_unproven": True, "ticket_limit_proven": False,
         "account_validated": False, "observed_lamport_delta": None,
         "network_fee_arithmetic_match": False, "rent_constant_arithmetic_match": False,
+        "instruction_slippage_within_cap": False, "instruction_slippage_bps": None,
+        "quoted_out_amount": None, "candidate_min_out": None, "api_sample_min_out": None,
+        "min_out_bound_proven": False, "program_rounding_proven": False,
+        "network_fee_instruction_proven": False, "network_lamports_instruction": None,
+        "dex_fee_proven": False, "combined_fee_usd_proven": False, "allocation_proven": False,
+        "lookup_unresolved": False, "instruction_unproven": True, "economic_reason": None,
         "sig_verify": False, "replace_recent_blockhash": False, "message_rewritten": False,
         "holds": True, "resend": False, "operation": "unimplemented", "reason": None,
     }
@@ -686,6 +692,91 @@ def _simulation_result(response, tip: int) -> dict:
     return {"ok": True, "reason": None, "slot": slot, "accounts": value.get("accounts"), "units": units, "err_clear": True}
 
 
+def _exact_message_economics(decoded) -> dict:
+    """Slippage and network fee read from the reserved message bytes.
+
+    The route instruction carries slippage_bps and a quoted output. That is a
+    bound inside the transaction, not a simulation result and not a fresh price.
+    The two integer floors agree only when the division has no remainder. The
+    IDL does not name which floor the program compares, so a disagreement stays
+    unproven. The compute-budget fee is not the DEX fee, the deposit, or USD.
+    """
+    import jupiter_route_v2
+    import owner_slippage
+    import solana_jupiter
+    import solana_tx
+    blank = {
+        "instruction_slippage_within_cap": False, "instruction_slippage_bps": None,
+        "quoted_out_amount": None, "candidate_min_out": None, "api_sample_min_out": None,
+        "min_out_bound_proven": False, "program_rounding_proven": False,
+        "slippage_proven_by_simulation": False, "price_freshness_proven": False,
+        "execution_guarantee": False, "network_fee_instruction_proven": False,
+        "network_lamports_instruction": None, "dex_fee_proven": False,
+        "combined_fee_usd_proven": False, "ticket_limit_proven": False,
+        "allocation_proven": False, "rent_bound_proven": False,
+        "lookup_unresolved": False, "instruction_unproven": True,
+        "economic_reason": "instruction_unproven",
+    }
+    if getattr(decoded, "lookups", None):
+        return blank | {"lookup_unresolved": True, "economic_reason": "lookup_unresolved"}
+    known = set(solana_tx.ALLOWED_PROGRAMS) | {solana_jupiter.PROGRAM_ID}
+    jupiter = []
+    compute = []
+    for item in decoded.instructions:
+        try:
+            program = decoded.static_keys[item.program_index]
+        except (IndexError, TypeError):
+            return blank
+        if program not in known:
+            return blank
+        if program == solana_jupiter.PROGRAM_ID:
+            jupiter.append(item)
+        elif program == solana_tx.COMPUTE_BUDGET:
+            compute.append(bytes(item.data))
+    if len(jupiter) != 1:
+        return blank
+    priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
+    network_ok = priced.get("ok") is True and priced.get("network_fee_proven") is True
+    parsed = jupiter_route_v2.parse(bytes(jupiter[0].data))
+    found = blank | {
+        "network_fee_instruction_proven": network_ok,
+        "network_lamports_instruction": priced.get("network_lamports") if network_ok else None,
+    }
+    if parsed.get("ok") is not True or parsed.get("hop") != "Whirlpool" or parsed.get("bytes_consumed") is not True:
+        return found | {"economic_reason": parsed.get("reason") or "instruction_unproven"}
+    bps = parsed.get("slippage_bps")
+    quoted = parsed.get("quoted_out_amount")
+    floors = None
+    if not isinstance(bps, bool) and not isinstance(quoted, bool):
+        floors = jupiter_route_v2.candidate_floors(quoted, bps)
+    agreed = floors is not None and floors[0] == floors[1]
+    ceiling = owner_slippage.ceiling_bps()
+    within = (
+        ceiling == owner_slippage.BPS
+        and isinstance(bps, int) and not isinstance(bps, bool) and 0 <= bps <= owner_slippage.BPS
+        and parsed.get("platform_fee_bps") == 0 and parsed.get("positive_slippage_bps") == 0
+    )
+    if parsed.get("platform_fee_bps") != 0 or parsed.get("positive_slippage_bps") != 0:
+        reason = "platform_fee_unpriced"
+    elif isinstance(bps, int) and not isinstance(bps, bool) and bps > owner_slippage.BPS:
+        reason = "slippage_exceeds"
+    elif ceiling != owner_slippage.BPS:
+        reason = "slippage_unapproved"
+    else:
+        reason = "fee_composition_unproven"
+    return found | {
+        "instruction_unproven": False,
+        "instruction_slippage_bps": bps,
+        "instruction_slippage_within_cap": within,
+        "quoted_out_amount": quoted,
+        "candidate_min_out": None if floors is None else floors[0],
+        "api_sample_min_out": None if floors is None else floors[1],
+        "min_out_bound_proven": bool(agreed and within),
+        "program_rounding_proven": False,
+        "economic_reason": reason,
+    }
+
+
 def preflight_reserved(case_id: str, message_sha256: str, transport, now: float) -> dict:
     """Unsigned simulateTransaction of the stored message. The bytes are not replaced.
 
@@ -712,6 +803,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
         return _preflight_report(reason="reservation_proof_malformed", case_id=case_id, message_sha256=message_sha256)
     if again != message_sha256 or decoded.blockhash != proof["blockhash"] or decoded.fee_payer == "":
         return _preflight_report(reason="reservation_proof_mismatch", case_id=case_id, message_sha256=message_sha256)
+    economics = _exact_message_economics(decoded)
     tip_response = transport({"method": "getSlot"})
     tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
     tip = tip_body.get("result") if isinstance(tip_body, dict) else None
@@ -759,16 +851,21 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     # A fee-payer delta still mixes the swap, wrapped SOL, rent, and any refund.
     # Matching the network fee, or that fee plus the constant token-account rent,
     # is only arithmetic. It is not fee composition and it is not rent proof.
+    if economics.get("economic_reason") == "slippage_exceeds":
+        reason = "slippage_exceeds"
+    elif account_ok:
+        reason = "fee_composition_unproven"
+    else:
+        reason = "simulation_account_malformed"
     return _preflight_report(
         attempted=True, simulate=True, simulation_clear=True, preflight_ready=False,
-        reason="fee_composition_unproven" if account_ok else "simulation_account_malformed",
+        reason=reason,
         account_validated=account_ok, observed_lamport_delta=observed,
         network_fee_arithmetic_match=network_match, rent_constant_arithmetic_match=rent_constant,
-        fee_lamports_match=False, fee_composition_proven=False, rent_bound_proven=False, rent_unproven=True,
-        fee_usd_proven=False, slippage_proven_by_simulation=False, ticket_limit_proven=False,
+        fee_lamports_match=False, fee_composition_proven=False, rent_unproven=True, fee_usd_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
-        context_slot=parsed["slot"], lookups_resolved=False, execution_guarantee=False,
-        signature_validated=False,
+        context_slot=parsed["slot"], lookups_resolved=False, signature_validated=False,
+        **economics,
     )
 
 
