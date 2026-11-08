@@ -536,11 +536,24 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     sol = prices.get("sol") if isinstance(prices, dict) else None
     if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
         return result | {"reason": prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "pool_priced_sol": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
-    if side != "buy":
-        return result | {"reason": "token_fee_unpriced", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "exposure_cap_applies": False, "token_raw_counted_as_lamports": False, "dex_fee_unit": "token_raw", "min_out": parsed["min_out"]}
-    spend_fee = fee + priced["network_lamports"]
-    ceiling = pyth_sponsored.lamports_usd(spend_fee, sol)
-    result["dex_fee_lamports"] = fee
+    if side == "buy":
+        dex_lamports = fee
+        notional = parsed["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT * 2
+        result["exposure_unit"] = "lamports"
+    else:
+        fields = solana_whirlpool.pool_fields(account_data[pool][1])
+        if fields is None:
+            return result | {"reason": "exit_dimension", "min_out": parsed["min_out"]}
+        token_is_a = fields[0] == bound["source_mint"]
+        dex_lamports = token_raw_to_lamports(fee, state["sqrt_price"], token_is_a)
+        notional = token_raw_to_lamports(parsed["in_amount"], state["sqrt_price"], token_is_a)
+        if dex_lamports is None or notional is None:
+            return result | {"reason": "exit_dimension", "min_out": parsed["min_out"]}
+        result["exposure_unit"] = "token_notional_lamports"
+        result["token_raw_counted_as_lamports"] = False
+        result["rent_added_to_token_raw"] = False
+    result["dex_fee_lamports"] = dex_lamports
+    ceiling = pyth_sponsored.lamports_usd(dex_lamports + priced["network_lamports"], sol)
     if ceiling is None:
         return result | {"reason": "usd_unpriced", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "min_out": parsed["min_out"]}
     result["combined_fee_usd"] = format(ceiling, "f")
@@ -550,9 +563,7 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     result["pool_priced_sol"] = False
     if ceiling > Decimal("0.05"):
         return result | {"reason": "fee_cap", "min_out": parsed["min_out"]}
-    rent = solana_tx.TOKEN_ACCOUNT_RENT * 2
-    exposure = pyth_sponsored.lamports_usd(parsed["in_amount"] + rent, sol)
-    result["exposure_unit"] = "lamports"
+    exposure = pyth_sponsored.lamports_usd(notional, sol)
     result["exposure_cap_applies"] = True
     result["exposure_usd"] = None if exposure is None else format(exposure, "f")
     if exposure is None or exposure > Decimal("8.00"):

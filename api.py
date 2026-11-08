@@ -1306,17 +1306,10 @@ def memecoin_readiness(request: Request) -> JSONResponse:
 def memecoin_run(request: Request, body: dict | None = None) -> JSONResponse:
     """One invoked handoff for a mint. Caller snapshots are not this route. It is not a loop."""
     require_app_token(request)
-    parsed = _memecoin_body(body, {"mint"})
-    if not isinstance(parsed.get("mint"), str):
-        raise HTTPException(status_code=400, detail="unexpected field")
     import desk_loop
-    import public_market
-    import stalkchain_adapter
-    transport = desk_loop.FETCH if desk_loop.FETCH is not None else public_market.live_transport
-    result = desk_loop.run_once(parsed["mint"], transport, time.time(), stalkchain_adapter.post)
-    result["deployed"] = False
-    result["scheduled"] = False
-    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+    status = desk_loop.scheduler_status()
+    result = status | {"ok": False, "reason": "scheduler_unarmed", "request_body_used": False, "deployed": False}
+    return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/memecoin/scout")

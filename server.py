@@ -98,6 +98,9 @@ async def lifespan(_app: FastAPI):
     # DESK_PRICE_LOOP=0 is for a local screenshot process only. Render does not set it.
     if os.environ.get("DESK_PRICE_LOOP") != "0":
         price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
+    import desk_loop
+    if desk_loop.scheduler_status()["armed"] or desk_loop.scheduler_status()["started"]:
+        raise RuntimeError("memecoin desk scheduler is not allowed to start")
     if agents_enabled():
         from main import run_desk
         agent_task = asyncio.create_task(run_desk())

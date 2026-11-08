@@ -14,8 +14,9 @@ https://docs.pyth.network/api-reference/hermes/price-feeds
 
 from __future__ import annotations
 
-# A test may replace this. Unset, the HTTP route uses the public reader. Nothing starts a loop.
-FETCH = None
+# The scheduler is implemented and unarmed. Nothing in this process starts it.
+ARMED = False
+STARTED = False
 
 import dexscreener_public
 import memecoin_desk
@@ -23,6 +24,107 @@ import pyth_sponsored
 import solana_mint_read
 import stalkchain_adapter
 import usdc_valuation
+
+
+def scheduler_status() -> dict:
+    """The loop exists and is not started. Agents and LIVE are not turned on here."""
+    return {
+        "armed": False,
+        "started": False,
+        "server_loop": False,
+        "scheduled": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "agents_enabled": False,
+    }
+
+
+def run_discovery(transport, now: float, stalk_transport=None) -> dict:
+    """Pick one mint from the documented boost list, then hand it to the six stages.
+
+    A caller does not name the mint. The default process does not call this.
+    """
+    stopped = scheduler_status() | {"ok": False}
+    if ARMED or STARTED:
+        return stopped | {"reason": "scheduler_refusing_to_start"}
+    if transport is None:
+        return stopped | {"reason": "network_disabled", "mint": None}
+    try:
+        response = transport({"kind": "http", "url": dexscreener_public.BOOSTS_URL})
+    except Exception:
+        return stopped | {"reason": "dexscreener_transport", "mint": None}
+    if not isinstance(response, dict) or response.get("status") != 200:
+        return stopped | {"reason": "dexscreener_status", "mint": None}
+    selected = dexscreener_public.parse_boost_mint(response.get("body"))
+    if selected.get("ok") is not True:
+        return stopped | {"reason": selected.get("reason"), "mint": None, "caller_named_mint": False}
+    result = run_once(selected["mint"], transport, now, stalk_transport)
+    result["caller_named_mint"] = False
+    result["discovered_mint"] = selected["mint"]
+    result["armed"] = False
+    result["started"] = False
+    result["scheduled"] = False
+    return result
+
+
+def holder_growth(mint: str) -> dict:
+    """Growth only from this desk's own holder-count rows. One row is not a series."""
+    import db
+    conn = db.connect()
+    try:
+        _observations(conn)
+        conn.commit()
+        rows = list(conn.execute(
+            "SELECT value, fetched_at FROM memecoin_observations WHERE mint = ? AND source = ? AND metric = ? ORDER BY fetched_at",
+            (mint, "desk_holder_count", "holder_count"),
+        ))
+    finally:
+        conn.close()
+    if len(rows) < 2:
+        return {"ok": False, "reason": "holder_growth_unproven", "points": len(rows), "score_measured": False, "cross_provider": False}
+    first = Decimal_from(rows[0]["value"])
+    last = Decimal_from(rows[-1]["value"])
+    if first is None or last is None:
+        return {"ok": False, "reason": "holder_growth_unproven", "points": len(rows), "score_measured": False}
+    return {"ok": True, "reason": None, "points": len(rows), "delta": format(last - first, "f"), "score_measured": False, "cross_provider": False}
+
+
+def Decimal_from(value):
+    from decimal import Decimal, InvalidOperation
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _observations(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mint TEXT NOT NULL,
+            source TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            value TEXT NOT NULL,
+            fetched_at REAL NOT NULL
+        )
+        """
+    )
+
+
+def _observe(mint: str, source: str, metric: str, value: str, fetched_at: float) -> None:
+    import db
+
+    def work(conn):
+        _observations(conn)
+        conn.execute(
+            "INSERT INTO memecoin_observations (mint, source, metric, value, fetched_at) VALUES (?, ?, ?, ?, ?)",
+            (mint, source, metric, value, fetched_at),
+        )
+
+    db.exclusive(work)
 
 
 def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
@@ -40,6 +142,8 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     if parsed.get("ok") is not True:
         memecoin_desk.scout({"mint": mint, "source": "other"}, now=now)
         return stopped | {"reason": parsed.get("reason"), "stage": "scout", "fdv_used_as_market_cap": False}
+    _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
+    _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
     opened = memecoin_desk.scout(parsed["scout"], now=now)
     if opened.get("ok") is not True:
         return stopped | {"reason": opened.get("reason"), "stage": opened.get("stage"), "case_id": opened.get("case_id")}
@@ -67,6 +171,8 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         "stalkchain": coverage,
         "mint_account_ok": account.get("ok") is True,
         "score_measured": False,
+        "holder_growth": holder_growth(mint),
+        "caller_named_mint": True,
         "send": False,
         "sign": False,
         "live_ready": False,

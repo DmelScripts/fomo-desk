@@ -40,6 +40,43 @@ def _pair(mint: str, **over):
     return body
 
 
+def _bind_exit(case_id: str) -> dict:
+    import base64
+    import hashlib
+    from tests.test_jupiter_route_v2 import _metas, _pool, _prices, _route, _tx, WHEN
+    import phantom_transport
+    import solana_inspect
+    mint = memecoin_desk.view(case_id)["mint"]
+    values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
+    tx = _tx(_metas(mint, solana_tx.NATIVE_MINT, values), _route(1_000, 0, True, amount=50), side="exit")
+    decoded = solana_tx.decode_transaction(base64.b64decode(tx))
+    width = len(decoded.static_keys)
+    pre = [0] * width
+    post = [0] * width
+    pre[0] = 5_000_000
+    post[0] = 5_100_000
+    source = values["source"]
+    owner, raw = accounts[values["pool"]]
+    wallet = phantom_transport.REQUIRED_WALLET
+    signature = solana_tx.b58encode(hashlib.sha256(mint.encode()).digest() + hashlib.sha256(b"exit" + mint.encode()).digest())
+    body = {
+        "signature": signature,
+        "slot": 466835746,
+        "genesis": solana_inspect.MAINNET_GENESIS,
+        "transaction": tx,
+        "meta": {
+            "err": None,
+            "fee": 5000,
+            "preBalances": pre,
+            "postBalances": post,
+            "preTokenBalances": [{"accountIndex": decoded.static_keys.index(source), "mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "50"}}],
+            "postTokenBalances": [{"accountIndex": decoded.static_keys.index(source), "mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
+        },
+        "accounts": {values["pool"]: {"owner": owner, "data": base64.b64encode(raw).decode()}},
+    }
+    return memecoin_desk.record_exit_receipt(case_id, body, _prices(), WHEN)
+
+
 def _onchain(**over):
     body = {
         "source": "stalkchain_token_onchain",
@@ -240,7 +277,7 @@ class MemecoinDeskTests(unittest.TestCase):
         missing_fee = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(missing_fee["reason"], "exit_fee_missing")
         self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
-        recorded = memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})
+        recorded = _bind_exit(case_id)
         self.assertTrue(recorded["ok"], recorded)
         exited = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(exited["action"], "trail")
@@ -258,12 +295,12 @@ class MemecoinDeskTests(unittest.TestCase):
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         for number in (40, 41, 42):
             case_id = self._filled(number)
-            self.assertTrue(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["ok"])
+            self.assertTrue(_bind_exit(case_id)["ok"])
             stopped = memecoin_desk.mark(case_id, "0.01", source="fixture_price", fetched_at=NOW, now=NOW)
             self.assertEqual(stopped["action"], "stop")
         blocked = self._analyzed(43)
         self.assertEqual(_protect(blocked)["reason"], "stop_new_entries")
-        self.assertTrue(memecoin_desk.record_exit_receipt(live, {"fee_usd": "0.04"})["ok"])
+        self.assertTrue(_bind_exit(live)["ok"])
         stopped = memecoin_desk.mark(live, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(stopped["action"], "stop")
         self.assertTrue(memecoin_desk.view(live)["snapshot"]["exit"]["fee_counted_once"])
@@ -313,15 +350,21 @@ class MemecoinDeskTests(unittest.TestCase):
         case_id = self._filled(91)
         missing = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(missing["reason"], "exit_fee_missing")
-        self.assertTrue(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["ok"])
+        self.assertEqual(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["reason"], "receipt_unbound")
+        bound = _bind_exit(case_id)
+        self.assertTrue(bound["ok"], bound)
+        self.assertEqual(_bind_exit(case_id)["reason"], "exit_duplicate")
         closed = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(closed["action"], "stop")
         body = memecoin_desk.view(case_id)["snapshot"]
         booked = body["exit"]
         notional = Decimal(body["notional_usd"])
         proceeds = notional * Decimal("0.94")
-        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05") - Decimal("0.04"))
-        self.assertEqual(booked["exit_fee_usd"], "0.04")
+        exit_fee = Decimal(bound["exit_fee_usd"])
+        self.assertGreater(exit_fee, 0)
+        self.assertLessEqual(exit_fee, Decimal("0.05"))
+        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05") - exit_fee)
+        self.assertEqual(booked["exit_fee_usd"], bound["exit_fee_usd"])
         self.assertEqual(booked["entry_fee_usd"], "0.05")
         self.assertTrue(booked["fee_counted_once"])
 
@@ -357,52 +400,18 @@ class MemecoinDeskTests(unittest.TestCase):
         opened = client.post("/api/memecoin/scout", headers=AUTH, json=_pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000)))
         self.assertEqual(opened.status_code, 409, opened.text)
         self.assertEqual(opened.json()["reason"], "caller_snapshot_not_the_handoff")
-        import desk_loop
-        previous = desk_loop.FETCH
-
-        def fetch(request):
-            if request.get("kind") == "rpc":
-                raw = bytearray(82)
-                raw[44] = 6
-                raw[45] = 1
-                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode("ascii"), "base64"]}}}}
-            return {"status": 200, "body": [{
-                "chainId": "solana", "baseToken": {"address": _mint(81)}, "priceUsd": "1",
-                "marketCap": 1_000_000, "fdv": 2, "liquidity": {"usd": 250_000},
-                "pairCreatedAt": int((moment - 3600) * 1000), "priceChange": {"h1": 1},
-            }]}
-
-        desk_loop.FETCH = fetch
-        self.addCleanup(lambda: setattr(desk_loop, "FETCH", previous))
-        ran = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81)})
+        ran = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81), "slippage_allowance_bps": 50, "price_transport": "injected"})
         self.assertEqual(ran.status_code, 409, ran.text)
-        self.assertEqual(ran.json()["reason"], "lp")
-        self.assertFalse(ran.json()["stalkchain"]["called"])
+        self.assertEqual(ran.json()["reason"], "scheduler_unarmed")
+        self.assertFalse(ran.json()["request_body_used"])
+        self.assertFalse(ran.json()["armed"])
+        self.assertFalse(ran.json()["started"])
         self.assertFalse(ran.json()["scheduled"])
-        self.assertFalse(ran.json()["deployed"])
-        import os
-        import stalkchain_adapter
-        os.environ["STALKCHAIN_API_KEY"] = "sc_test_not_a_real_key"
-        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
-        seen = []
-
-        def posted(request):
-            seen.append(request["url"])
-            self.assertNotIn("authorization", json.dumps({key: value for key, value in request.items() if key != "headers"}))
-            return {"status": 200, "body": {"data": {"marketCapBasis": "market_cap"}, "meta": {}}}
-
-        previous_post = stalkchain_adapter.post
-        stalkchain_adapter.post = posted
-        self.addCleanup(lambda: setattr(stalkchain_adapter, "post", previous_post))
-        keyed = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81)})
-        self.assertEqual(len(seen), 4, keyed.text)
-        self.assertTrue(keyed.json()["stalkchain"]["called"])
-        self.assertNotIn("sc_test_not_a_real_key", keyed.text)
-        self.assertEqual(keyed.json()["reason"], "lp")
         self.assertEqual(db.get_setting("agents_enabled"), "0")
-        body = client.get("/api/memecoin/" + ran.json()["case_id"], headers=AUTH).json()
-        self.assertFalse(body["live_ready"])
-        self.assertFalse(body["send"])
+        from pathlib import Path
+        route = Path("api.py").read_text(encoding="utf-8").split("def memecoin_run")[1].split("def memecoin_scout")[0]
+        self.assertNotIn("slippage_allowance_bps", route)
+        self.assertNotIn("price_transport", route)
         import pyth_sponsored
         fetched = []
 

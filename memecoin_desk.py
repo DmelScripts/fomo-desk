@@ -336,33 +336,50 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
     return _advance(row, "filled", "executor", snap["fill"], snap)
 
 
-def record_exit_receipt(case_id: str, receipt: dict) -> dict:
-    """Store one exit fee from a receipt. A missing fee is not recorded as zero."""
+def record_exit_receipt(case_id: str, body: dict, price_transport=None, now: float | None = None) -> dict:
+    """Bind one chain receipt. A fee decimal is not accepted and a failure does not book zero."""
+    import memecoin_exit
+    import pyth_sponsored
     row = _case(case_id)
     if row is None or row["stage"] != "filled":
         return _kill(case_id, None, "risk", "stage", None)
+    moment = time.time() if now is None else now
+    prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
+    sol = prices.get("sol") if isinstance(prices, dict) else None
+    if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
+        return _note(row, "risk", prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound")
+    bound = memecoin_exit.bind(row["mint"], body, sol)
+    if bound.get("ok") is not True:
+        return _note(row, "risk", bound.get("reason") or "receipt_unbound")
     snap = _snapshot(row)
-    if snap.get("exit_fee_usd") is not None:
-        return _note(row, "risk", "exit_fee_already_recorded")
-    fee = _money(receipt.get("fee_usd")) if isinstance(receipt, dict) else None
-    if fee is None or fee <= 0:
-        return _note(row, "risk", "exit_fee_missing")
-    if fee > MAX_FEE:
-        return _note(row, "risk", "fee_cap")
-    snap["exit_fee_usd"] = format(fee, "f")
+    if snap.get("exit_signature") is not None:
+        return _note(row, "risk", "exit_duplicate")
+    snap["exit_fee_usd"] = bound["fee_usd"]
     snap["exit_fee_source"] = "exit_receipt"
-    moment = time.time()
+    snap["exit_signature"] = bound["signature"]
+    snap["exit_message_sha256"] = bound["message_sha256"]
+    snap["exit_sol_proceeds"] = bound["sol_proceeds"]
+    snap["exit_network_fee_lamports"] = bound["network_fee_lamports"]
+    snap["exit_dex_fee_lamports"] = bound["dex_fee_lamports"]
 
     def work(conn):
+        _ensure_conn(conn)
         current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
         if current is None or current["stage"] != "filled":
             return {"ok": False, "reason": "stage", "case_id": row["id"]}
+        seen = conn.execute("SELECT case_id FROM memecoin_exit_receipts WHERE signature = ?", (bound["signature"],)).fetchone()
+        if seen is not None:
+            return {"ok": False, "reason": "exit_duplicate", "case_id": row["id"], "stage": "filled"}
+        conn.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd) VALUES (?, ?, ?, ?, ?)",
+            (bound["signature"], row["id"], bound["message_sha256"], bound["slot"], bound["fee_usd"]),
+        )
         conn.execute(
             "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled'",
             (json.dumps(snap, sort_keys=True), moment, row["id"]),
         )
-        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_receipt", {"exit_fee_usd": snap["exit_fee_usd"]}, moment)
-        return {"ok": True, "reason": None, "case_id": row["id"], "stage": "filled", "exit_fee_usd": snap["exit_fee_usd"]}
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_receipt", {"exit_fee_usd": bound["fee_usd"], "signature": bound["signature"]}, moment)
+        return {"ok": True, "reason": None, "case_id": row["id"], "stage": "filled", "exit_fee_usd": bound["fee_usd"], "live_ready": False, "send": False}
 
     return db.exclusive(work)
 
@@ -618,6 +635,17 @@ def _ensure_conn(conn) -> None:
             snapshot_json TEXT NOT NULL,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_exit_receipts (
+            signature TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            slot INTEGER NOT NULL,
+            fee_usd TEXT NOT NULL
         )
         """
     )

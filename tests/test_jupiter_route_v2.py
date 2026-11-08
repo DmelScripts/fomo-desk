@@ -36,7 +36,7 @@ def _route(quoted: int, slippage: int, a_to_b: bool = True, amount: int = 1_000_
     )
 
 
-def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100, liquidity: int = 10**18):
+def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100, liquidity: int = 10**18, sqrt_price: int = 1 << 64):
     pool = solana_tx.b58encode(b"\x21" * 32)
     wsol = solana_tx.associated_token_address(WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
     source = wsol if source_mint == solana_tx.NATIVE_MINT else solana_tx.b58encode(b"\x66" * 32)
@@ -55,7 +55,7 @@ def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100, liquidity: int 
     }
     pool_data = solana_whirlpool.reference_pool(
         source_mint, vault_a, dest_mint, vault_b, spacing, current,
-        sqrt_price=1 << 64, fee_rate=fee_rate, liquidity=liquidity,
+        sqrt_price=sqrt_price, fee_rate=fee_rate, liquidity=liquidity,
     )
     accounts = {
         pool: (solana_whirlpool.PROGRAM_ID, pool_data),
@@ -241,14 +241,17 @@ class RouteV2Tests(unittest.TestCase):
         self.assertFalse(opened["live_ready"])
         self.assertFalse(opened["owner_slippage_approved"])
         self.assertEqual(opened["slippage_allowance_source"], "test_fixture")
-        values_out, data_out = _pool(TOKEN, solana_tx.NATIVE_MINT)
+        values_out, data_out = _pool(TOKEN, solana_tx.NATIVE_MINT, sqrt_price=1 << 60)
         sell = _decode(
-            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(999_899, 0, True), side="exit"),
+            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(1_000, 0, True), side="exit"),
             data_out, side="exit",
         )
-        self.assertEqual(sell["reason"], "token_fee_unpriced", sell)
+        self.assertEqual(sell["reason"], "slippage_unapproved", sell)
         self.assertFalse(sell["token_raw_counted_as_lamports"])
-        self.assertIsNone(sell["exposure_usd"])
+        self.assertFalse(sell["rent_added_to_token_raw"])
+        self.assertNotEqual(sell["dex_fee_lamports"], sell["dex_fee_raw"])
+        self.assertLess(Decimal(sell["exposure_usd"]), Decimal("8"))
+        self.assertEqual(sell["usd_origin"], "sol_usd")
 
     def test_a_caller_blob_a_one_raw_quote_and_an_unknown_account_fail(self):
         values, data = _pool(solana_tx.NATIVE_MINT, TOKEN)

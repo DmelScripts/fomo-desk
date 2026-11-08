@@ -88,6 +88,8 @@ class DeskLoopTests(unittest.TestCase):
         self.assertIn("holder_growth", result["unproven"])
         self.assertFalse(result["score_measured"])
         self.assertEqual(result["render_presence"], "unknown")
+        import pyth_sponsored
+        pyth_sponsored._LAST = None
         view = desk_loop.readiness()
         self.assertTrue(view["stalkchain_env_present"])
         self.assertNotIn("sc_test_not_a_real_key", __import__("json").dumps(view))
@@ -104,4 +106,40 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(view["onchain_pyth_valuation"], "sol_usd")
         self.assertFalse(view["onchain_pyth_usdc_used"])
         self.assertFalse(view["onchain_pyth_usable"])
-        self.assertNotIn("desk_loop", Path("server.py").read_text(encoding="utf-8"))
+        source = Path("server.py").read_text(encoding="utf-8")
+        self.assertIn("desk_loop.scheduler_status()", source)
+        self.assertNotIn("run_discovery(", source)
+        self.assertFalse(desk_loop.scheduler_status()["armed"])
+        self.assertFalse(desk_loop.scheduler_status()["started"])
+
+    def test_discovery_names_the_mint_and_records_only_its_own_series(self):
+        _tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        import db
+        db.init_db()
+
+        def transport(request):
+            if request.get("url", "").endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": MINT}]}
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+            return {"status": 200, "body": _pair()}
+
+        found = desk_loop.run_discovery(transport, NOW)
+        self.assertEqual(found["discovered_mint"], MINT)
+        self.assertFalse(found["caller_named_mint"])
+        self.assertFalse(found["armed"])
+        self.assertEqual(found["reason"], "lp")
+        self.assertFalse(found["holder_growth"]["ok"])
+        self.assertEqual(found["holder_growth"]["reason"], "holder_growth_unproven")
+        self.assertFalse(found["score_measured"])
+        desk_loop._observe(MINT, "desk_holder_count", "holder_count", "10", NOW)
+        self.assertEqual(desk_loop.holder_growth(MINT)["reason"], "holder_growth_unproven")
+        desk_loop._observe(MINT, "desk_holder_count", "holder_count", "12", NOW + 60)
+        growth = desk_loop.holder_growth(MINT)
+        self.assertEqual(growth["delta"], "2")
+        self.assertFalse(growth["score_measured"])
+        self.assertFalse(growth["cross_provider"])
