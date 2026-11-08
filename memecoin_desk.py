@@ -44,6 +44,28 @@ WEIGHTS = {
 }
 COMPONENTS = tuple(WEIGHTS)
 FRESH_S = 30
+
+
+def analyst_decision() -> dict:
+    """The score floor is coded. The component weights are not an owner rule."""
+    return {
+        "score_floor": 70,
+        "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
+        "weights_are": "engineering_default",
+        "owner_approved": False,
+        "approved_numbers": {
+            "stop_pct": format(STOP, "f"),
+            "trail_arm_pct": format(TRAIL_ARM, "f"),
+            "trail_drop_pct": format(TRAIL_DROP, "f"),
+            "liq_of_mcap": format(LIQ_OF_MCAP, "f"),
+            "ticket_usd": format(TICKET, "f"),
+            "max_fee_usd": format(MAX_FEE, "f"),
+            "allocation_usd": format(ALLOCATION, "f"),
+            "max_loss_usd": format(MAX_LOSS, "f"),
+            "slippage_bps": 50,
+        },
+        "decision_needed": "Component weights are engineering defaults. A score of 70 from those weights is not an owner-approved formula.",
+    }
 MIN_AGE_S = 30 * 60
 MAX_AGE_S = 72 * 3600
 MIN_MCAP = Decimal("300000")

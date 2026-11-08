@@ -147,6 +147,73 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(missing["reason"], "market_cap_missing")
         self.assertEqual(missing["source"], "dexscreener")
 
+    def test_a_documented_stalkchain_body_does_not_open_the_handoff(self):
+        os.environ["STALKCHAIN_API_KEY"] = "sc_fixture_not_a_real_key"
+        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
+        calls = []
+
+        def envelope(mint, extra=None):
+            data = {"mint": mint, "marketCapBasis": "market_cap", "marketCapSource": "fixture", "fdvUsd": 99}
+            if extra:
+                data.update(extra)
+            return {"data": data, "notes": [], "credits": 0, "meta": {}}
+
+        def transport(request):
+            if request.get("method") == "POST":
+                calls.append((request["url"], request["json"]))
+                self.assertTrue(request["headers"]["authorization"].endswith("sc_fixture_not_a_real_key"))
+                return {"status": 200, "body": envelope(MINT)}
+            if str(request.get("url", "")).endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": MINT}]}
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+            return {"status": 200, "body": _pair()}
+
+        found = desk_loop.run_discovery(transport, NOW)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual({item[1]["token"] for item in calls}, {MINT})
+        self.assertTrue(all(item[0].startswith("https://data.stalkchain.com/api/v1/tools/") for item in calls))
+        kill = next(item for item in found["kills"] if item.get("mint") == MINT)
+        self.assertEqual(kill["reason"], "lp")
+        self.assertEqual(kill["stage"], "rejected")
+        self.assertFalse(kill["score_measured"])
+        self.assertFalse(kill["fixture_is_mainnet_proof"])
+        self.assertFalse(found["armed"])
+        self.assertFalse(found["score_measured"])
+        fields = {item["field"]: item for item in kill["source_fields"]}
+        for name in ("lp_burned_or_locked", "dev_rugs", "bundled_launch_pct", "holder_growth", "analyst_score"):
+            self.assertFalse(fields[name]["proven"], name)
+            self.assertIsNone(fields[name]["json_path"], name)
+            self.assertEqual(fields[name]["status"], "observation_required")
+            self.assertIn("nov8-observed-mcp-field-mapping.json", fields[name]["observation_files"])
+        self.assertNotIn("sc_fixture_not_a_real_key", __import__("json").dumps(found))
+        formula = memecoin_desk.analyst_decision()
+        self.assertFalse(formula["owner_approved"])
+        self.assertEqual(formula["approved_numbers"]["stop_pct"], "6")
+        self.assertEqual(formula["approved_numbers"]["liq_of_mcap"], "0.25")
+        self.assertIn("analyst_weights_unapproved", desk_loop.scheduler_status()["ready_because"])
+        self.assertFalse(desk_loop.scheduler_status()["armed"])
+        import stalkchain_adapter
+        malformed = stalkchain_adapter.normalize({"lp_burned_or_locked": True}, MINT)
+        self.assertEqual(malformed["reason"], "envelope")
+        self.assertEqual(malformed["proven"], {})
+        crossed = stalkchain_adapter.normalize(envelope(solana_tx.b58encode(b"\x44" * 32)), MINT)
+        self.assertEqual(crossed["reason"], "mint_mismatch")
+        self.assertEqual(crossed["proven"], {})
+        guessed = envelope(MINT, {"lp_burned_or_locked": True, "holder_count": 12, "fetched_at": 1, "score": 90, "rugs": 0})
+        held = stalkchain_adapter.normalize(guessed, MINT)
+        self.assertEqual(held["reason"], "response_fields_unpublished")
+        self.assertEqual(held["freshness"], "unobserved")
+        self.assertEqual(held["proven"], {})
+        self.assertIn("lp_burned_or_locked", held["unmapped_keys"])
+        self.assertIn("fetched_at", held["unmapped_keys"])
+        self.assertFalse(held["fixture_is_mainnet_proof"])
+        self.assertFalse(held["fdv_used_as_market_cap"])
+        self.assertFalse(desk_loop.collect_holder_count(MINT, {"source": "stalkchain", "holder_count": 12, "fetched_at": NOW})["written"])
+
     def test_every_solana_boost_is_a_candidate_and_the_loop_can_be_stopped(self):
         other = solana_tx.b58encode(b"\x44" * 32)
 

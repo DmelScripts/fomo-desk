@@ -40,6 +40,43 @@ UNPROVEN = (
     "unique_buyers",
     "smart_wallets",
 )
+# These files were not in this tree. A prose mention in OpenAPI is not a JSON path.
+OBSERVATION_FILES = (
+    "nov8-observed-mcp-field-mapping.json",
+    "fixtures.json",
+    "source-paths.txt",
+)
+FIELDS = (
+    {"field": "lp_burned_or_locked", "tool": "stalkchain_token_onchain", "prose": "how much of the liquidity pool is burned", "not": "creation time is not LP lock expiry"},
+    {"field": "lp_lock_expiry", "tool": "stalkchain_token_onchain", "prose": None, "not": "no lock-expiry path is named"},
+    {"field": "dev_holding_pct", "tool": "stalkchain_token_onchain", "prose": "the developer's own holding", "not": None},
+    {"field": "dev_rugs", "tool": "stalkchain_token_deployer", "prose": "has the dev rugged before", "not": "a launch count is not a clean rug proof"},
+    {"field": "bundled_launch_pct", "tool": "stalkchain_token_early_buyers", "prose": "wallets that bought in the same block as creation", "not": None},
+    {"field": "holder_growth", "tool": "stalkchain_token_onchain", "prose": "total on-chain holder count", "not": "one count is not growth, and a cross-provider difference is not growth"},
+    {"field": "unique_buyers", "tool": None, "prose": None, "not": "DexScreener transaction counts are not unique buyers"},
+    {"field": "smart_wallets", "tool": None, "prose": None, "not": "a boost is not a smart-wallet fact"},
+    {"field": "analyst_score", "tool": "stalkchain_token_quality", "prose": "an organic score with its label", "not": "that organic score is not this desk's analyst score"},
+)
+
+
+def field_requirements() -> list[dict]:
+    """What each handoff fact still needs. No JSON path is invented from the prose."""
+    rows = []
+    for item in FIELDS:
+        rows.append({
+            "field": item["field"],
+            "tool": item["tool"],
+            "prose": item["prose"],
+            "json_path": None,
+            "status": "observation_required",
+            "proven": False,
+            "not": item["not"],
+            "observation_files": list(OBSERVATION_FILES),
+            "response_schema": False,
+            "observed_mcp_is_rest_envelope": False,
+            "fixture_is_mainnet_proof": False,
+        })
+    return rows
 
 
 def this_process_has_key() -> bool:
@@ -77,20 +114,27 @@ def normalize(body, mint: str | None = None) -> dict:
         "score_measured": False,
     }
     if not isinstance(body, dict) or set(body) - {"data", "notes", "credits", "meta"} or not isinstance(body.get("data"), dict):
-        return refused | {"reason": "envelope"}
+        return refused | {"reason": "envelope", "fields": field_requirements(), "freshness": "unobserved"}
     data = body["data"]
     echoed = data.get("mint", data.get("token"))
     if echoed is not None and (not isinstance(echoed, str) or (mint is not None and echoed != mint)):
-        return refused | {"reason": "mint_mismatch"}
+        return refused | {"reason": "mint_mismatch", "fields": field_requirements(), "freshness": "unobserved"}
     named = {}
     for key in NAMED:
         if key in data:
             named[key] = data[key]
+    unmapped = sorted(key for key in data if key not in NAMED and key not in {"mint", "token"})
     return refused | {
         "ok": True,
         "reason": "response_fields_unpublished",
         "named": named,
+        "unmapped_keys": unmapped,
+        "fields": field_requirements(),
+        "freshness": "unobserved",
         "fdv_used_as_market_cap": False,
+        "fixture_is_mainnet_proof": False,
+        "observed_mcp_is_rest_envelope": False,
+        "response_schema": False,
     }
 
 
@@ -126,11 +170,17 @@ def read_mint(mint: str, transport) -> dict:
         "this_process_key_present": this_process_has_key(),
         "render_presence": "unknown",
         "unproven": list(UNPROVEN),
+        "fields": field_requirements(),
         "score_measured": False,
         "fdv_used_as_market_cap": False,
         "live_ready": False,
         "credential_env": ENV,
         "url": URL,
+        "fixture_is_mainnet_proof": False,
+        "observed_mcp_is_rest_envelope": False,
+        "response_schema": False,
+        "observation_files": list(OBSERVATION_FILES),
+        "freshness": "unobserved",
     }
     if not public["this_process_key_present"]:
         return public | {"ok": False, "reason": "stalkchain_credentials_missing"}
@@ -152,8 +202,10 @@ def read_mint(mint: str, transport) -> dict:
             return public | {"ok": False, "reason": "stalkchain_status", "called": True, "http_status": status}
         parsed = normalize(response.get("body"), mint)
         if parsed.get("ok") is not True:
-            return public | {"ok": False, "reason": parsed.get("reason"), "called": True}
+            return public | {"ok": False, "reason": parsed.get("reason"), "called": True, "tool": tool, "fields": field_requirements(), "freshness": "unobserved"}
         named.update(parsed["named"])
+        public.setdefault("unmapped_keys", [])
+        public["unmapped_keys"] = sorted(set(public["unmapped_keys"]) | set(parsed.get("unmapped_keys") or []))
     return public | {
         "ok": False,
         "called": True,
@@ -162,6 +214,9 @@ def read_mint(mint: str, transport) -> dict:
         "proven": {},
         "unproven": list(UNPROVEN),
         "components": {},
+        "fields": field_requirements(),
         "synthetic_fields": False,
         "live_mcp": False,
+        "freshness": "unobserved",
+        "fixture_is_mainnet_proof": False,
     }

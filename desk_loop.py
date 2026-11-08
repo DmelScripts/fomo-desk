@@ -43,6 +43,8 @@ def _ready_reasons() -> list[str]:
         reasons.append("lp_fields_unpublished")
         reasons.append("rug_history_unpublished")
     reasons.append("holder_growth_unproven")
+    if memecoin_desk.analyst_decision()["owner_approved"] is not True:
+        reasons.append("analyst_weights_unapproved")
     if db_setting("memecoin_entry_halt") == "1":
         reasons.append("entry_halt")
     return reasons
@@ -116,6 +118,9 @@ def run_discovery(transport, now: float) -> dict:
             "stage": result.get("stage"),
             "quote": result.get("quote"),
             "jupiter_called": result.get("jupiter_called") is True,
+            "source_fields": result.get("source_fields"),
+            "score_measured": False,
+            "fixture_is_mainnet_proof": False,
         })
         if result.get("reason"):
             kills.append(screened[-1] | {"source": result.get("source") or dexscreener_public.SOURCE})
@@ -302,6 +307,9 @@ def run_once(mint: str, transport, now: float) -> dict:
         "usd_live": False,
         "holder_growth": holder_growth(mint),
         "caller_named_mint": True,
+        "source_fields": coverage.get("fields"),
+        "fixture_is_mainnet_proof": False,
+        "analyst": memecoin_desk.analyst_decision(),
     }
 
 
@@ -1185,7 +1193,7 @@ def public_reader(request: dict) -> dict:
 
 def _readiness_blocks(pyth: dict) -> list[str]:
     import owner_slippage
-    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished"]
+    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished", "analyst_weights_unapproved"]
     if owner_slippage.ceiling_bps() != owner_slippage.BPS:
         blocks.append("owner_slippage_unapproved")
     blocks.append(pyth["reason"] or "pyth_sponsored_not_fresh")
@@ -1229,6 +1237,10 @@ def readiness() -> dict:
         "onchain_pyth_available": pyth["usable"] is True,
         "blocked_because": _readiness_blocks(pyth),
         "slippage_policy": _slippage_policy(),
+        "source_fields": stalkchain_adapter.field_requirements(),
+        "observation_files_required": list(stalkchain_adapter.OBSERVATION_FILES),
+        "analyst_formula": memecoin_desk.analyst_decision(),
+        "fixture_is_mainnet_proof": False,
     }
 
 
