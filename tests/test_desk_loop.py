@@ -1171,3 +1171,240 @@ class DeskLoopTests(unittest.TestCase):
             db.execute("UPDATE memecoin_cases SET ledger = 'paper', ledger_provenance = 'server' WHERE id = 'old'")
         self.assertEqual(db.query("SELECT cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'old-fill'")[0]["cost_basis_lamports"], 5)
         self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'old'")[0]["snapshot_json"])["reserved_usd"], "8.00")
+
+    def test_predecessor_database_replaces_the_old_lineage_triggers(self):
+        import db
+        import json
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+        import pyth_sponsored
+        root = Path(__file__).resolve().parents[1]
+        predecessor = "60932e4ce163b3a12df1f92b3224546a947af7e2"
+        source = tempfile.mkdtemp()
+        built = tempfile.mkdtemp()
+        failed = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(source, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(built, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(failed, ignore_errors=True))
+        archive = subprocess.run(["git", "archive", predecessor], cwd=root, check=True, capture_output=True)
+        subprocess.run(["tar", "-x"], cwd=source, check=True, input=archive.stdout)
+        script = r"""
+import json, os, sqlite3
+import db
+import memecoin_desk
+db.init_db()
+memecoin_desk.loss_totals()
+path = os.path.join(os.environ["DESK_DATA_DIR"], "desk.db")
+conn = sqlite3.connect(path)
+conn.row_factory = sqlite3.Row
+now = 1800000000
+kinds = (
+    ("legacy", "live", "legacy_default", "8.00", 11),
+    ("server", "live", "server", "4.00", 12),
+    ("paper", "paper", "server", "3.00", 13),
+    ("synthetic", "synthetic", "server", "2.00", 14),
+)
+for name, ledger, provenance, reserved, cost in kinds:
+    conn.execute(
+        "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?,?,?,?,?,?,?,?)",
+        ("case-" + name, "mint-" + name, "filled", json.dumps({"reserved_usd": reserved}), now, now, ledger, provenance),
+    )
+    conn.execute(
+        "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("entry-" + name, "case-" + name, "m", 1, 10, cost, 1, 1, "0.01", 0, ledger, provenance),
+    )
+    conn.execute(
+        "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?,?,?,?,?,?,?,?)",
+        ("exit-" + name, "case-" + name, "m", 1, "0.01", cost, ledger, provenance),
+    )
+    conn.execute(
+        "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger, ledger_provenance) VALUES (?,?,?,?,?,?,?,?)",
+        ("refund-" + name, "case-" + name, cost, 1, "0.01", 0, ledger, provenance),
+    )
+    conn.execute(
+        "INSERT INTO memecoin_risk_intents (id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd, entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals, evidence_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("intent-" + name, "case-" + name, ledger, provenance, "entry-" + name, "stop", "pool", 1, "1", "1", "0.94", 10, cost, 6, "{}", now),
+    )
+conn.execute(
+    "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at) VALUES ('case-fresh', 'mint-fresh', 'analyst_passed', ?, ?, ?)",
+    (json.dumps({"price_usd": "1.00"}), now, now),
+)
+conn.execute(
+    "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at) VALUES ('case-paper-fresh', 'mint-paper-fresh', 'analyst_passed', ?, ?, ?)",
+    (json.dumps({"price_usd": "1.00"}), now, now),
+)
+conn.commit()
+saved = [(row["name"], row["sql"]) for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memecoin%' ORDER BY name")]
+body = dict(saved)["memecoin_entry_receipts_provenance_update"]
+assert "OLD.ledger_provenance = 'server'" in body
+assert "OLD.ledger_provenance IS NOT NULL" not in body
+assert "memecoin_cases_lineage" not in dict(saved)
+conn.execute("BEGIN IMMEDIATE")
+for name, _sql in saved:
+    conn.execute("DROP TRIGGER " + name)
+conn.execute(
+    "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('case-unknown', 'mint-unknown', 'filled', ?, ?, ?, 'unknown', 'unknown')",
+    (json.dumps({"reserved_usd": "1.50"}), now, now),
+)
+conn.execute(
+    "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES ('entry-unknown', 'case-unknown', 'm', 1, 10, 15, 1, 1, '0.01', 0, 'unknown', 'unknown')"
+)
+conn.execute(
+    "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES ('exit-unknown', 'case-unknown', 'm', 1, '0.01', 15, 'unknown', 'unknown')"
+)
+conn.execute(
+    "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger, ledger_provenance) VALUES ('refund-unknown', 'case-unknown', 15, 1, '0.01', 0, 'unknown', 'unknown')"
+)
+conn.execute(
+    "INSERT INTO memecoin_risk_intents (id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd, entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals, evidence_json, created_at) VALUES ('intent-unknown', 'case-unknown', 'unknown', 'unknown', 'entry-unknown', 'stop', 'pool', 1, '1', '1', '0.94', 10, 15, 6, '{}', ?)",
+    (now,),
+)
+for name, sql in saved:
+    conn.execute(sql)
+conn.commit()
+restored = [(row["name"], row["sql"]) for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memecoin%' ORDER BY name")]
+assert restored == saved
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+conn.commit()
+conn.close()
+"""
+        env = os.environ.copy()
+        env["DESK_DATA_DIR"] = built
+        env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+        env.pop("STALKCHAIN_API_KEY", None)
+        ran = subprocess.run([sys.executable, "-c", script], cwd=source, env=env, capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        original_dir = os.environ["DESK_DATA_DIR"]
+        shutil.copy(Path(built) / "desk.db", Path(failed) / "desk.db")
+
+        def trigger_sql(directory):
+            conn = sqlite3.connect(Path(directory) / "desk.db")
+            try:
+                return {row[0]: row[1] for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memecoin%'")}
+            finally:
+                conn.close()
+
+        before = trigger_sql(built)
+        self.assertIn("OLD.ledger_provenance = 'server'", before["memecoin_entry_receipts_provenance_update"])
+        real_replace = memecoin_desk._replace_lineage_triggers
+
+        def explode(conn):
+            real_replace(conn)
+            raise RuntimeError("lineage upgrade failed")
+
+        memecoin_desk._replace_lineage_triggers = explode
+        os.environ["DESK_DATA_DIR"] = failed
+        try:
+            with self.assertRaises(RuntimeError):
+                memecoin_desk.loss_totals()
+        finally:
+            memecoin_desk._replace_lineage_triggers = real_replace
+            os.environ["DESK_DATA_DIR"] = original_dir
+        self.assertEqual(trigger_sql(failed), before)
+        rolled = sqlite3.connect(Path(failed) / "desk.db")
+        try:
+            rolled.execute("BEGIN")
+            rolled.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'entry-legacy'")
+            rolled.rollback()
+            with self.assertRaises(sqlite3.IntegrityError):
+                rolled.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'legacy_default' WHERE signature = 'entry-server'")
+            rolled.rollback()
+        finally:
+            rolled.close()
+
+        desk = Path(original_dir) / "desk.db"
+        for suffix in ("", "-wal", "-shm"):
+            extra = Path(str(desk) + suffix)
+            if extra.exists():
+                extra.unlink()
+        shutil.copy(Path(built) / "desk.db", desk)
+        import threading
+        errors = []
+
+        def open_latest():
+            try:
+                memecoin_desk.loss_totals()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_latest) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        upgraded = trigger_sql(original_dir)
+        for name in (
+            "memecoin_entry_receipts_provenance_update",
+            "memecoin_exit_receipts_provenance_update",
+            "memecoin_refunds_provenance_update",
+            "memecoin_risk_intents_provenance_update",
+            "memecoin_cases_lineage",
+        ):
+            self.assertIn("OLD.ledger_provenance IS NOT NULL", upgraded[name], name)
+            self.assertNotIn("OLD.ledger_provenance = 'server'", upgraded[name], name)
+        self.assertEqual(db.get_setting("memecoin_lineage_trigger"), "14")
+        self.assertEqual(db.exclusive(lambda conn: conn.execute("PRAGMA user_version").fetchone()[0]), 12)
+        costs = {row["signature"]: row["cost_basis_lamports"] for row in db.query("SELECT signature, cost_basis_lamports FROM memecoin_entry_receipts")}
+        self.assertEqual(costs, {"entry-legacy": 11, "entry-server": 12, "entry-paper": 13, "entry-synthetic": 14, "entry-unknown": 15})
+        reserves = {row["id"]: json.loads(row["snapshot_json"])["reserved_usd"] for row in db.query("SELECT id, snapshot_json FROM memecoin_cases WHERE id LIKE 'case-%' AND id NOT LIKE 'case-%fresh'")}
+        self.assertEqual(reserves, {"case-legacy": "8.00", "case-server": "4.00", "case-paper": "3.00", "case-synthetic": "2.00", "case-unknown": "1.50"})
+        intents = {row["id"]: row["basis_cost_lamports"] for row in db.query("SELECT id, basis_cost_lamports FROM memecoin_risk_intents")}
+        self.assertEqual(intents, {"intent-legacy": 11, "intent-server": 12, "intent-paper": 13, "intent-synthetic": 14, "intent-unknown": 15})
+        edits = (
+            "UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'entry-legacy'",
+            "UPDATE memecoin_entry_receipts SET ledger = 'paper' WHERE signature = 'entry-legacy'",
+            "UPDATE memecoin_entry_receipts SET ledger = 'live' WHERE signature = 'entry-paper'",
+            "UPDATE memecoin_entry_receipts SET ledger = 'live' WHERE signature = 'entry-synthetic'",
+            "UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'entry-unknown'",
+            "UPDATE memecoin_entry_receipts SET ledger_provenance = 'legacy_default' WHERE signature = 'entry-server'",
+            "UPDATE memecoin_exit_receipts SET ledger_provenance = 'server' WHERE signature = 'exit-legacy'",
+            "UPDATE memecoin_exit_receipts SET ledger = 'paper' WHERE signature = 'exit-server'",
+            "UPDATE memecoin_refunds SET ledger_provenance = 'server' WHERE signature = 'refund-legacy'",
+            "UPDATE memecoin_refunds SET ledger = 'live' WHERE signature = 'refund-synthetic'",
+            "UPDATE memecoin_risk_intents SET ledger_provenance = 'server' WHERE id = 'intent-legacy'",
+            "UPDATE memecoin_risk_intents SET case_id = 'other' WHERE id = 'intent-server'",
+            "UPDATE memecoin_cases SET ledger_provenance = 'server' WHERE id = 'case-legacy'",
+            "UPDATE memecoin_cases SET ledger = 'paper' WHERE id = 'case-server'",
+            "UPDATE memecoin_cases SET ledger = 'live', ledger_provenance = 'server' WHERE id = 'case-unknown'",
+        )
+        for statement in edits:
+            with self.assertRaises(sqlite3.IntegrityError, msg=statement):
+                db.execute(statement)
+        self.assertEqual({row["signature"]: row["cost_basis_lamports"] for row in db.query("SELECT signature, cost_basis_lamports FROM memecoin_entry_receipts")}, costs)
+        db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        previous = pyth_sponsored.sol_leg
+        pyth_sponsored.sol_leg = lambda now: {"fresh": True, "used": True, "price": 15_000_000_000, "conf": 1, "expo": -8}
+        rent = {"ok": True, "lamports": 1_488_440, "count": 1, "slot": 1, "tip_slot": 2, "genesis": "g", "mint_program": "spl"}
+        try:
+            live = memecoin_desk.protect("case-fresh", now=NOW, rent_proof=rent)
+            paper = memecoin_desk.protect("case-paper-fresh", now=NOW, rent_proof=rent, ledger="paper")
+        finally:
+            pyth_sponsored.sol_leg = previous
+        self.assertTrue(live["ok"], live)
+        self.assertTrue(paper["ok"], paper)
+        self.assertEqual(db.query("SELECT ledger, ledger_provenance FROM memecoin_cases WHERE id = 'case-fresh'")[0]["ledger"], "live")
+        self.assertEqual(db.query("SELECT ledger_provenance FROM memecoin_cases WHERE id = 'case-fresh'")[0]["ledger_provenance"], "server")
+        self.assertEqual(db.query("SELECT ledger, ledger_provenance FROM memecoin_cases WHERE id = 'case-paper-fresh'")[0]["ledger"], "paper")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_cases SET ledger = 'live' WHERE id = 'case-paper-fresh'")
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES ('entry-new', 'case-fresh', 'new', 2, 10, 21, 1, 1, '0.01', 0, 'live', 'server')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES ('entry-omitted', 'case-fresh', 'new', 2, 10, 22, 1, 1, '0.01', 0, 'live')"
+            )
+        memecoin_desk.loss_totals()
+        db.init_db()
+        memecoin_desk.loss_totals()
+        again = trigger_sql(original_dir)
+        self.assertEqual(again["memecoin_entry_receipts_provenance_update"], upgraded["memecoin_entry_receipts_provenance_update"])
+        self.assertEqual(db.get_setting("memecoin_lineage_trigger"), "14")
+        self.assertEqual(db.query("SELECT cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'entry-legacy'")[0]["cost_basis_lamports"], 11)
+        self.assertEqual(db.query("SELECT cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'entry-new'")[0]["cost_basis_lamports"], 21)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'entry-legacy'")

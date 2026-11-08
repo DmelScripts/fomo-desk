@@ -2683,10 +2683,21 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
-    for table in ("memecoin_entry_receipts", "memecoin_exit_receipts", "memecoin_refunds", "memecoin_risk_intents"):
+    _install_lineage_triggers(conn)
+    _classify_ledgers(conn)
+
+
+_LINEAGE_TABLES = ("memecoin_entry_receipts", "memecoin_exit_receipts", "memecoin_refunds", "memecoin_risk_intents")
+_LINEAGE_TRIGGER_REVISION = "14"
+
+
+def _replace_lineage_triggers(conn) -> None:
+    """Drop and recreate lineage triggers on this connection. The caller commits both."""
+    for table in _LINEAGE_TABLES:
+        conn.execute(f"DROP TRIGGER IF EXISTS {table}_ledger")
         conn.execute(
             f"""
-            CREATE TRIGGER IF NOT EXISTS {table}_ledger
+            CREATE TRIGGER {table}_ledger
             BEFORE INSERT ON {table}
             FOR EACH ROW
             WHEN NEW.ledger IS NULL OR NEW.ledger NOT IN ('live', 'synthetic', 'paper')
@@ -2696,9 +2707,10 @@ def _ensure_conn(conn) -> None:
             END
             """
         )
+        conn.execute(f"DROP TRIGGER IF EXISTS {table}_provenance_update")
         conn.execute(
             f"""
-            CREATE TRIGGER IF NOT EXISTS {table}_provenance_update
+            CREATE TRIGGER {table}_provenance_update
             BEFORE UPDATE OF ledger, ledger_provenance, case_id ON {table}
             FOR EACH ROW
             WHEN (OLD.ledger_provenance IS NOT NULL AND (NEW.ledger_provenance IS NOT OLD.ledger_provenance OR NEW.ledger IS NOT OLD.ledger OR NEW.case_id IS NOT OLD.case_id))
@@ -2708,9 +2720,10 @@ def _ensure_conn(conn) -> None:
             END
             """
         )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_cases_lineage")
     conn.execute(
         """
-        CREATE TRIGGER IF NOT EXISTS memecoin_cases_lineage
+        CREATE TRIGGER memecoin_cases_lineage
         BEFORE UPDATE OF ledger, ledger_provenance ON memecoin_cases
         FOR EACH ROW
         WHEN (OLD.ledger_provenance IS NOT NULL AND (NEW.ledger_provenance IS NOT OLD.ledger_provenance OR NEW.ledger IS NOT OLD.ledger))
@@ -2720,7 +2733,15 @@ def _ensure_conn(conn) -> None:
         END
         """
     )
-    _classify_ledgers(conn)
+
+
+def _install_lineage_triggers(conn) -> None:
+    """Replace predecessor trigger definitions and record the revision in one transaction."""
+    _replace_lineage_triggers(conn)
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES ('memecoin_lineage_trigger', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (_LINEAGE_TRIGGER_REVISION, time.time()),
+    )
 
 
 def _legacy_live_default(conn, table: str) -> bool:
