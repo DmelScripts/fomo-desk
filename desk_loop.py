@@ -3239,6 +3239,10 @@ _WHIRLPOOL_SWAP_V2_DISC = bytes.fromhex("2b04ed0b1ac91e62")
 _WHIRLPOOL_TWO_HOP_DISC = bytes.fromhex("c360ed6c44a2dbe6")
 _WHIRLPOOL_SWAP_SOURCE = "orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d"
 _VAULT_BINDING = "whirlpool_swap_constraint"
+# Anchor event discriminator for Traded in programs/whirlpool/src/events.rs at that commit.
+# swap.rs emits it after perform_swap. lp_fee is this swap's fee minus its protocol cut.
+_TRADED_DISC = bytes.fromhex("e1ca49af932ba096")
+_TRADED_LEN = 121
 
 
 def _b58_exact(data: str, size: int):
@@ -3536,6 +3540,250 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
         "network_fee_lamports": fee, "dex_fee_embedded_in_input": True,
         "vault_binding": _VAULT_BINDING, "vault_binding_source": _WHIRLPOOL_SWAP_SOURCE,
         "next_missing": "actual_combined_fee_proof",
+    }
+
+
+def _fee_gap(base: dict, reason: str) -> dict:
+    """A missing or unbound Traded event is not a fee and not a cap."""
+    return base | {
+        "fee_recorded": False, "fee_proven": False, "fee_reason": reason,
+        "fee_added_to_input": False, "fee_inside_input": True,
+        "network_fee_added_to_dex_fee": False, "combined_fee_cap_proven": False,
+        "one_shot_fee_used": False, "usd_proven": False,
+        "pretrade_fee_bound_from_event": False, "dex_fee_lamports": None,
+        "receipt_booked": False, "refund_proven": False, "fill_proven": False,
+        "hold_released": False, "reservation_consumed": False,
+        "execution_eligible": False, "holds": True, "resend": False,
+    }
+
+
+def _decode_traded(payload: str):
+    """One exact Traded body. A short or long payload is not this event."""
+    import base64
+    import solana_tx
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except Exception:
+        return None, "event_malformed"
+    if len(raw) != _TRADED_LEN or raw[:8] != _TRADED_DISC:
+        if len(raw) >= 8 and raw[:8] == _TRADED_DISC:
+            return None, "event_malformed"
+        return None, None
+    direction = raw[40]
+    if direction not in (0, 1):
+        return None, "event_malformed"
+    def u64(start):
+        return int.from_bytes(raw[start:start + 8], "little")
+    def u128(start):
+        return int.from_bytes(raw[start:start + 16], "little")
+    return {
+        "pool": solana_tx.b58encode(raw[8:40]),
+        "a_to_b": direction == 1,
+        "pre_sqrt_price": u128(41),
+        "post_sqrt_price": u128(57),
+        "input_amount": u64(73),
+        "output_amount": u64(81),
+        "input_transfer_fee": u64(89),
+        "output_transfer_fee": u64(97),
+        "lp_fee": u64(105),
+        "protocol_fee": u64(113),
+    }, None
+
+
+def _traded_from_logs(logs, whirlpool_program: str):
+    """Program data belongs to the program currently invoked.
+
+    A Program log line is not that payload, even when its text says Program data.
+    A Traded discriminator emitted by any other program is rejected.
+    """
+    import re
+    if logs is None:
+        return None, "event_log_missing"
+    if not isinstance(logs, list) or not logs:
+        return None, "event_log_missing"
+    invoke = re.compile(r"^Program (\S+) invoke \[(\d+)\]$")
+    success = re.compile(r"^Program (\S+) success$")
+    failed = re.compile(r"^Program (\S+) failed\b")
+    consumed = re.compile(r"^Program (\S+) consumed \d+ of \d+ compute units$")
+    data = re.compile(r"^Program data: ([A-Za-z0-9+/=]+)$")
+    stack = []
+    found = []
+    whirlpool_invokes = 0
+    for line in logs:
+        if not isinstance(line, str):
+            return None, "event_log_untyped"
+        if line == "Log truncated":
+            return None, "event_log_truncated"
+        if line.startswith("Program log:") or line.startswith("Program return:"):
+            continue
+        matched = data.match(line)
+        if line.startswith("Program data:"):
+            if matched is None or not stack:
+                return None, "event_malformed" if stack else "event_log_unbalanced"
+            parsed, reason = _decode_traded(matched.group(1))
+            if reason is not None:
+                return None, reason
+            if stack[-1] != whirlpool_program:
+                if parsed is not None:
+                    return None, "event_foreign_program"
+                continue
+            if parsed is None:
+                return None, "event_ambiguous"
+            found.append(parsed)
+            continue
+        matched = invoke.match(line)
+        if matched:
+            depth = int(matched.group(2))
+            if depth != len(stack) + 1:
+                return None, "event_log_unbalanced"
+            if matched.group(1) == whirlpool_program:
+                if depth < 2:
+                    return None, "event_invocation"
+                whirlpool_invokes += 1
+            stack.append(matched.group(1))
+            continue
+        matched = success.match(line)
+        if matched:
+            if not stack or stack[-1] != matched.group(1):
+                return None, "event_log_unbalanced"
+            stack.pop()
+            continue
+        if failed.match(line):
+            return None, "event_log_failed"
+        matched = consumed.match(line)
+        if matched:
+            if not stack or stack[-1] != matched.group(1):
+                return None, "event_log_unbalanced"
+            continue
+        return None, "event_log_untyped"
+    if stack:
+        return None, "event_log_unbalanced"
+    if whirlpool_invokes != 1:
+        return None, "event_absent" if whirlpool_invokes == 0 else "event_ambiguous"
+    if len(found) == 0:
+        return None, "event_absent"
+    if len(found) != 1:
+        return None, "event_ambiguous"
+    return found[0], None
+
+
+def record_landed_swap_fee(case_id: str, signature: str, transport, now: float) -> dict:
+    """The Traded fee from the same body as the canonical swap.
+
+    lp_fee and protocol_fee are this swap's input-token fee. They are already
+    inside the gross input. An entry's input is wSOL, so the unit is lamports.
+    An exit's input is the token, so the unit stays token raw units and is not
+    added to the network fee. No USD figure and no cap is derived.
+    """
+    import db
+    import solana_tx
+    import solana_whirlpool
+    import sqlite3
+    flow = record_landed_flow(case_id, signature, transport, now)
+    if flow.get("flow_recorded") is not True:
+        return _fee_gap(flow, flow.get("flow_reason") or flow.get("quantity_reason") or flow.get("reason") or "flow_required")
+    try:
+        landed = transport({"method": "getTransaction", "signature": signature, "commitment": "confirmed"})
+    except Exception:
+        return _fee_gap(flow, "fee_transport")
+    body = landed.get("body") if isinstance(landed, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    bound = _evidence_body(signature, case_id, result)
+    if bound is None:
+        return _fee_gap(flow, "flow_identity")
+    decoded = bound["decoded"]
+    meta = bound["meta"]
+    stored_qty = db.query(
+        "SELECT * FROM memecoin_landed_quantity WHERE signature = ? AND message_sha256 = ?",
+        (signature, bound["digest"]),
+    )
+    if len(stored_qty) != 1 or not _quantity_matches_body(stored_qty[0], decoded, meta, bound["slot"]):
+        return _fee_gap(flow, "flow_identity")
+    legs = _swap_legs(decoded)
+    if legs is None:
+        return _fee_gap(flow, "route_unbound")
+    found, reason = _attributed_transfers(meta, decoded, legs)
+    if found is None:
+        return _fee_gap(flow, reason)
+    input_text = _u64_canon(found["input"]["amount"])
+    output_text = _u64_canon(found["output"]["amount"])
+    recorded = db.query("SELECT * FROM memecoin_landed_flow WHERE signature = ?", (signature,))
+    if len(recorded) != 1:
+        return _fee_gap(flow, "flow_required")
+    row = recorded[0]
+    if row["message_sha256"] != bound["digest"] or row["case_id"] != case_id or row["input_raw"] != input_text or row["output_raw"] != output_text or row["network_fee_lamports"] != bound["fee"] or row["landed_slot"] != bound["slot"] or row["vault_binding"] != _VAULT_BINDING:
+        return _fee_gap(flow, "flow_identity")
+    event, event_reason = _traded_from_logs(meta.get("logMessages"), solana_whirlpool.PROGRAM_ID)
+    if event is None:
+        return _fee_gap(flow, event_reason)
+    pool = found["swap"]["accounts"][2]
+    if event["pool"] != pool or event["a_to_b"] is not found["swap"]["a_to_b"]:
+        return _fee_gap(flow, "event_mismatch")
+    if event["input_amount"] != found["input"]["amount"] or event["output_amount"] != found["output"]["amount"]:
+        return _fee_gap(flow, "event_mismatch")
+    if event["input_transfer_fee"] != 0 or event["output_transfer_fee"] != 0:
+        return _fee_gap(flow, "event_transfer_fee")
+    if event["lp_fee"] + event["protocol_fee"] > event["input_amount"]:
+        return _fee_gap(flow, "event_fee_exceeds_input")
+    unit = "lamports" if row["input_mint"] == solana_tx.NATIVE_MINT else "token_raw"
+    if (row["side"] == "entry" and unit != "lamports") or (row["side"] == "exit" and unit != "token_raw"):
+        return _fee_gap(flow, "event_unit")
+    lp_text, protocol_text = _u64_canon(event["lp_fee"]), _u64_canon(event["protocol_fee"])
+    pre_text, post_text = str(event["pre_sqrt_price"]), str(event["post_sqrt_price"])
+    if lp_text is None or protocol_text is None:
+        return _fee_gap(flow, "event_malformed")
+    prior = db.query("SELECT * FROM memecoin_landed_swap_fee WHERE signature = ?", (signature,))
+    same_fields = None
+    if prior:
+        seen = prior[0]
+        same_fields = (
+            seen["message_sha256"] == bound["digest"] and seen["lp_fee"] == lp_text
+            and seen["protocol_fee"] == protocol_text and seen["fee_unit"] == unit
+            and seen["pool"] == pool and seen["input_raw"] == input_text and seen["output_raw"] == output_text
+            and seen["a_to_b"] == (1 if event["a_to_b"] else 0)
+            and seen["pre_sqrt_price"] == pre_text and seen["post_sqrt_price"] == post_text
+            and seen["network_fee_lamports"] == bound["fee"]
+        )
+        return _fee_gap(flow, None if same_fields else "fee_conflict") | {
+            "fee_recorded": bool(same_fields), "fee_proven": bool(same_fields), "idempotent": bool(same_fields),
+            "lp_fee": lp_text if same_fields else None, "protocol_fee": protocol_text if same_fields else None,
+            "fee_unit": unit if same_fields else None, "network_fee_lamports": bound["fee"],
+        }
+
+    def work(conn):
+        conn.execute(
+            """
+            INSERT INTO memecoin_landed_swap_fee (
+                signature, message_sha256, case_id, side, pool, a_to_b, input_raw, output_raw,
+                lp_fee, protocol_fee, fee_unit, network_fee_lamports, pre_sqrt_price, post_sqrt_price, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signature, bound["digest"], case_id, row["side"], pool, 1 if event["a_to_b"] else 0,
+                input_text, output_text, lp_text, protocol_text, unit, bound["fee"], pre_text, post_text, float(now),
+            ),
+        )
+
+    try:
+        db.exclusive(work)
+    except sqlite3.IntegrityError as exc:
+        if "landed_swap_fee" not in str(exc):
+            raise
+        raced = db.query("SELECT * FROM memecoin_landed_swap_fee WHERE signature = ?", (signature,))
+        if raced and raced[0]["lp_fee"] == lp_text and raced[0]["protocol_fee"] == protocol_text and raced[0]["fee_unit"] == unit:
+            return _fee_gap(flow, None) | {
+                "fee_recorded": True, "fee_proven": True, "idempotent": True,
+                "lp_fee": lp_text, "protocol_fee": protocol_text, "fee_unit": unit,
+                "network_fee_lamports": bound["fee"],
+            }
+        return _fee_gap(flow, "fee_conflict")
+    return _fee_gap(flow, None) | {
+        "fee_recorded": True, "fee_proven": True, "idempotent": False, "fee_reason": None,
+        "lp_fee": lp_text, "protocol_fee": protocol_text, "fee_unit": unit,
+        "input_raw": input_text, "output_raw": output_text, "pool": pool,
+        "network_fee_lamports": bound["fee"],
+        "event_source": _WHIRLPOOL_SWAP_SOURCE + " programs/whirlpool/src/events.rs Traded",
+        "next_missing": "landed_fee_valuation",
     }
 
 

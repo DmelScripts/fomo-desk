@@ -3487,6 +3487,7 @@ def _replace_reservation_triggers(conn) -> None:
     _install_landed_evidence(conn)
     _install_landed_quantity(conn)
     _install_landed_flow(conn)
+    _install_landed_swap_fee(conn)
 
 
 def _install_preflight_audit(conn) -> None:
@@ -4494,6 +4495,113 @@ def _install_landed_flow(conn) -> None:
             FOR EACH ROW
             BEGIN
                 SELECT RAISE(ABORT, 'landed_flow');
+            END
+            """
+        )
+
+
+def _install_landed_swap_fee(conn) -> None:
+    """Append-only Traded fee. It does not change the flow row or book a receipt."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_swap_fee (
+            signature TEXT PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            pool TEXT NOT NULL,
+            a_to_b INTEGER NOT NULL,
+            input_raw TEXT NOT NULL,
+            output_raw TEXT NOT NULL,
+            lp_fee TEXT NOT NULL,
+            protocol_fee TEXT NOT NULL,
+            fee_unit TEXT NOT NULL,
+            network_fee_lamports INTEGER NOT NULL,
+            pre_sqrt_price TEXT NOT NULL,
+            post_sqrt_price TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_swap_fee_pin (
+            signature TEXT PRIMARY KEY,
+            lp_fee TEXT NOT NULL,
+            protocol_fee TEXT NOT NULL
+        )
+        """
+    )
+    for name in (
+        "memecoin_landed_swap_fee_insert", "memecoin_landed_swap_fee_record",
+        "memecoin_landed_swap_fee_update", "memecoin_landed_swap_fee_delete",
+        "memecoin_landed_swap_fee_pin_update", "memecoin_landed_swap_fee_pin_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_swap_fee_pin (signature, lp_fee, protocol_fee)
+        SELECT signature, lp_fee, protocol_fee FROM memecoin_landed_swap_fee
+        WHERE signature NOT IN (SELECT signature FROM memecoin_landed_swap_fee_pin)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_swap_fee_insert
+        BEFORE INSERT ON memecoin_landed_swap_fee
+        FOR EACH ROW
+        WHEN NEW.fee_unit NOT IN ('lamports', 'token_raw')
+        OR (NEW.side = 'entry' AND NEW.fee_unit != 'lamports')
+        OR (NEW.side = 'exit' AND NEW.fee_unit != 'token_raw')
+        OR NEW.a_to_b NOT IN (0, 1)
+        OR NEW.network_fee_lamports < 0
+        OR length(NEW.lp_fee) < 1 OR length(NEW.protocol_fee) < 1
+        OR NEW.lp_fee GLOB '*[^0-9]*' OR NEW.protocol_fee GLOB '*[^0-9]*'
+        OR NEW.lp_fee GLOB '0?*' OR NEW.protocol_fee GLOB '0?*'
+        OR length(NEW.lp_fee) > 20 OR length(NEW.protocol_fee) > 20
+        OR (length(NEW.lp_fee) = 20 AND NEW.lp_fee > '18446744073709551615')
+        OR (length(NEW.protocol_fee) = 20 AND NEW.protocol_fee > '18446744073709551615')
+        OR length(NEW.pre_sqrt_price) < 1 OR length(NEW.post_sqrt_price) < 1
+        OR NEW.pre_sqrt_price GLOB '*[^0-9]*' OR NEW.post_sqrt_price GLOB '*[^0-9]*'
+        OR NEW.pre_sqrt_price GLOB '0?*' OR NEW.post_sqrt_price GLOB '0?*'
+        OR EXISTS (SELECT 1 FROM memecoin_landed_swap_fee_pin WHERE signature = NEW.signature)
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_flow
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id AND side = NEW.side
+              AND input_raw = NEW.input_raw AND output_raw = NEW.output_raw
+              AND network_fee_lamports = NEW.network_fee_lamports
+              AND vault_binding = 'whirlpool_swap_constraint'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_swap_fee');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_swap_fee_record
+        AFTER INSERT ON memecoin_landed_swap_fee
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_landed_swap_fee_pin (signature, lp_fee, protocol_fee)
+            VALUES (NEW.signature, NEW.lp_fee, NEW.protocol_fee);
+        END
+        """
+    )
+    for name, table, kind in (
+        ("memecoin_landed_swap_fee_update", "memecoin_landed_swap_fee", "UPDATE"),
+        ("memecoin_landed_swap_fee_delete", "memecoin_landed_swap_fee", "DELETE"),
+        ("memecoin_landed_swap_fee_pin_update", "memecoin_landed_swap_fee_pin", "UPDATE"),
+        ("memecoin_landed_swap_fee_pin_delete", "memecoin_landed_swap_fee_pin", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'landed_swap_fee');
             END
             """
         )

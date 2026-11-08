@@ -4607,7 +4607,8 @@ conn.close()
             sell_sig: body(sell, sell_keys, sell_index, 1, "1000", "600", 400, 250_000, "exit"),
         }
         overlay = {}
-        reads = {"n": 0}
+        fee_overlay = {}
+        reads = {"n": 0, "phase": "flow"}
         lock = threading.Lock()
 
         swap_disc = bytes.fromhex("f8c69e91e17587c8")
@@ -4686,6 +4687,66 @@ conn.close()
                 return [{"index": 0, "instructions": rows}]
             return [{"index": view["index"], "instructions": rows}]
 
+        traded_disc = bytes.fromhex("e1ca49af932ba096")
+
+        def traded(pool_key, a_to_b, input_amount, output_amount, lp, protocol):
+            raw = bytearray(traded_disc)
+            raw += solana_tx.b58decode(pool_key)
+            raw += bytes([1 if a_to_b else 0])
+            raw += (1).to_bytes(16, "little") + (2).to_bytes(16, "little")
+            for number in (input_amount, output_amount, 0, 0, lp, protocol):
+                raw += int(number).to_bytes(8, "little")
+            return base64.b64encode(bytes(raw)).decode("ascii")
+
+        def event_logs(view):
+            mode = view.get("log_mode")
+            if mode == "missing":
+                return None
+            a_to_b = view["side"] == "entry"
+            lp, protocol = (30, 10) if a_to_b else (4, 1)
+            amount_in = view["input"]
+            amount_out = view["output"]
+            pool_key = pool
+            if mode == "input":
+                amount_in = 111
+            elif mode == "pool":
+                pool_key = oracle
+            elif mode == "direction":
+                a_to_b = not a_to_b
+            elif mode == "exceeds":
+                lp = view["input"] + 1
+            elif mode == "conflict":
+                lp = 31 if a_to_b else 5
+            payload = traded(pool_key, a_to_b, amount_in, amount_out, lp, protocol)
+            if mode == "short":
+                payload = base64.b64encode(traded_disc + b"\x00").decode("ascii")
+            whirlpool = solana_whirlpool.PROGRAM_ID
+            jupiter = solana_jupiter.PROGRAM_ID
+            token_program = solana_tx.TOKEN_PROGRAM
+            data_line = f"Program log: Program data: {payload}" if mode == "spoof" else f"Program data: {payload}"
+            lines = [f"Program {jupiter} invoke [1]"]
+            if mode == "foreign":
+                lines.append(f"Program data: {payload}")
+            lines.extend([
+                f"Program {whirlpool} invoke [2]",
+                f"Program {token_program} invoke [3]",
+                f"Program {token_program} success",
+                f"Program {token_program} invoke [3]",
+                f"Program {token_program} success",
+            ])
+            if mode != "absent":
+                lines.append(data_line)
+            if mode == "double":
+                lines.append(f"Program data: {payload}")
+            if mode != "unbalanced":
+                lines.append(f"Program {whirlpool} consumed 1000 of 200000 compute units")
+                lines.append(f"Program {whirlpool} success")
+                lines.append(f"Program {jupiter} consumed 2000 of 200000 compute units")
+                lines.append(f"Program {jupiter} success")
+            if mode == "truncated":
+                lines.append("Log truncated")
+            return lines
+
         def transport(request):
             method = request.get("method")
             if method == "getGenesisHash":
@@ -4699,7 +4760,12 @@ conn.close()
             if method == "getTransaction":
                 with lock:
                     reads["n"] += 1
-                    patch = dict(overlay) if reads["n"] % 3 == 0 else {}
+                    if reads["phase"] == "fee" and reads["n"] % 4 == 0:
+                        patch = dict(fee_overlay)
+                    elif reads["phase"] != "fee" and reads["n"] % 3 == 0:
+                        patch = dict(overlay)
+                    else:
+                        patch = {}
                 view = dict(bases[request.get("signature")])
                 view.update(patch)
                 width = len(view["keys"])
@@ -4721,6 +4787,9 @@ conn.close()
                 loaded = inners(view)
                 if loaded is not None:
                     meta["innerInstructions"] = loaded
+                logged = event_logs(view)
+                if logged is not None:
+                    meta["logMessages"] = logged
                 return {"status": 200, "body": {"result": {"slot": view["slot"], "transaction": [view["tx"], "base64"], "meta": meta}}}
             if method == "getAccountInfo" and request.get("purpose") == "mint_decimals":
                 raw_mint = bytearray(82)
@@ -4907,6 +4976,91 @@ conn.close()
         self.assertFalse(forged["flow_recorded"])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_flow")[0]["n"], 2)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
+        reads["phase"] = "fee"
+        reads["n"] = 0
+        for label, mode, reason in (
+            ("missing", "missing", "event_log_missing"),
+            ("spoof", "spoof", "event_absent"),
+            ("foreign", "foreign", "event_foreign_program"),
+            ("double", "double", "event_ambiguous"),
+            ("short", "short", "event_malformed"),
+            ("unbalanced", "unbalanced", "event_log_unbalanced"),
+            ("truncated", "truncated", "event_log_truncated"),
+            ("input", "input", "event_mismatch"),
+            ("pool", "pool", "event_mismatch"),
+            ("direction", "direction", "event_mismatch"),
+            ("exceeds", "exceeds", "event_fee_exceeds_input"),
+        ):
+            fee_overlay.clear()
+            fee_overlay["log_mode"] = mode
+            bad = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 9)
+            fee_overlay.clear()
+            self.assertEqual(bad["fee_reason"], reason, label)
+            self.assertFalse(bad["fee_recorded"], label)
+            self.assertFalse(bad["combined_fee_cap_proven"], label)
+            self.assertFalse(bad["one_shot_fee_used"], label)
+            self.assertIsNone(bad["dex_fee_lamports"], label)
+            self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_swap_fee")[0]["n"], 0, label)
+        fee_overlay["tx"] = alt_tx
+        laundered_fee = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 10)
+        fee_overlay.clear()
+        self.assertEqual(laundered_fee["fee_reason"], "flow_identity")
+        self.assertFalse(laundered_fee["fee_recorded"])
+        self.assertEqual(db.query("SELECT input_raw FROM memecoin_landed_flow WHERE signature = ?", (buy_sig,))[0]["input_raw"], "1000000")
+        bought_fee = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 11)
+        self.assertTrue(bought_fee["fee_recorded"], bought_fee)
+        self.assertEqual(bought_fee["lp_fee"], "30")
+        self.assertEqual(bought_fee["protocol_fee"], "10")
+        self.assertEqual(bought_fee["fee_unit"], "lamports")
+        self.assertEqual(bought_fee["input_raw"], "1000000")
+        self.assertEqual(bought_fee["network_fee_lamports"], 5000)
+        self.assertFalse(bought_fee["fee_added_to_input"])
+        self.assertTrue(bought_fee["fee_inside_input"])
+        self.assertFalse(bought_fee["network_fee_added_to_dex_fee"])
+        self.assertFalse(bought_fee["combined_fee_cap_proven"])
+        self.assertFalse(bought_fee["usd_proven"])
+        self.assertFalse(bought_fee["pretrade_fee_bound_from_event"])
+        self.assertFalse(bought_fee["receipt_booked"])
+        self.assertEqual(bought_fee["next_missing"], "landed_fee_valuation")
+        self.assertEqual(db.query("SELECT input_raw FROM memecoin_landed_flow WHERE signature = ?", (buy_sig,))[0]["input_raw"], "1000000")
+        sold_fee = desk_loop.record_landed_swap_fee("flow-case", sell_sig, transport, 12)
+        self.assertTrue(sold_fee["fee_recorded"], sold_fee)
+        self.assertEqual(sold_fee["lp_fee"], "4")
+        self.assertEqual(sold_fee["protocol_fee"], "1")
+        self.assertEqual(sold_fee["fee_unit"], "token_raw")
+        self.assertEqual(sold_fee["network_fee_lamports"], 5000)
+        self.assertFalse(sold_fee["network_fee_added_to_dex_fee"])
+        self.assertNotEqual(sold_fee["fee_unit"], "lamports")
+        fee_overlay["log_mode"] = "conflict"
+        changed = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 13)
+        fee_overlay.clear()
+        self.assertEqual(changed["fee_reason"], "fee_conflict")
+        self.assertEqual(db.query("SELECT lp_fee, protocol_fee, fee_unit FROM memecoin_landed_swap_fee WHERE signature = ?", (buy_sig,))[0]["lp_fee"], "30")
+        again_fee = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 14)
+        self.assertTrue(again_fee["idempotent"])
+        self.assertEqual(again_fee["lp_fee"], "30")
+        memecoin_desk._ensure()
+        self.assertEqual(db.query("SELECT protocol_fee FROM memecoin_landed_swap_fee WHERE signature = ?", (buy_sig,))[0]["protocol_fee"], "10")
+        restarted = desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 15)
+        self.assertTrue(restarted["fee_recorded"])
+        self.assertTrue(restarted["idempotent"])
+        fee_raced = []
+
+        def repeat_fee():
+            fee_raced.append(desk_loop.record_landed_swap_fee("flow-case", buy_sig, transport, 16))
+
+        fee_threads = [threading.Thread(target=repeat_fee) for _ in range(4)]
+        for thread in fee_threads:
+            thread.start()
+        for thread in fee_threads:
+            thread.join()
+        self.assertTrue(all(item["fee_recorded"] and item["lp_fee"] == "30" for item in fee_raced))
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_swap_fee WHERE signature = ?", (buy_sig,))[0]["n"], 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_landed_swap_fee SET lp_fee = '1' WHERE signature = ?", (buy_sig,))
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_exit_receipts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
 
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
