@@ -93,16 +93,14 @@ def minimum_out(quoted: int, slippage_bps: int) -> int | None:
     return floors[0]
 
 
-def quote_request(estimate: int) -> dict:
+def encoded_slippage(estimate: int) -> dict:
     """Largest declared bps whose encoded floor still meets the 50 bps ceiling.
 
-    The quoted output is the pool estimate. It is not raised by one unit, and
-    this function does not call a route API. 50 is the maximum. A non-divisible
-    estimate steps down, including to 0 when that is the only encoding whose
-    floor is at least the ceiling.
+    This is arithmetic on one integer. It does not read the owner record and it
+    does not approve a request. The quoted output is the estimate itself.
     """
     import owner_slippage
-    refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "network": "not_called", "idl_has_explicit_minimum": False}
+    refused = {"ok": False, "approved": False, "send": False, "sign": False, "live_ready": False, "network": "not_called", "idl_has_explicit_minimum": False}
     if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
         return refused | {"reason": "quote_unbound"}
     try:
@@ -121,6 +119,7 @@ def quote_request(estimate: int) -> dict:
         return refused | {"reason": "no_encoded_minimum", "owner_floor": ceiling, "quoted_out_amount": estimate}
     return {
         "ok": True,
+        "approved": False,
         "reason": None,
         "quoted_out_amount": estimate,
         "slippage_bps": chosen,
@@ -135,6 +134,76 @@ def quote_request(estimate: int) -> dict:
         "live_ready": False,
         "network": "not_called",
     }
+
+
+def quote_request(estimate: int) -> dict:
+    """Owner-aware request. A missing, revoked, or conflicting record is not 49 bps.
+
+    The pure encoding is encoded_slippage. This function reports that encoding
+    only when the persisted owner record is the approved 50 basis-point ceiling.
+    It does not call a route API, and a test allowance is not an input.
+    """
+    import owner_slippage
+    refused = {
+        "ok": False,
+        "approved": False,
+        "reason": "owner_slippage_unapproved",
+        "slippage_bps": None,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "network": "not_called",
+        "idl_has_explicit_minimum": False,
+    }
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
+        return refused
+    body = encoded_slippage(estimate)
+    if body.get("ok") is not True:
+        body["approved"] = False
+        return body
+    body["approved"] = True
+    return body
+
+
+def measure_pool(accounts: dict, pool: str, amount: int, input_mint: str) -> dict:
+    """Estimate one exact-in swap from the pool and tick accounts. No caller estimate."""
+    import solana_whirlpool_quote
+    refused = {"ok": False, "reason": "estimate_unavailable", "send": False}
+    if not isinstance(accounts, dict) or not isinstance(pool, str) or not isinstance(input_mint, str):
+        return refused
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return refused
+    record = accounts.get(pool)
+    if not isinstance(record, tuple) or len(record) != 2 or not isinstance(record[1], (bytes, bytearray)):
+        return refused
+    fields = solana_whirlpool.pool_fields(record[1])
+    state = solana_whirlpool.pool_state(record[1])
+    if fields is None or state is None or input_mint not in {fields[0], fields[2]}:
+        return refused
+    a_to_b = fields[0] == input_mint
+    spacing = state["tick_spacing"]
+    current = state["tick_current_index"]
+    base = solana_whirlpool.start_tick_index(current, spacing)
+    step = solana_whirlpool.TICK_ARRAY_SIZE * spacing
+    starts = [base - i * step for i in range(3)]
+    arrays = []
+    for start in starts:
+        address = solana_whirlpool.tick_array_address(pool, start)
+        tick = accounts.get(address)
+        if not isinstance(tick, tuple) or len(tick) != 2:
+            return refused
+        parsed_array = solana_whirlpool.tick_array_state(tick[1])
+        if parsed_array is None or parsed_array.get("pool") != pool:
+            return refused
+        arrays.append({"start_tick_index": parsed_array["start_tick_index"], "ticks": parsed_array["ticks"]})
+    try:
+        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, amount, a_to_b, 0, 0, 1)
+    except solana_whirlpool_quote.QuoteError:
+        return refused
+    estimate = quoted.get("token_est_out")
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
+        return refused
+    return {"ok": True, "est_out": estimate, "pool": pool, "a_to_b": a_to_b, "send": False}
 
 
 def parse(data: bytes) -> dict:

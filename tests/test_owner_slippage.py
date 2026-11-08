@@ -91,6 +91,17 @@ class OwnerSlippageTests(unittest.TestCase):
         db.init_db()
         self.assertEqual(owner_slippage.configuration()["record_state"], "absent_after_migration")
         self.assertIsNone(owner_slippage.ceiling_bps())
+        blocked = jupiter_route_v2.quote_request(999_899)
+        self.assertFalse(blocked["ok"])
+        self.assertFalse(blocked["approved"])
+        self.assertIsNone(blocked["slippage_bps"])
+        self.assertEqual(blocked["reason"], "owner_slippage_unapproved")
+        import importlib
+        import public_market
+        importlib.reload(public_market)
+        db.init_db()
+        self.assertIsNone(db.get_setting(owner_slippage.KEY, None))
+        self.assertEqual(jupiter_route_v2.quote_request(999_899)["reason"], "owner_slippage_unapproved")
         self.assertIsNone(db.get_setting(owner_slippage.KEY, None))
         self.assertIn("owner_slippage_unapproved", desk_loop.scheduler_status()["ready_because"])
 

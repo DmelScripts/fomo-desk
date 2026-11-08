@@ -40,12 +40,12 @@ def order_url(input_mint: str, output_mint: str, amount: str) -> str:
     return f"{ORDER_URL}?inputMint={input_mint}&outputMint={output_mint}&amount={amount}"
 
 
-def build_url(input_mint: str, output_mint: str, amount: str, slippage_bps: int = 50) -> str:
+def build_url(input_mint: str, output_mint: str, amount: str, slippage_bps: int) -> str:
     """Documented instruction build. The taker is the server wallet. Nothing is signed.
 
-    A memecoin route passes the bps from jupiter_route_v2.quote_request. The
-    default 50 is the owner ceiling, not a promise that a 50 bps encoding meets
-    that ceiling for every pool estimate. This function does not perform the request.
+    slippage_bps is required. There is no default of 50. The service passes the
+    bps selected from the measured pool and the stored owner record. 51 and 100
+    are outside that ceiling. This function does not perform the request.
     """
     if isinstance(slippage_bps, bool) or not isinstance(slippage_bps, int) or not 0 <= slippage_bps <= 50:
         raise ValueError("slippage request is outside the owner ceiling")

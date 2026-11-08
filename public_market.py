@@ -15,7 +15,6 @@ import jupiter_swap_v2
 import memecoin_desk
 import solana_inspect
 import solana_mint_read
-import solana_tx
 
 MAX_CALLS = 5
 
@@ -27,8 +26,30 @@ class PublicStop(RuntimeError):
         super().__init__(reason)
 
 
-def run_bounded(transport, now: float) -> dict:
-    """Walk one public mint into the desk, then assess Jupiter without sending."""
+def run_bounded(
+    transport,
+    now: float,
+    *,
+    pool_accounts=None,
+    pool=None,
+    amount=None,
+    input_mint=None,
+    output_mint=None,
+    slippage_bps=None,
+    slippage_allowance_bps=None,
+) -> dict:
+    """Walk one public mint into the desk, then assess Jupiter without sending.
+
+    A caller slippage number, including 50, 51, or 100, is refused before any
+    network call. The Jupiter URL is built only from the stored owner record
+    and the estimate measured from pool_accounts. Without that measurement the
+    build is not requested.
+    """
+    if slippage_bps is not None or slippage_allowance_bps is not None:
+        return _refused_route("slippage_override")
+    import owner_slippage
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
+        return _refused_route("owner_slippage_unapproved")
     if transport is None:
         raise PublicStop("network_disabled")
     calls = []
@@ -67,19 +88,9 @@ def run_bounded(transport, now: float) -> dict:
     filtered = {"ok": False, "reason": opened.get("reason"), "stage": opened.get("stage")}
     if opened.get("ok") is True:
         filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
-    order = {"ok": False, "reason": "not_called", "execution_allowed": False, "min_out_proven": False}
-    build = None
-    build_status = None
-    try:
-        order = jupiter_swap_v2.assess_order(get(jupiter_swap_v2.order_url(solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, "10000000")))
-        build_body = get(jupiter_swap_v2.build_url(solana_tx.NATIVE_MINT, solana_tx.USDC_MINT, "10000000"))
-        build = jupiter_swap_v2.assess_build(build_body)
-    except PublicStop as exc:
-        build_status = exc.status
-        if order.get("reason") == "not_called":
-            order = {"ok": False, "reason": exc.reason, "status": exc.status, "execution_allowed": False, "min_out_proven": False, "transaction_present": False}
-        else:
-            build = {"ok": False, "reason": exc.reason, "status": exc.status, "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+    order, build, build_status, instruction = _jupiter_route(
+        get, pool_accounts, pool, amount, input_mint, output_mint,
+    )
     return {
         "ok": False,
         "reason": filtered.get("reason") or parsed.get("reason"),
@@ -96,12 +107,117 @@ def run_bounded(transport, now: float) -> dict:
             "execution_allowed", "buy_proven", "exit_proven",
         )},
         "jupiter_build_status": build_status,
+        "instruction_data_b64": instruction.get("instruction_data_b64"),
+        "instruction_sha256": instruction.get("instruction_sha256"),
+        "instruction_matches_request": instruction.get("instruction_matches_request") is True,
+        "measured_est_out": instruction.get("measured_est_out"),
+        "requested_slippage_bps": instruction.get("requested_slippage_bps"),
+        "rewritten": False,
         "calls": calls,
         "send": False,
         "sign": False,
         "live_ready": False,
         "fixture": False,
     }
+
+
+def _refused_route(reason: str) -> dict:
+    """No transport. A missing policy or a caller slippage number never becomes a URL."""
+    return {
+        "ok": False,
+        "reason": reason,
+        "calls": [],
+        "http_calls": 0,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "fixture": False,
+        "instruction_matches_request": False,
+        "rewritten": False,
+        "requested_slippage_bps": None,
+        "measured_est_out": None,
+        "jupiter_order": {"reason": reason, "execution_allowed": False, "min_out_proven": False, "transaction_present": False},
+        "jupiter_build": {"reason": reason, "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False},
+    }
+
+
+def _jupiter_route(get, pool_accounts, pool, amount, input_mint, output_mint) -> tuple:
+    """Measure the pool, select the bps, then fetch. The response bytes are not edited."""
+    import base64
+    import hashlib
+    import jupiter_route_v2
+    import owner_slippage
+    order = {"ok": False, "reason": "estimate_unavailable", "execution_allowed": False, "min_out_proven": False, "transaction_present": False}
+    build = {"ok": False, "reason": "estimate_unavailable", "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+    instruction = {"instruction_matches_request": False, "rewritten": False, "requested_slippage_bps": None, "measured_est_out": None, "instruction_data_b64": None, "instruction_sha256": None}
+    if pool_accounts is None or pool is None or amount is None or input_mint is None or output_mint is None:
+        return order, build, None, instruction
+    measured = jupiter_route_v2.measure_pool(pool_accounts, pool, amount, input_mint)
+    if measured.get("ok") is not True:
+        order["reason"] = measured.get("reason") or "estimate_unavailable"
+        build["reason"] = order["reason"]
+        return order, build, None, instruction
+    selected = jupiter_route_v2.quote_request(measured["est_out"])
+    instruction["measured_est_out"] = measured["est_out"]
+    if selected.get("ok") is not True or selected.get("approved") is not True:
+        order["reason"] = selected.get("reason") or "owner_slippage_unapproved"
+        build["reason"] = order["reason"]
+        return order, build, None, instruction
+    requested = selected["slippage_bps"]
+    instruction["requested_slippage_bps"] = requested
+    try:
+        order = jupiter_swap_v2.assess_order(get(jupiter_swap_v2.order_url(input_mint, output_mint, str(amount))))
+        build_body = get(jupiter_swap_v2.build_url(input_mint, output_mint, str(amount), slippage_bps=requested))
+    except PublicStop as exc:
+        if order.get("reason") == "estimate_unavailable":
+            order = {"ok": False, "reason": exc.reason, "status": exc.status, "execution_allowed": False, "min_out_proven": False, "transaction_present": False}
+            return order, build, exc.status, instruction
+        build = {"ok": False, "reason": exc.reason, "status": exc.status, "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+        return order, build, exc.status, instruction
+    if not isinstance(build_body, dict):
+        build = {"ok": False, "reason": "build_shape", "execution_allowed": False, "send": False, "min_out_proven": False, "buy_proven": False, "exit_proven": False}
+        return order, build, None, instruction
+    raw = _swap_bytes(build_body)
+    build = jupiter_swap_v2.assess_build(build_body)
+    parsed = jupiter_route_v2.parse(raw) if raw else {"ok": False}
+    check = owner_slippage.check_route(parsed.get("slippage_bps"), parsed.get("min_out"), measured["est_out"])
+    matches = (
+        raw != b""
+        and parsed.get("slippage_bps") == requested
+        and parsed.get("quoted_out_amount") == measured["est_out"]
+        and check.get("ok") is True
+    )
+    encoded = base64.b64encode(raw).decode("ascii") if raw else None
+    instruction = {
+        "instruction_data_b64": encoded,
+        "instruction_sha256": None if not raw else hashlib.sha256(raw).hexdigest(),
+        "instruction_matches_request": matches,
+        "measured_est_out": measured["est_out"],
+        "requested_slippage_bps": requested,
+        "rewritten": False,
+    }
+    build["requested_slippage_bps"] = requested
+    build["measured_est_out"] = measured["est_out"]
+    build["instruction_matches_request"] = matches
+    build["execution_allowed"] = False
+    build["buy_proven"] = False
+    build["exit_proven"] = False
+    build["send"] = False
+    if not matches:
+        build["reason"] = check.get("reason") or parsed.get("reason") or "instruction_mismatch"
+    return order, build, None, instruction
+
+
+def _swap_bytes(body: dict) -> bytes:
+    import base64
+    instruction = body.get("swapInstruction") if isinstance(body.get("swapInstruction"), dict) else {}
+    data = instruction.get("data")
+    if not isinstance(data, str) or data == "":
+        return b""
+    try:
+        return base64.b64decode(data, validate=True)
+    except Exception:
+        return b""
 
 
 def live_transport(request: dict):
