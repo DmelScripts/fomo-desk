@@ -33,9 +33,30 @@ def _authorized() -> bool:
         return False
 
 
+def _ready_reasons() -> list[str]:
+    """Missing evidence. A test cannot delete these by replacing this function's constant result."""
+    reasons = []
+    if _authorized() is not True or db_setting("memecoin_max_slippage_bps") in (None, ""):
+        reasons.append("owner_slippage_unapproved")
+    if stalkchain_adapter.UNPROVEN:
+        reasons.append("lp_fields_unpublished")
+        reasons.append("rug_history_unpublished")
+    reasons.append("holder_growth_unproven")
+    if db_setting("memecoin_entry_halt") == "1":
+        reasons.append("entry_halt")
+    return reasons
+
+
+def db_setting(key: str):
+    import db
+    try:
+        return db.get_setting(key, "")
+    except Exception:
+        return ""
+
+
 def _ready() -> bool:
-    """LP, rug history, holder growth, and an owner slippage limit are still missing."""
-    return False
+    return _ready_reasons() == []
 
 
 def scheduler_status() -> dict:
@@ -46,12 +67,7 @@ def scheduler_status() -> dict:
         "armed": authorized and ready,
         "authorized": authorized,
         "ready": ready,
-        "ready_because": [] if ready else [
-            "owner_slippage_unapproved",
-            "lp_fields_unpublished",
-            "rug_history_unpublished",
-            "holder_growth_unproven",
-        ],
+        "ready_because": [] if ready else _ready_reasons(),
         "started": _runtime["started"],
         "running": _runtime["running"],
         "passes": _runtime["passes"],
@@ -76,7 +92,8 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
     try:
         response = transport({"kind": "http", "url": dexscreener_public.BOOSTS_URL})
     except Exception:
-        return stopped | {"reason": "dexscreener_transport", "mint": None}
+        _halt_entries()
+        return stopped | {"reason": "discovery_fault", "entry_halt": True, "mint": None}
     if not isinstance(response, dict) or response.get("status") != 200:
         return stopped | {"reason": "dexscreener_status", "mint": None}
     selected = dexscreener_public.parse_boost_mints(response.get("body"))
@@ -194,7 +211,7 @@ def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
                 _runtime["faults"] += 1
                 _runtime["last_fault"] = repr(exc)
                 faults += 1
-                break
+                _halt_entries()
     finally:
         _runtime["started"] = False
         _runtime["running"] = False
@@ -267,16 +284,48 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     }
 
 
+def _halt_entries() -> None:
+    import db
+    try:
+        db.set_setting("memecoin_entry_halt", "1", "scheduler_fault")
+    except Exception:
+        return
+
+
+def read_transaction(signature: str) -> dict:
+    """Confirmed mainnet getTransaction plus the genesis hash. This is the only confirm reader."""
+    import memecoin_exit
+    import solana_inspect
+    try:
+        genesis = public_reader({"method": "getGenesisHash"})
+        response = public_reader({"method": "getTransaction", "signature": signature})
+    except Exception:
+        return {"ok": False, "reason": "receipt_unknown", "holds": True, "resend": False}
+    body = genesis.get("body") if isinstance(genesis, dict) else None
+    if not isinstance(body, dict) or body.get("result") != solana_inspect.MAINNET_GENESIS:
+        return {"ok": False, "reason": "genesis", "holds": True, "resend": False}
+    return memecoin_exit.pull_response(response)
+
+
 def public_reader(request: dict) -> dict:
     """Documented DexScreener GET or one mainnet getAccountInfo. The unarmed process does not call this."""
     import json
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("kind") == "rpc":
-        if request.get("method") != "getAccountInfo":
+    method = request.get("method")
+    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getTransaction", "getSignatureStatuses", "getGenesisHash"}:
+        if method == "getAccountInfo":
+            params = [request.get("mint"), {"encoding": "base64", "commitment": "confirmed"}]
+        elif method == "getTransaction":
+            params = [request.get("signature"), {"encoding": "base64", "commitment": "confirmed", "maxSupportedTransactionVersion": 0}]
+        elif method == "getSignatureStatuses":
+            params = [[request.get("signature")], {"searchTransactionHistory": True}]
+        elif method == "getGenesisHash":
+            params = []
+        else:
             raise RuntimeError("method_refused")
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo", "params": [request.get("mint"), {"encoding": "base64"}]}
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
     else:
         url = request.get("url")

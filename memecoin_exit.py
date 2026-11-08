@@ -24,6 +24,32 @@ def bind(mint: str, body: dict, sol_leg: dict) -> dict:
     return {"ok": False, "live_ready": False, "send": False, "reason": "receipt_unbound", "holds": True, "resend": False}
 
 
+def pull_response(response: dict) -> dict:
+    """Parse one getTransaction response. A null result is unconfirmed, not a fill."""
+    refused = {"ok": False, "holds": True, "resend": False, "live_ready": False, "send": False}
+    if not isinstance(response, dict) or response.get("status") != 200 or not isinstance(response.get("body"), dict):
+        return refused | {"reason": "receipt_unknown"}
+    if response["body"].get("error"):
+        return refused | {"reason": "receipt_unknown"}
+    result = response["body"].get("result")
+    if result is None:
+        return refused | {"reason": "receipt_unconfirmed"}
+    if not isinstance(result, dict):
+        return refused | {"reason": "receipt_unknown"}
+    meta = result.get("meta")
+    if not isinstance(meta, dict):
+        return refused | {"reason": "receipt_unknown"}
+    if meta.get("err") is not None:
+        return refused | {"reason": "receipt_failed"}
+    encoded = result.get("transaction")
+    if not isinstance(encoded, list) or not encoded or not isinstance(encoded[0], str):
+        return refused | {"reason": "receipt_unknown"}
+    slot = result.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int):
+        return refused | {"reason": "slot_unproven"}
+    return {"ok": True, "transaction": encoded[0], "meta": meta, "slot": slot, "holds": False, "resend": False}
+
+
 def pull(signature: str, transport) -> dict:
     """One confirmed getTransaction. A missing or failed read holds the position and does not fill."""
     refused = {"ok": False, "holds": True, "resend": False, "live_ready": False, "send": False}

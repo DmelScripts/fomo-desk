@@ -447,30 +447,67 @@ class MemecoinDeskTests(unittest.TestCase):
         source = values["source"]
         wallet = phantom_transport.REQUIRED_WALLET
 
-        def transport(request):
-            self.assertEqual(request["method"], "getTransaction")
-            self.assertEqual(request["signature"], signature)
-            return {"status": 200, "body": {"result": {
-                "slot": 466835746,
-                "meta": {
-                    "err": None,
-                    "fee": 5000,
-                    "preBalances": pre,
-                    "postBalances": post,
-                    "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "50"}}],
-                    "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
-                },
-                "transaction": [signed, "base64"],
-            }}}
+        import json as _json
+        import urllib.request
+        calls = []
 
-        booked = memecoin_desk.confirm_exit(case_id, signature, transport, WHEN)
+        def urlopen(req, timeout=8):
+            payload = _json.loads(req.data.decode())
+            calls.append(payload["method"])
+            if payload["method"] == "getGenesisHash":
+                body = {"jsonrpc": "2.0", "result": __import__("solana_inspect").MAINNET_GENESIS}
+            elif payload["method"] == "getTransaction" and len(calls) < 4:
+                body = {"jsonrpc": "2.0", "result": None}
+            else:
+                body = {"jsonrpc": "2.0", "result": {
+                    "slot": 466835746,
+                    "meta": {
+                        "err": None,
+                        "fee": 5000,
+                        "preBalances": pre,
+                        "postBalances": post,
+                        "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "50"}}],
+                        "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
+                    },
+                    "transaction": [signed, "base64"],
+                }}
+
+            class _Response:
+                status = 200
+
+                def read(self):
+                    return _json.dumps(body).encode()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+            return _Response()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        unknown = memecoin_desk.confirm_exit(case_id, signature, WHEN)
+        self.assertEqual(unknown["reason"], "receipt_unconfirmed")
+        self.assertTrue(unknown["holds"])
+        self.assertFalse(unknown["resend"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], "8.00")
+        booked = memecoin_desk.confirm_exit(case_id, signature, WHEN)
         self.assertTrue(booked["ok"], booked)
         self.assertEqual(booked["sol_proceeds"], 105_000)
         self.assertEqual(booked["remaining_raw"], 0)
         self.assertEqual(booked["stage"], "exited")
         self.assertTrue(booked["live_ledger"])
         self.assertNotEqual(booked["sol_proceeds"], 8)
-        again = memecoin_desk.confirm_exit(case_id, other_sig, transport, WHEN)
+        self.assertEqual(booked["fee_usd"], db.query("SELECT fee_usd FROM memecoin_exit_receipts")[0]["fee_usd"])
+        self.assertFalse(str(booked["fee_usd"]).startswith("lamports:"))
+        self.assertLessEqual(Decimal(booked["fee_usd"]), Decimal("0.05"))
+        self.assertEqual(booked["rent_lamports"], 0)
+        self.assertIn("getTransaction", calls)
+        self.assertIn("getGenesisHash", calls)
+        again = memecoin_desk.confirm_exit(case_id, other_sig, WHEN)
         self.assertNotEqual(again.get("reason"), None)
         self.assertEqual(len(db.query("SELECT signature FROM memecoin_exit_receipts")), 1)
         import memecoin_exit
@@ -484,7 +521,72 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(unsigned["reason"], "receipt_unsigned")
         self.assertTrue(unsigned["holds"])
         self.assertFalse(unsigned["resend"])
-        unsigned_pull = dict(transport( {"method": "getTransaction", "signature": signature} ))
-        zeros = bytearray(raw)
-        zeros[1:65] = b"\x00" * 64
-        unsigned_pull["body"]["result"]["transaction"][0] = base64.b64encode(bytes(zeros)).decode()
+
+    def test_open_positions_keep_the_ticket_and_a_landed_over_fee_is_a_breach(self):
+        import base64
+        import json as _json
+        import urllib.request
+        from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _snap, _tx
+        partial = self._filled(12)
+        body = memecoin_desk.view(partial)["snapshot"]
+        body["remaining_raw"] = 200
+        db.execute("UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = ?", (_json.dumps(body), partial))
+        self.assertEqual(db.exclusive(memecoin_desk._held_conn), Decimal("8.00"))
+        paper = self._filled(13)
+        self.assertEqual(memecoin_desk.mark(paper, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)["action"], "stop")
+        self.assertEqual(memecoin_desk.view(paper)["stage"], "paper_exited")
+        self.assertEqual(db.exclusive(memecoin_desk._held_conn), Decimal("16.00"))
+        opened = []
+        for number in range(20, 32):
+            opened.append(_protect(self._analyzed(number)))
+        self.assertEqual(sum(1 for item in opened if item.get("ok")), 10)
+        self.assertEqual(opened[10]["reason"], "allocation")
+        mint = memecoin_desk.view(partial)["mint"]
+        values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        unsigned = _tx(_metas(mint, solana_tx.NATIVE_MINT, values), _route(1_000, 0, True, amount=50), side="exit")
+        raw = bytearray(base64.b64decode(unsigned))
+        raw[1:65] = b"\x31" * 64
+        signed = base64.b64encode(bytes(raw)).decode()
+        signature = solana_tx.first_signature(signed)
+        reserved = memecoin_desk.reserve_exit(partial, signed, 50, _snap(accounts, WHEN), _prices(), WHEN)
+        self.assertTrue(reserved["ok"], reserved)
+        decoded = solana_tx.decode_transaction(bytes(raw))
+        width = len(decoded.static_keys)
+        pre = [0] * width
+        post = [0] * width
+        pre[0] = 5_000_000
+        post[0] = 5_100_000
+        wallet = phantom_transport.REQUIRED_WALLET
+
+        def urlopen(req, timeout=8):
+            payload = _json.loads(req.data.decode())
+            if payload["method"] == "getGenesisHash":
+                rpc = {"jsonrpc": "2.0", "result": __import__("solana_inspect").MAINNET_GENESIS}
+            else:
+                rpc = {"jsonrpc": "2.0", "result": {"slot": 466835746, "transaction": [signed, "base64"], "meta": {
+                    "err": None, "fee": 2_000_000, "preBalances": pre, "postBalances": post,
+                    "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "200"}}],
+                    "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "150"}}],
+                }}}
+
+            class _Response:
+                status = 200
+                def read(self):
+                    return _json.dumps(rpc).encode()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+            return _Response()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        breach = memecoin_desk.confirm_exit(partial, signature)
+        self.assertEqual(breach["reason"], "fee_policy_breach")
+        self.assertTrue(breach["recorded"])
+        self.assertEqual(breach["remaining_raw"], 150)
+        self.assertGreater(Decimal(breach["fee_usd"]), Decimal("0.05"))
+        self.assertNotEqual(breach["fee_usd"], str(breach["sol_proceeds"]))
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        self.assertEqual(db.exclusive(memecoin_desk._held_conn), Decimal("96.00"))
