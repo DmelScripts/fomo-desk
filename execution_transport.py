@@ -30,8 +30,8 @@ _LEDGER = "send_ledger"
 _CONSENT = "live_trading_consent"
 _STATEMENT = "Finish everything then enable LIVE trade."
 SWAP_BLOCKERS = (
-    "Jupiter does not publish the route_v2 remaining-account list for Swap::Whirlpool. The observed build had 12 accounts after the 10 fixed route accounts; Orca's swap struct has 11, and no Jupiter source identifies the extra account.",
-    "Jupiter does not publish how route_v2 slippage_bps and quoted_out_amount are enforced as the Whirlpool swap other_amount_threshold.",
+    "route_v2 hops other than Swap::Whirlpool do not publish their remaining accounts in the JUP6 IDL. Pump, Raydium CP, and ZeroFi stay unverified.",
+    "A Jupiter /build that omits SetComputeUnitLimit cannot price the network half of the $0.05 cap. USDC/USD still needs PYTH_API_KEY; Hermes is not called.",
 )
 
 

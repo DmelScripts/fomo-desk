@@ -86,9 +86,11 @@ def assess_build(body: dict) -> dict:
             raw = b""
     discriminator = raw[:8].hex() if len(raw) >= 8 else None
     matches_route_v2 = raw[:8] == solana_jupiter.ROUTE_V2 if len(raw) >= 8 else False
-    quoted = None
-    if matches_route_v2 and len(raw) >= 24:
-        quoted = str(int.from_bytes(raw[16:24], "little"))
+    import jupiter_route_v2
+    parsed = jupiter_route_v2.parse(raw) if raw else {"min_out_proven": False}
+    quoted = str(parsed["quoted_out_amount"]) if parsed.get("quoted_out_amount") is not None else None
+    base["min_out_proven"] = parsed.get("min_out_proven") is True
+    base["instruction_min_out"] = None if parsed.get("min_out") is None else str(parsed["min_out"])
     base.update({
         "program_id": program,
         "program_is_jup6": program == solana_jupiter.PROGRAM_ID,
@@ -98,11 +100,11 @@ def assess_build(body: dict) -> dict:
         "matches_route_v2": matches_route_v2,
         "json_other_amount_threshold": threshold if isinstance(threshold, str) else None,
         "instruction_quoted_out": quoted,
-        "json_threshold_equals_instruction_quoted": quoted is not None and quoted == threshold,
+        "json_threshold_equals_instruction_min": parsed.get("min_out") is not None and str(parsed["min_out"]) == threshold,
         "route_labels": [step.get("swapInfo", {}).get("label") for step in plan if isinstance(step, dict) and isinstance(step.get("swapInfo"), dict)],
         "deprecated_fee_fields_present": fee_fields,
         "compute_unit_limit_published": False,
-        "reason": "route_v2_min_out_not_bound_to_hop",
+        "reason": parsed.get("reason") or ("hop_accounts_unpublished" if parsed.get("min_out_proven") else "route_v2_bytes"),
     })
     return base
 
