@@ -3052,6 +3052,257 @@ def record_landed_quantity(case_id: str, signature: str, transport, now: float) 
     }
 
 
+def _flow_gap(base: dict, reason: str) -> dict:
+    """A missing swap leg stays incomplete. It is not a receipt and not a cost."""
+    return base | {
+        "flow_recorded": False, "flow_proven": False, "flow_reason": reason,
+        "receipt_booked": False, "composition_complete": False, "price_proven": False,
+        "dex_fee_separated": False, "dex_fee_lamports": None, "network_fee_added_to_input": False,
+        "wrap_principal_netted": False, "rent_netted": False, "payer_delta_used": False,
+        "pool_bytes_at_landed_slot": False, "hold_released": False, "reservation_consumed": False,
+        "cost_basis_proven": False, "refund_proven": False, "fill_proven": False,
+        "holds": True, "resend": False, "execution_eligible": False,
+    }
+
+
+def _swap_legs(decoded):
+    """User accounts and the route's vault positions. Pool bytes are not in the transaction."""
+    import jupiter_route_v2
+    import solana_jupiter
+    import solana_whirlpool
+    import solana_tx
+    swaps = []
+    for index, instruction in enumerate(decoded.instructions):
+        if decoded.static_keys[instruction.program_index] == solana_jupiter.PROGRAM_ID:
+            swaps.append((index, instruction))
+    if len(swaps) != 1:
+        return None
+    index, instruction = swaps[0]
+    parsed = jupiter_route_v2.parse(bytes(instruction.data))
+    if parsed.get("hop") != "Whirlpool" or parsed.get("a_to_b") not in (True, False):
+        return None
+    try:
+        accounts = []
+        for item in instruction.account_indexes:
+            signer, writable = decoded.account_flags(item)
+            accounts.append({"pubkey": decoded.static_keys[item], "isSigner": signer, "isWritable": writable})
+    except Exception:
+        return None
+    bound = jupiter_route_v2._fixed_accounts(accounts)
+    remaining = bound.get("remaining") if bound.get("ok") is True else None
+    if not isinstance(remaining, list) or len(remaining) != 12:
+        return None
+    hop = [accounts[item]["pubkey"] for item in remaining]
+    if hop[0] != solana_whirlpool.PROGRAM_ID or hop[1] != solana_tx.TOKEN_PROGRAM or hop[2] != bound["user"]:
+        return None
+    if parsed["a_to_b"] is True:
+        user_in, vault_in, user_out, vault_out = hop[4], hop[5], hop[6], hop[7]
+    else:
+        user_in, vault_in, user_out, vault_out = hop[6], hop[7], hop[4], hop[5]
+    if user_in != bound["source"] or user_out != bound["destination"]:
+        return None
+    if len({user_in, user_out, vault_in, vault_out, hop[3]}) != 5:
+        return None
+    return {
+        "index": index, "pool": hop[3], "user": bound["user"],
+        "source": bound["source"], "destination": bound["destination"],
+        "source_mint": bound["source_mint"], "destination_mint": bound["destination_mint"],
+        "vault_in": vault_in, "vault_out": vault_out,
+    }
+
+
+def _classic_inner_transfer(item, decoded):
+    """A classic SPL Transfer inside the swap. TransferChecked and Token-2022 stay unparsed."""
+    import solana_tx
+    if not isinstance(item, dict):
+        return None
+    program_index = item.get("programIdIndex")
+    accounts = item.get("accounts")
+    data = item.get("data")
+    if isinstance(program_index, bool) or not isinstance(program_index, int):
+        return None
+    if program_index < 0 or program_index >= len(decoded.static_keys):
+        return None
+    program = decoded.static_keys[program_index]
+    if program != solana_tx.TOKEN_PROGRAM:
+        return program
+    if not isinstance(accounts, list) or len(accounts) != 3 or not isinstance(data, str):
+        return None
+    try:
+        raw = solana_tx.b58decode(data, 9)
+    except Exception:
+        return None
+    if len(raw) != 9 or raw[0] != 3 or solana_tx.b58encode(raw) != data:
+        return None
+    amount = int.from_bytes(raw[1:9], "little")
+    if amount <= 0 or amount >= 2**64:
+        return None
+    keys = []
+    for index in accounts:
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(decoded.static_keys):
+            return None
+        keys.append(decoded.static_keys[index])
+    return {"source": keys[0], "destination": keys[1], "authority": keys[2], "amount": amount}
+
+
+def _swap_transfers(meta, decoded, swap_index):
+    import solana_tx
+    groups = meta.get("innerInstructions")
+    if groups is None:
+        return None, "inner_transfers_missing"
+    if not isinstance(groups, list):
+        return None, "inner_transfers_untyped"
+    found = []
+    for group in groups:
+        if not isinstance(group, dict):
+            return None, "inner_transfers_untyped"
+        outer = group.get("index")
+        rows = group.get("instructions")
+        if isinstance(outer, bool) or not isinstance(outer, int) or not isinstance(rows, list):
+            return None, "inner_transfers_untyped"
+        for item in rows:
+            if not isinstance(item, dict):
+                return None, "inner_transfers_untyped"
+            program_index = item.get("programIdIndex")
+            if isinstance(program_index, bool) or not isinstance(program_index, int):
+                return None, "inner_transfers_untyped"
+            if program_index < 0 or program_index >= len(decoded.static_keys):
+                return None, "inner_transfers_untyped"
+            program = decoded.static_keys[program_index]
+            if program == solana_tx.TOKEN_2022:
+                return None, "token_2022_unsupported"
+            if program != solana_tx.TOKEN_PROGRAM:
+                continue
+            if outer != swap_index:
+                return None, "inner_transfer_outside_swap"
+            parsed = _classic_inner_transfer(item, decoded)
+            if not isinstance(parsed, dict):
+                return None, "inner_transfer_unsupported"
+            found.append(parsed)
+    if len(found) == 0:
+        return None, "inner_transfers_missing"
+    if len(found) != 2:
+        return None, "inner_transfer_count"
+    return found, None
+
+
+def record_landed_flow(case_id: str, signature: str, transport, now: float) -> dict:
+    """Join the swap's historical token transfers to the landed quantity and network fee.
+
+    The transfers are the executed source outflow and destination inflow inside the
+    swap instruction. The payer's lamport delta, the wrap transfer, and the wSOL
+    close are not that flow. Pool account bytes are not in the transaction, so the
+    vault accounts are the route positions only. No receipt is booked.
+    """
+    import base64
+    import db
+    import solana_tx
+    import sqlite3
+    quantity = record_landed_quantity(case_id, signature, transport, now)
+    if quantity.get("quantity_recorded") is not True:
+        return _flow_gap(quantity, quantity.get("quantity_reason") or quantity.get("reason") or "quantity_required")
+    try:
+        landed = transport({"method": "getTransaction", "signature": signature, "commitment": "confirmed"})
+    except Exception:
+        return _flow_gap(quantity, "flow_transport")
+    body = landed.get("body") if isinstance(landed, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    meta = result.get("meta") if isinstance(result, dict) else None
+    encoded = result.get("transaction") if isinstance(result, dict) else None
+    if not isinstance(meta, dict) or not isinstance(encoded, list) or not encoded:
+        return _flow_gap(quantity, "inner_transfers_missing")
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded[0], validate=True))
+    except Exception:
+        return _flow_gap(quantity, "route_unbound")
+    if not _classic_layout(decoded) or result.get("slot") != quantity.get("slot") or _typed_chain_fee(meta.get("fee")) != quantity.get("network_fee_lamports"):
+        return _flow_gap(quantity, "flow_identity")
+    import phantom_transport
+    wallet = phantom_transport.REQUIRED_WALLET
+    stored = db.query(
+        "SELECT * FROM memecoin_landed_quantity WHERE signature = ? AND message_sha256 = ?",
+        (signature, quantity["message_sha256"]),
+    )
+    if len(stored) != 1:
+        return _flow_gap(quantity, "quantity_required")
+    observed = stored[0]
+    legs = _swap_legs(decoded)
+    if legs is None or legs["user"] != wallet:
+        return _flow_gap(quantity, "route_unbound")
+    if observed["side"] == "entry":
+        if legs["source_mint"] != solana_tx.NATIVE_MINT or legs["destination_mint"] != observed["mint"]:
+            return _flow_gap(quantity, "route_unbound")
+    elif legs["destination_mint"] != solana_tx.NATIVE_MINT or legs["source_mint"] != observed["mint"]:
+        return _flow_gap(quantity, "route_unbound")
+    found, reason = _swap_transfers(meta, decoded, legs["index"])
+    if found is None:
+        return _flow_gap(quantity, reason)
+    inward = [item for item in found if item["source"] == legs["source"] and item["destination"] == legs["vault_in"] and item["authority"] == wallet]
+    outward = [item for item in found if item["source"] == legs["vault_out"] and item["destination"] == legs["destination"] and item["authority"] == legs["pool"]]
+    if len(inward) != 1 or len(outward) != 1:
+        return _flow_gap(quantity, "inner_identity")
+    input_text = _u64_canon(inward[0]["amount"])
+    output_text = _u64_canon(outward[0]["amount"])
+    if input_text is None or output_text is None:
+        return _flow_gap(quantity, "inner_amount")
+    if observed["side"] == "entry":
+        if output_text != observed["quantity_raw"]:
+            return _flow_gap(quantity, "quantity_mismatch")
+        proceeds = None
+        direction = "bought"
+    else:
+        if input_text != observed["quantity_raw"]:
+            return _flow_gap(quantity, "quantity_mismatch")
+        proceeds = output_text
+        direction = "sold"
+    if direction != observed["direction"]:
+        return _flow_gap(quantity, "quantity_mismatch")
+    prior = db.query("SELECT * FROM memecoin_landed_flow WHERE signature = ?", (signature,))
+    if prior:
+        row = prior[0]
+        same = (
+            row["message_sha256"] == quantity["message_sha256"] and row["case_id"] == case_id
+            and row["input_raw"] == input_text and row["output_raw"] == output_text
+            and row["proceeds_raw"] == proceeds and row["network_fee_lamports"] == quantity["network_fee_lamports"]
+        )
+        return _flow_gap(quantity, None if same else "flow_conflict") | {
+            "flow_recorded": same, "flow_proven": same, "idempotent": same,
+            "input_raw": input_text if same else None, "output_raw": output_text if same else None,
+            "proceeds_raw": proceeds if same else None,
+            "dex_fee_embedded_in_input": True,
+        }
+    fee = quantity["network_fee_lamports"]
+
+    def work(conn):
+        conn.execute(
+            """
+            INSERT INTO memecoin_landed_flow (
+                signature, message_sha256, case_id, side, direction, input_mint, output_mint,
+                input_raw, output_raw, proceeds_raw, network_fee_lamports, landed_slot, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signature, quantity["message_sha256"], case_id, observed["side"], direction,
+                legs["source_mint"], legs["destination_mint"], input_text, output_text, proceeds,
+                fee, quantity["slot"], float(now),
+            ),
+        )
+
+    try:
+        db.exclusive(work)
+    except sqlite3.IntegrityError as exc:
+        if "landed_flow" not in str(exc):
+            raise
+        return _flow_gap(quantity, "flow_conflict")
+    return _flow_gap(quantity, None) | {
+        "flow_recorded": True, "flow_proven": True, "idempotent": False, "flow_reason": None,
+        "input_raw": input_text, "output_raw": output_text, "proceeds_raw": proceeds,
+        "input_mint": legs["source_mint"], "output_mint": legs["destination_mint"],
+        "network_fee_lamports": fee, "dex_fee_embedded_in_input": True,
+        "next_missing": "historical_pool_vault_bytes",
+    }
+
+
 def read_transaction(signature: str) -> dict:
     """Confirmed mainnet getTransaction plus the genesis hash. This is the only confirm reader."""
     import memecoin_exit

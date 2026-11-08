@@ -4511,6 +4511,243 @@ conn.close()
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_quantity")[0]["n"], 2)
         self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'qty-case'")[0]["snapshot_json"], snap)
 
+    def test_landed_flow_joins_swap_transfers_without_booking_a_receipt(self):
+        import base64
+        import hashlib
+        import sqlite3
+        import db
+        import jupiter_route_v2
+        import phantom_transport
+        import solana_inspect
+        import solana_jupiter
+        import solana_whirlpool
+        from tests.test_jupiter_route_v2 import _route
+        wallet = phantom_transport.REQUIRED_WALLET
+        token = solana_tx.b58encode(b"\x73" * 32)
+        wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+        held = solana_tx.associated_token_address(wallet, token, solana_tx.TOKEN_PROGRAM)
+        pool = solana_tx.b58encode(b"\x21" * 32)
+        vault_a = solana_tx.b58encode(b"\x31" * 32)
+        vault_b = solana_tx.b58encode(b"\x32" * 32)
+        ticks = [solana_tx.b58encode(bytes([0x41 + item]) * 32) for item in range(3)]
+        oracle = solana_tx.b58encode(b"\x33" * 32)
+        block = solana_tx.b58encode(b"\x47" * 32)
+
+        def message(side, mark):
+            source_mint = solana_tx.NATIVE_MINT if side == "entry" else token
+            dest_mint = token if side == "entry" else solana_tx.NATIVE_MINT
+            source = wsol if side == "entry" else held
+            dest = held if side == "entry" else wsol
+            ordered = [
+                wallet, source, dest, pool, vault_a, vault_b, *ticks,
+                source_mint, dest_mint, solana_tx.TOKEN_PROGRAM, jupiter_route_v2.EVENT, solana_jupiter.PROGRAM_ID,
+                solana_whirlpool.PROGRAM_ID, oracle, solana_tx.SYSTEM_PROGRAM, solana_tx.COMPUTE_BUDGET, solana_tx.TOKEN_2022,
+            ]
+            def at(key):
+                return ordered.index(key)
+            owner_a = source if side == "entry" else dest
+            owner_b = dest if side == "entry" else source
+            swap_accounts = [
+                at(wallet), at(source), at(dest), at(source_mint), at(dest_mint), at(solana_tx.TOKEN_PROGRAM), at(solana_tx.TOKEN_PROGRAM),
+                at(jupiter_route_v2.EVENT), at(solana_jupiter.PROGRAM_ID), at(solana_whirlpool.PROGRAM_ID), at(solana_tx.TOKEN_PROGRAM),
+                at(wallet), at(pool), at(owner_a), at(vault_a), at(owner_b), at(vault_b),
+                at(ticks[0]), at(ticks[1]), at(ticks[2]), at(oracle),
+            ]
+            route = _route(1_000, 50, side == "entry", amount=1_500_000 if side == "entry" else 999)
+            compute = (at(solana_tx.COMPUTE_BUDGET), [], bytes([2]) + (200_000).to_bytes(4, "little"))
+            close = (at(solana_tx.TOKEN_PROGRAM), [at(wsol), at(wallet), at(wallet)], bytes([9]))
+            swap = (at(solana_jupiter.PROGRAM_ID), swap_accounts, route)
+            if side == "entry":
+                transfer = (at(solana_tx.SYSTEM_PROGRAM), [at(wallet), at(wsol)], (2).to_bytes(4, "little") + (1_500_000).to_bytes(8, "little"))
+                sync = (at(solana_tx.TOKEN_PROGRAM), [at(wsol)], bytes([17]))
+                instructions = [compute, transfer, sync, swap, close]
+                swap_index = 3
+            else:
+                instructions = [compute, swap, close]
+                swap_index = 1
+            unsigned = solana_tx.encode_legacy(wallet, ordered, 10, instructions, block)
+            raw = bytearray(base64.b64decode(unsigned))
+            raw[1:65] = bytes([mark]) * 64
+            encoded = base64.b64encode(bytes(raw)).decode("ascii")
+            return encoded, solana_tx.first_signature(encoded), hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest(), swap_index, ordered
+
+        buy, buy_sig, buy_hash, buy_index, buy_keys = message("entry", 0x36)
+        sell, sell_sig, sell_hash, sell_index, sell_keys = message("exit", 0x37)
+        memecoin_desk._ensure()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('flow-case', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (token, '{"reserved_usd": "8.00", "remaining_raw": 1000}'),
+        )
+        for digest, encoded, side in ((buy_hash, buy, "entry"), (sell_hash, sell, "exit")):
+            db.execute(
+                "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'flow-case', ?, ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+                (digest, side, encoded, block),
+            )
+        snap = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"]
+
+        def transfer(keys, source, dest, authority, amount, program=None):
+            payload = bytes([3]) + int(amount).to_bytes(8, "little")
+            return {
+                "programIdIndex": keys.index(solana_tx.TOKEN_PROGRAM if program is None else program),
+                "accounts": [keys.index(source), keys.index(dest), keys.index(authority)],
+                "data": solana_tx.b58encode(payload),
+            }
+
+        chain = {
+            "tx": buy, "sig": buy_sig, "keys": buy_keys, "index": buy_index, "err": None, "fee": 5000, "slot": 20,
+            "token_index": 2, "pre": "0", "post": "1000", "input": 1_000_000, "output": 1000,
+            "mode": None,
+        }
+
+        def inners():
+            keys = chain["keys"]
+            if chain["tx"] == buy:
+                rows = [
+                    transfer(keys, wsol, vault_a, wallet, chain["input"]),
+                    transfer(keys, vault_b, held, pool, chain["output"]),
+                ]
+            else:
+                rows = [
+                    transfer(keys, held, vault_b, wallet, chain["input"]),
+                    transfer(keys, vault_a, wsol, pool, chain["output"]),
+                ]
+            if chain["mode"] == "extra":
+                rows.append(transfer(keys, wsol, vault_a, wallet, 1))
+            if chain["mode"] == "token2022":
+                rows[0] = transfer(keys, wsol, vault_a, wallet, chain["input"], solana_tx.TOKEN_2022)
+            if chain["mode"] == "authority":
+                rows[0]["accounts"][2] = keys.index(pool)
+            if chain["mode"] == "outside":
+                return [{"index": 0, "instructions": rows}]
+            if chain["mode"] == "missing":
+                return None
+            return [{"index": chain["index"], "instructions": rows}]
+
+        def transport(request):
+            method = request.get("method")
+            if method == "getGenesisHash":
+                return {"status": 200, "body": {"result": solana_inspect.MAINNET_GENESIS}}
+            if method == "getSlot":
+                return {"status": 200, "body": {"result": 30}}
+            if method == "getSignatureStatuses":
+                return {"status": 200, "body": {"result": {"context": {"slot": chain["slot"]}, "value": [{
+                    "slot": chain["slot"], "err": chain["err"], "confirmationStatus": "confirmed",
+                }]}}}
+            if method == "getTransaction":
+                width = len(chain["keys"])
+                pre = [50_000_000] + [10] * (width - 1)
+                post = [1] + [9] * (width - 1)
+                token_row = {
+                    "accountIndex": chain["token_index"], "mint": token, "owner": wallet,
+                    "uiTokenAmount": {"amount": chain["pre"], "decimals": 6},
+                }
+                post_row = dict(token_row)
+                post_row["uiTokenAmount"] = {"amount": chain["post"], "decimals": 6}
+                meta = {
+                    "err": chain["err"], "fee": chain["fee"],
+                    "preBalances": pre, "postBalances": post,
+                    "preTokenBalances": [token_row], "postTokenBalances": [post_row],
+                }
+                loaded = inners()
+                if loaded is not None:
+                    meta["innerInstructions"] = loaded
+                return {"status": 200, "body": {"result": {"slot": chain["slot"], "transaction": [chain["tx"], "base64"], "meta": meta}}}
+            if method == "getAccountInfo" and request.get("purpose") == "mint_decimals":
+                raw_mint = bytearray(82)
+                raw_mint[44] = 6
+                raw_mint[45] = 1
+                return {"status": 200, "body": {"result": {"context": {"slot": 30}, "value": {
+                    "owner": solana_tx.TOKEN_PROGRAM, "executable": False,
+                    "data": [base64.b64encode(bytes(raw_mint)).decode("ascii"), "base64"], "lamports": 1,
+                }}}}
+            if method == "getAccountInfo" and request.get("purpose") == "token_account":
+                raw_token = bytearray(165)
+                raw_token[0:32] = solana_tx.b58decode(token)
+                raw_token[32:64] = solana_tx.b58decode(wallet)
+                raw_token[64:72] = (7).to_bytes(8, "little")
+                raw_token[108] = 1
+                return {"status": 200, "body": {"result": {"context": {"slot": 30}, "value": {
+                    "owner": solana_tx.TOKEN_PROGRAM, "executable": False,
+                    "data": [base64.b64encode(bytes(raw_token)).decode("ascii"), "base64"], "lamports": 1,
+                }}}}
+            raise AssertionError(method)
+
+        bought = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 1)
+        self.assertTrue(bought["flow_recorded"], bought)
+        self.assertEqual(bought["input_raw"], "1000000")
+        self.assertEqual(bought["output_raw"], "1000")
+        self.assertIsNone(bought["proceeds_raw"])
+        self.assertEqual(bought["network_fee_lamports"], 5000)
+        self.assertFalse(bought["network_fee_added_to_input"])
+        self.assertIsNone(bought["dex_fee_lamports"])
+        self.assertFalse(bought["dex_fee_separated"])
+        self.assertTrue(bought["dex_fee_embedded_in_input"])
+        self.assertFalse(bought["wrap_principal_netted"])
+        self.assertFalse(bought["rent_netted"])
+        self.assertFalse(bought["payer_delta_used"])
+        self.assertFalse(bought["pool_bytes_at_landed_slot"])
+        self.assertFalse(bought["composition_complete"])
+        self.assertFalse(bought["receipt_booked"])
+        self.assertFalse(bought["cost_basis_proven"])
+        self.assertFalse(bought["price_proven"])
+        self.assertFalse(bought["refund_proven"])
+        self.assertFalse(bought["hold_released"])
+        self.assertFalse(bought["reservation_consumed"])
+        self.assertFalse(bought["execution_eligible"])
+        self.assertTrue(bought["holds"])
+        self.assertEqual(bought["next_missing"], "historical_pool_vault_bytes")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
+        chain.update({"tx": sell, "keys": sell_keys, "index": sell_index, "token_index": 1, "pre": "1000", "post": "600", "input": 400, "output": 250_000})
+        sold = desk_loop.record_landed_flow("flow-case", sell_sig, transport, 2)
+        self.assertTrue(sold["flow_recorded"], sold)
+        self.assertEqual(sold["input_raw"], "400")
+        self.assertEqual(sold["output_raw"], "250000")
+        self.assertEqual(sold["proceeds_raw"], "250000")
+        self.assertNotEqual(sold["proceeds_raw"], "49999999")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_exit_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
+        chain.update({"tx": buy, "keys": buy_keys, "index": buy_index, "token_index": 2, "pre": "0", "post": "1000", "input": 1_000_000, "output": 1000})
+        for label, mode, reason in (
+            ("missing", "missing", "inner_transfers_missing"),
+            ("extra", "extra", "inner_transfer_count"),
+            ("token2022", "token2022", "token_2022_unsupported"),
+            ("authority", "authority", "inner_identity"),
+            ("outside", "outside", "inner_transfer_outside_swap"),
+            ("output", "output", "quantity_mismatch"),
+        ):
+            chain["mode"] = mode
+            if mode == "output":
+                chain["output"] = 999
+            bad = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 3)
+            chain["mode"] = None
+            chain["output"] = 1000
+            self.assertEqual(bad["flow_reason"], reason, label)
+            self.assertFalse(bad["flow_recorded"], label)
+            self.assertFalse(bad["receipt_booked"], label)
+        again = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 4)
+        self.assertTrue(again["flow_recorded"])
+        self.assertTrue(again["idempotent"])
+        chain["input"] = 900_000
+        conflict = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 5)
+        chain["input"] = 1_000_000
+        self.assertEqual(conflict["flow_reason"], "flow_conflict")
+        self.assertEqual(db.query("SELECT input_raw FROM memecoin_landed_flow WHERE signature = ?", (buy_sig,))[0]["input_raw"], "1000000")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_landed_flow SET input_raw = '1' WHERE signature = ?", (buy_sig,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT OR REPLACE INTO memecoin_landed_flow (signature, message_sha256, case_id, side, direction, input_mint, output_mint, input_raw, output_raw, proceeds_raw, network_fee_lamports, landed_slot, created_at) VALUES (?, ?, 'flow-case', 'entry', 'bought', ?, ?, '2', '1000', NULL, 5000, 20, 9)",
+                (buy_sig, buy_hash, solana_tx.NATIVE_MINT, token),
+            )
+        self.assertEqual(db.query("SELECT input_raw FROM memecoin_landed_flow WHERE signature = ?", (buy_sig,))[0]["input_raw"], "1000000")
+        forged = desk_loop.record_landed_flow("flow-case", buy_sig, {"not": "callable"}, 6)
+        self.assertEqual(forged["reason"], "receipt_source")
+        self.assertFalse(forged["flow_recorded"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_flow")[0]["n"], 2)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
+
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
         import shutil
         import sqlite3

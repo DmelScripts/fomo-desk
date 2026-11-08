@@ -3486,6 +3486,7 @@ def _replace_reservation_triggers(conn) -> None:
     _install_deposit_liability(conn)
     _install_landed_evidence(conn)
     _install_landed_quantity(conn)
+    _install_landed_flow(conn)
 
 
 def _install_preflight_audit(conn) -> None:
@@ -4371,6 +4372,123 @@ def _install_landed_quantity(conn) -> None:
             FOR EACH ROW
             BEGIN
                 SELECT RAISE(ABORT, 'landed_quantity');
+            END
+            """
+        )
+
+
+def _install_landed_flow(conn) -> None:
+    """One executed swap flow. It does not book an entry or exit receipt."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_flow (
+            signature TEXT PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            input_mint TEXT NOT NULL,
+            output_mint TEXT NOT NULL,
+            input_raw TEXT NOT NULL,
+            output_raw TEXT NOT NULL,
+            proceeds_raw TEXT,
+            network_fee_lamports INTEGER NOT NULL,
+            landed_slot INTEGER NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_flow_pin (
+            signature TEXT PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            input_raw TEXT NOT NULL,
+            output_raw TEXT NOT NULL
+        )
+        """
+    )
+    for name in (
+        "memecoin_landed_flow_insert", "memecoin_landed_flow_record",
+        "memecoin_landed_flow_update", "memecoin_landed_flow_delete",
+        "memecoin_landed_flow_pin_update", "memecoin_landed_flow_pin_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_flow_pin (signature, message_sha256, case_id, input_raw, output_raw)
+        SELECT signature, message_sha256, case_id, input_raw, output_raw FROM memecoin_landed_flow
+        WHERE signature NOT IN (SELECT signature FROM memecoin_landed_flow_pin)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_flow_insert
+        BEFORE INSERT ON memecoin_landed_flow
+        FOR EACH ROW
+        WHEN NEW.direction NOT IN ('bought', 'sold')
+        OR (NEW.side = 'entry' AND (NEW.direction != 'bought' OR NEW.proceeds_raw IS NOT NULL))
+        OR (NEW.side = 'exit' AND (NEW.direction != 'sold' OR NEW.proceeds_raw IS NULL OR NEW.proceeds_raw != NEW.output_raw))
+        OR NEW.side NOT IN ('entry', 'exit')
+        OR NEW.network_fee_lamports < 0 OR NEW.landed_slot <= 0
+        OR length(NEW.input_raw) < 1 OR length(NEW.output_raw) < 1
+        OR NEW.input_raw GLOB '*[^0-9]*' OR NEW.output_raw GLOB '*[^0-9]*'
+        OR NEW.input_raw GLOB '0?*' OR NEW.output_raw GLOB '0?*'
+        OR NEW.input_raw = '0' OR NEW.output_raw = '0'
+        OR length(NEW.input_raw) > 20 OR length(NEW.output_raw) > 20
+        OR (length(NEW.input_raw) = 20 AND NEW.input_raw > '18446744073709551615')
+        OR (length(NEW.output_raw) = 20 AND NEW.output_raw > '18446744073709551615')
+        OR (NEW.proceeds_raw IS NOT NULL AND (
+            NEW.proceeds_raw GLOB '*[^0-9]*' OR NEW.proceeds_raw GLOB '0?*' OR length(NEW.proceeds_raw) < 1
+        ))
+        OR EXISTS (SELECT 1 FROM memecoin_landed_flow_pin WHERE signature = NEW.signature)
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id AND side = NEW.side AND slot = NEW.landed_slot
+              AND meta_err = 'null' AND layout_supported = 1
+              AND network_fee_lamports = NEW.network_fee_lamports
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_quantity
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id AND side = NEW.side AND direction = NEW.direction
+              AND landed_slot = NEW.landed_slot
+              AND (
+                (NEW.side = 'entry' AND mint = NEW.output_mint AND quantity_raw = NEW.output_raw)
+                OR (NEW.side = 'exit' AND mint = NEW.input_mint AND quantity_raw = NEW.input_raw)
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_flow');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_flow_record
+        AFTER INSERT ON memecoin_landed_flow
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_landed_flow_pin (signature, message_sha256, case_id, input_raw, output_raw)
+            VALUES (NEW.signature, NEW.message_sha256, NEW.case_id, NEW.input_raw, NEW.output_raw);
+        END
+        """
+    )
+    for name, table, kind in (
+        ("memecoin_landed_flow_update", "memecoin_landed_flow", "UPDATE"),
+        ("memecoin_landed_flow_delete", "memecoin_landed_flow", "DELETE"),
+        ("memecoin_landed_flow_pin_update", "memecoin_landed_flow_pin", "UPDATE"),
+        ("memecoin_landed_flow_pin_delete", "memecoin_landed_flow_pin", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'landed_flow');
             END
             """
         )
