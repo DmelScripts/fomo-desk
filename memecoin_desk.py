@@ -2988,30 +2988,39 @@ def _store_reservation(conn, *, case_id: str, side: str, message_b64: str, diges
     )
 
 
-def _backfill_active_slots(conn) -> None:
-    """One open proof per case and side. Duplicates stay stored and none is chosen."""
+def _repair_active_slots(conn) -> None:
+    """Rebuild the open-slot projection from proofs and validated receipts.
+
+    The slot is not a second copy of the proof. Zero open proofs release it,
+    one open proof stores that hash, and several stay ambiguous. An unknown
+    signature counts as open. A paper receipt and the snapshot do not.
+    """
     rows = list(conn.execute("SELECT * FROM memecoin_reservations"))
     grouped = {}
     for row in rows:
         grouped.setdefault((row["case_id"], row["side"]), []).append(row)
-    for (case_id, side), items in grouped.items():
-        existing = conn.execute(
-            "SELECT message_sha256 FROM memecoin_reservation_active WHERE case_id = ? AND side = ?",
-            (case_id, side),
-        ).fetchone()
-        if existing is not None:
-            continue
-        open_rows = [item for item in items if _reservation_status(conn, item) in {"active", "unknown"}]
+    keys = set(grouped)
+    for table in ("memecoin_reservation_active", "memecoin_reservation_active_pin"):
+        for row in conn.execute(f"SELECT case_id, side FROM {table}"):
+            keys.add((row["case_id"], row["side"]))
+    desired = {}
+    for case_id, side in keys:
+        open_rows = [item for item in grouped.get((case_id, side), []) if _reservation_status(conn, item) in {"active", "unknown"}]
         if len(open_rows) == 1:
-            conn.execute(
-                "INSERT INTO memecoin_reservation_active (case_id, side, message_sha256) VALUES (?, ?, ?)",
-                (case_id, side, open_rows[0]["message_sha256"]),
-            )
+            desired[(case_id, side)] = open_rows[0]["message_sha256"]
         elif len(open_rows) > 1:
-            conn.execute(
-                "INSERT INTO memecoin_reservation_active (case_id, side, message_sha256) VALUES (?, ?, 'ambiguous')",
-                (case_id, side),
-            )
+            desired[(case_id, side)] = "ambiguous"
+    conn.execute("DELETE FROM memecoin_reservation_active")
+    conn.execute("DELETE FROM memecoin_reservation_active_pin")
+    for (case_id, side), message in desired.items():
+        conn.execute(
+            "INSERT INTO memecoin_reservation_active (case_id, side, message_sha256) VALUES (?, ?, ?)",
+            (case_id, side, message),
+        )
+        conn.execute(
+            "INSERT INTO memecoin_reservation_active_pin (case_id, side, message_sha256) VALUES (?, ?, ?)",
+            (case_id, side, message),
+        )
 
 
 def _replace_reservation_triggers(conn) -> None:
@@ -3055,6 +3064,16 @@ def _replace_reservation_triggers(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_reservation_active (
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            PRIMARY KEY (case_id, side)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservation_active_pin (
             case_id TEXT NOT NULL,
             side TEXT NOT NULL,
             message_sha256 TEXT NOT NULL,
@@ -3212,6 +3231,8 @@ def _replace_reservation_triggers(conn) -> None:
             INSERT INTO memecoin_reservation_pin (message_sha256) VALUES (NEW.message_sha256);
             INSERT INTO memecoin_reservation_active (case_id, side, message_sha256)
             VALUES (NEW.case_id, NEW.side, NEW.message_sha256);
+            INSERT INTO memecoin_reservation_active_pin (case_id, side, message_sha256)
+            VALUES (NEW.case_id, NEW.side, NEW.message_sha256);
         END
         """
     )
@@ -3241,6 +3262,7 @@ def _replace_reservation_triggers(conn) -> None:
         ("memecoin_reservation_pin_update", "memecoin_reservation_pin"),
         ("memecoin_reservation_pin_delete", "memecoin_reservation_pin"),
         ("memecoin_reservation_active_update", "memecoin_reservation_active"),
+        ("memecoin_reservation_active_pin_update", "memecoin_reservation_active_pin"),
     ):
         conn.execute(f"DROP TRIGGER IF EXISTS {name}")
         kind = "UPDATE" if name.endswith("_update") else "DELETE"
@@ -3253,35 +3275,78 @@ def _replace_reservation_triggers(conn) -> None:
             END
             """
         )
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservation_active_delete")
+    for name in (
+        "memecoin_reservation_active_delete",
+        "memecoin_reservation_active_insert",
+        "memecoin_reservation_active_pin_delete",
+        "memecoin_reservation_active_pin_guard",
+        "memecoin_entry_receipts_release_active",
+        "memecoin_exit_receipts_release_active",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    _repair_active_slots(conn)
     conn.execute(
         """
-        CREATE TRIGGER memecoin_reservation_active_delete
-        BEFORE DELETE ON memecoin_reservation_active
+        CREATE TRIGGER memecoin_reservation_active_insert
+        BEFORE INSERT ON memecoin_reservation_active
         FOR EACH ROW
-        WHEN NOT EXISTS (
-            SELECT 1 FROM memecoin_entry_receipts e
-            JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
-            JOIN memecoin_cases c ON c.id = OLD.case_id
-            WHERE OLD.side = 'entry' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
-              AND e.ledger = 'live' AND e.ledger_provenance = 'server'
-              AND r.ledger = 'live' AND r.ledger_provenance = 'server'
-              AND c.ledger = 'live' AND c.ledger_provenance = 'server'
-        ) AND NOT EXISTS (
-            SELECT 1 FROM memecoin_exit_receipts e
-            JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
-            JOIN memecoin_cases c ON c.id = OLD.case_id
-            WHERE OLD.side = 'exit' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
-              AND e.ledger = 'live' AND e.ledger_provenance = 'server'
-              AND r.ledger = 'live' AND r.ledger_provenance = 'server'
-              AND c.ledger = 'live' AND c.ledger_provenance = 'server'
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_reservation_active_pin
+            WHERE case_id = NEW.case_id AND side = NEW.side
         )
         BEGIN
             SELECT RAISE(ABORT, 'reservation_active');
         END
         """
     )
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_entry_receipts_release_active")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservation_active_pin_guard
+        BEFORE INSERT ON memecoin_reservation_active_pin
+        FOR EACH ROW
+        WHEN EXISTS (
+            SELECT 1 FROM memecoin_reservation_active_pin
+            WHERE case_id = NEW.case_id AND side = NEW.side
+        )
+        OR EXISTS (
+            SELECT 1 FROM memecoin_reservation_active
+            WHERE case_id = NEW.case_id AND side = NEW.side
+              AND message_sha256 IS NOT NEW.message_sha256
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_active');
+        END
+        """
+    )
+    for table in ("memecoin_reservation_active", "memecoin_reservation_active_pin"):
+        trigger = "memecoin_reservation_active_delete" if table.endswith("active") else "memecoin_reservation_active_pin_delete"
+        conn.execute(
+            f"""
+            CREATE TRIGGER {trigger}
+            BEFORE DELETE ON {table}
+            FOR EACH ROW
+            WHEN NOT EXISTS (
+                SELECT 1 FROM memecoin_entry_receipts e
+                JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
+                JOIN memecoin_cases c ON c.id = OLD.case_id
+                WHERE OLD.side = 'entry' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
+                  AND e.ledger = 'live' AND e.ledger_provenance = 'server'
+                  AND r.ledger = 'live' AND r.ledger_provenance = 'server'
+                  AND c.ledger = 'live' AND c.ledger_provenance = 'server'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM memecoin_exit_receipts e
+                JOIN memecoin_reservations r ON r.message_sha256 = OLD.message_sha256
+                JOIN memecoin_cases c ON c.id = OLD.case_id
+                WHERE OLD.side = 'exit' AND e.case_id = OLD.case_id AND e.message_sha256 = OLD.message_sha256
+                  AND e.ledger = 'live' AND e.ledger_provenance = 'server'
+                  AND r.ledger = 'live' AND r.ledger_provenance = 'server'
+                  AND c.ledger = 'live' AND c.ledger_provenance = 'server'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'reservation_active');
+            END
+            """
+        )
     conn.execute(
         """
         CREATE TRIGGER memecoin_entry_receipts_release_active
@@ -3291,10 +3356,11 @@ def _replace_reservation_triggers(conn) -> None:
         BEGIN
             DELETE FROM memecoin_reservation_active
             WHERE case_id = NEW.case_id AND side = 'entry' AND message_sha256 = NEW.message_sha256;
+            DELETE FROM memecoin_reservation_active_pin
+            WHERE case_id = NEW.case_id AND side = 'entry' AND message_sha256 = NEW.message_sha256;
         END
         """
     )
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_exit_receipts_release_active")
     conn.execute(
         """
         CREATE TRIGGER memecoin_exit_receipts_release_active
@@ -3303,6 +3369,8 @@ def _replace_reservation_triggers(conn) -> None:
         WHEN NEW.ledger = 'live' AND NEW.ledger_provenance = 'server'
         BEGIN
             DELETE FROM memecoin_reservation_active
+            WHERE case_id = NEW.case_id AND side = 'exit' AND message_sha256 = NEW.message_sha256;
+            DELETE FROM memecoin_reservation_active_pin
             WHERE case_id = NEW.case_id AND side = 'exit' AND message_sha256 = NEW.message_sha256;
         END
         """
@@ -3359,9 +3427,6 @@ def _replace_reservation_triggers(conn) -> None:
         END
         """
     )
-    _backfill_active_slots(conn)
-
-
 def _install_lineage_triggers(conn) -> None:
     """Replace predecessor trigger definitions and record the revision in one transaction."""
     _replace_lineage_triggers(conn)
