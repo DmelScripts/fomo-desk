@@ -1240,6 +1240,9 @@ def _preflight_report(**extra) -> dict:
         "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
         "dex_fee_quote_raw": None, "dex_fee_quote_partial": False,
         "dex_fee_quote_current_state": False, "dex_fee_quote_is_inclusion_bound": False,
+        "dex_fee_input_ceiling_raw": None, "dex_fee_input_ceiling_unit": None,
+        "dex_fee_input_ceiling_proven": False, "dex_fee_input_ceiling_tight": False,
+        "dex_fee_input_ceiling_is_inclusion_bound": False, "dex_fee_step_count_is_maximum": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": None,
         "combined_fee_usd_proven": False, "allocation_proven": False,
@@ -1593,6 +1596,23 @@ def _message_tick_arrays(transport, hop: dict, state: dict, tip: int, blockhash:
     return parsed, None
 
 
+def _exact_in_ceiling(hop: dict) -> dict:
+    """Fee ceiling for a successful classic exact-in. It is the message's input."""
+    import solana_tx
+    import solana_whirlpool_quote
+    unit = "lamports" if hop["source_mint"] == solana_tx.NATIVE_MINT else "token_raw"
+    return {
+        "dex_fee_input_ceiling_raw": solana_whirlpool_quote.exact_in_input_ceiling(hop["in_amount"]),
+        "dex_fee_input_ceiling_unit": unit,
+        "dex_fee_input_ceiling_proven": True,
+        "dex_fee_input_ceiling_tight": True,
+        "dex_fee_input_ceiling_is_inclusion_bound": True,
+        "dex_fee_step_count_is_maximum": False,
+        "dex_fee_ceiling_program": "orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d",
+        "dex_fee_static_rate_max": solana_whirlpool_quote.MAX_STATIC_FEE_RATE,
+    }
+
+
 def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     """Static Whirlpool fee rate on the reserved hop's pool account.
 
@@ -1615,6 +1635,9 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
         "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
         "dex_fee_quote_raw": None, "dex_fee_quote_partial": False,
         "dex_fee_quote_current_state": False, "dex_fee_quote_is_inclusion_bound": False,
+        "dex_fee_input_ceiling_raw": None, "dex_fee_input_ceiling_unit": None,
+        "dex_fee_input_ceiling_proven": False, "dex_fee_input_ceiling_tight": False,
+        "dex_fee_input_ceiling_is_inclusion_bound": False, "dex_fee_step_count_is_maximum": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": "pool_fee_unobserved",
     }
@@ -1681,7 +1704,7 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     one_shot = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
     if one_shot is None or one_shot >= 2**64:
         one_shot = None
-    observed = observed | {"dex_fee_one_shot_raw": one_shot}
+    observed = observed | {"dex_fee_one_shot_raw": one_shot} | _exact_in_ceiling(hop)
     arrays, array_reason = _message_tick_arrays(transport, hop, state, tip, proof["blockhash"], slot)
     if array_reason is not None:
         return observed | {"pool_fee_reason": array_reason}

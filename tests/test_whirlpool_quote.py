@@ -61,6 +61,31 @@ class WhirlpoolQuoteTests(unittest.TestCase):
         self.assertEqual(got["steps"], 2)
         self.assertEqual(got["amount_remaining"], 0)
         self.assertEqual((4 * 3000 + 1_000_000 - 1) // 1_000_000, 1)
+        self.assertLess(got["trade_fee"], quote.exact_in_input_ceiling(4))
+
+    def test_exact_in_fee_cannot_exceed_the_input(self):
+        """Every mix of crossing steps and one final partial step stays within the input."""
+        for rate in (0, 1, 3000, quote.MAX_STATIC_FEE_RATE):
+            for amount in range(1, 25):
+                self.assertEqual(quote.exact_in_input_ceiling(amount), amount)
+                best = [0] * (amount + 1)
+                for left in range(1, amount + 1):
+                    best[left] = left
+                    for amount_in in range(0, left + 1):
+                        step_fee = quote.crossing_step_fee(amount_in, rate)
+                        consumed = amount_in + step_fee
+                        if consumed == 0 or consumed > left:
+                            continue
+                        best[left] = max(best[left], step_fee + best[left - consumed])
+                self.assertEqual(best[amount], amount)
+
+    def test_a_partial_step_can_charge_the_whole_input(self):
+        price = quote.sqrt_price_from_tick(0)
+        target = quote.sqrt_price_from_tick(-100)
+        step = quote._swap_step(4, 3000, 10**24, price, target, True, True)
+        self.assertEqual(step["amount_in"], 0)
+        self.assertEqual(step["fee_amount"], 4)
+        self.assertEqual(step["fee_amount"], quote.exact_in_input_ceiling(4))
 
     def test_slippage_floor_matches_the_published_996_case(self):
         self.assertEqual(quote.min_amount(996, 1000), 896)
