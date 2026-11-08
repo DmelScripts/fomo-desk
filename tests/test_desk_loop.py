@@ -495,6 +495,12 @@ class DeskLoopTests(unittest.TestCase):
         held["live_receipts"] = []
         held["capital_ledger"] = "live"
         held["live_capital"] = True
+        held["fill_basis_proven"] = True
+        held["entry_price_source"] = "entry_receipt"
+        held["entry_price_usd"] = "0.00000001"
+        held["stop_price_usd"] = "0.000000001"
+        held["trail_arm_price_usd"] = "0.000000012"
+        held["pool"] = values["pool"]
         held["entry_funding"] = {"source": "entry_receipt", "proven": True, "signature": "receipt-supervised-exit"}
         db.execute(
             "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
@@ -512,12 +518,19 @@ class DeskLoopTests(unittest.TestCase):
             "UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ? WHERE id = ?",
             (json.dumps(held, sort_keys=True), swap_mint),
         )
+        db.execute("UPDATE memecoin_cases SET ledger = 'live' WHERE id = ?", (swap_mint,))
         db.set_setting("memecoin_entry_halt", "1", "test")
         slot["mark"] = "1.20"
         seen.clear()
         held_quiet = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)["discovery"]
         self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
         self.assertEqual(held_quiet["positions"][0]["reason"], "exit_hold")
+        self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "filled")
+        fired = memecoin_desk.view(swap_mint)["snapshot"]
+        fired["entry_price_usd"] = "1000"
+        fired["stop_price_usd"] = "940"
+        fired["peak_price_usd"] = "1000"
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(fired, sort_keys=True), swap_mint))
         slot["mark"] = "0.90"
         seen.clear()
         exited = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)["discovery"]
@@ -582,13 +595,12 @@ class DeskLoopTests(unittest.TestCase):
             return {"status": 200, "body": {"result": {"context": {"slot": 10}, "value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
 
         held = desk_loop.run_discovery(transport, NOW)
-        self.assertEqual(held["positions"][0]["reason"], "exit_hold")
-        self.assertNotIn(MINT, [item.get("mint") for item in held["kills"]])
+        self.assertEqual(memecoin_desk.view(MINT)["stage"], "filled")
         self.assertFalse(held["positions"][0]["jupiter_called"])
-        price["usd"] = "0.50"
-        pair = _pair()
-        pair[0]["priceUsd"] = "0.50"
-        pair[0]["baseToken"] = {"address": MINT}
+        self.assertNotIn(MINT, [item.get("mint") for item in held["kills"]])
+        refused = memecoin_desk.mark(MINT, "0.10", source="caller_fixture", fetched_at=NOW, now=NOW)
+        self.assertEqual(refused["reason"], "mark_source")
+        self.assertEqual(memecoin_desk.view(MINT)["stage"], "filled")
 
         def marked(request):
             url = request.get("url") or ""
@@ -597,18 +609,18 @@ class DeskLoopTests(unittest.TestCase):
             if "/token-pairs/" in url:
                 body = _pair()
                 body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
-                body[0]["priceUsd"] = "0.50"
+                body[0]["priceUsd"] = "0.10"
                 return {"status": 200, "body": body}
             raise AssertionError("rpc")
 
         fired = desk_loop.run_discovery(marked, NOW)
         self.assertTrue(fired["entry_halt"])
         self.assertEqual(fired["reason"], "discovery_fault")
-        self.assertEqual(memecoin_desk.view(MINT)["stage"], "exit_intent")
-        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        self.assertEqual(memecoin_desk.view(MINT)["stage"], "filled")
         snap = memecoin_desk.view(MINT)["snapshot"]
+        snap["exit_intent"] = {"source": "server_pool_pyth", "live": True, "action": "stop"}
         snap["inflight"] = {"message_sha256": "already"}
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap, sort_keys=True), MINT))
+        db.execute("UPDATE memecoin_cases SET stage = 'exit_intent', snapshot_json = ? WHERE id = ?", (json.dumps(snap, sort_keys=True), MINT))
         again = desk_loop.run_discovery(marked, NOW)
         self.assertEqual(again["positions"][0]["reason"], "exit_inflight")
         self.assertFalse(again["positions"][0]["jupiter_called"])
@@ -639,6 +651,7 @@ class DeskLoopTests(unittest.TestCase):
         snap = memecoin_desk.view(case_id)["snapshot"]
         snap["remaining_raw"] = 999_899
         snap["live_receipts"] = []
+        snap["exit_intent"] = {"source": "server_pool_pyth", "live": True, "action": "stop"}
         db.execute(
             "UPDATE memecoin_cases SET stage = 'exit_intent', snapshot_json = ? WHERE id = ?",
             (json.dumps(snap, sort_keys=True), case_id),
@@ -732,3 +745,154 @@ class DeskLoopTests(unittest.TestCase):
         wrong = {"mint": "other", "source": "synthetic_test_adapter", "fetched_at": NOW, "onchain": {}, "components": {}}
         self.assertEqual(desk_loop.synthetic_screen(MINT, wrong, transport({}), NOW)["reason"], "synthetic_mint")
         self.assertIsNone(memecoin_desk.view("other"))
+
+    def test_synthetic_ledger_cannot_reach_live_reserve_or_loss(self):
+        import db
+        import json
+        from decimal import Decimal
+        opened = memecoin_desk.scout({
+            "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+        }, now=NOW)
+        case_id = opened["case_id"]
+        from tests.test_jupiter_route_v2 import WHEN, _prices
+        import pyth_sponsored
+        pyth_sponsored.read_accounts(_prices(), WHEN)
+        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (case_id,))
+        protected = memecoin_desk.protect(case_id, now=WHEN, ledger="synthetic", rent_proof={"ok": True, "lamports": 1_488_440, "count": 1})
+        if protected.get("ok") is not True:
+            snap = memecoin_desk.view(case_id)["snapshot"]
+            snap["price_usd"] = "1"
+            db.execute("UPDATE memecoin_cases SET snapshot_json = ?, stage = 'analyst_passed' WHERE id = ?", (json.dumps(snap), case_id))
+            protected = memecoin_desk.protect(case_id, now=NOW, ledger="synthetic", rent_proof={"ok": True, "lamports": 1_488_440, "count": 1})
+        self.assertEqual(db.query("SELECT ledger FROM memecoin_cases WHERE id = ?", (case_id,))[0]["ledger"], "synthetic", protected)
+        called = {"n": 0}
+
+        def prices(_now):
+            called["n"] += 1
+            raise AssertionError("network")
+
+        reserved = memecoin_desk.reserve_entry(case_id, "not-a-message", None, prices, NOW)
+        self.assertEqual(reserved["reason"], "synthetic_not_live")
+        self.assertEqual(called["n"], 0)
+        self.assertNotIn("entry_inflight", memecoin_desk.view(case_id)["snapshot"])
+        forged = memecoin_desk.view(case_id)["snapshot"]
+        forged["capital_ledger"] = "live"
+        forged["live_ledger"] = True
+        forged["entry_inflight"] = {"message_sha256": "forged"}
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(forged, sort_keys=True), case_id))
+
+        def chain(_signature):
+            raise AssertionError("chain")
+
+        original = desk_loop.read_transaction
+        desk_loop.read_transaction = chain
+        try:
+            confirmed = memecoin_desk.confirm_entry(case_id, "sig-synthetic", NOW)
+        finally:
+            desk_loop.read_transaction = original
+        self.assertEqual(confirmed["reason"], "ledger_lineage")
+        self.assertTrue(confirmed["quarantine"])
+        self.assertEqual(db.query("SELECT signature FROM memecoin_entry_receipts"), [])
+        self.assertEqual(db.get_setting("memecoin_integrity_halt"), "1")
+        forged["realized_pnl"] = "-5"
+        forged["pnl_live"] = True
+        forged["entry_funding"] = {"source": "entry_receipt", "proven": True, "signature": "sig-synthetic", "tokens_out": 10}
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(forged, sort_keys=True), case_id))
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'synthetic')",
+            ("sig-synthetic", case_id, "forged", 1, 10, 1, 1, 1, "0.01"),
+        )
+        db.execute(
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger) VALUES ('refund-synthetic', ?, 1, 1, '5.00', 1, 'synthetic')",
+            (case_id,),
+        )
+        self.assertEqual(memecoin_desk.loss_totals()["live_loss_usd"], "0.00")
+        live = memecoin_desk.scout({
+            "mint": solana_tx.b58encode(b"\x42" * 32), "source": "dexscreener", "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+        }, now=NOW)
+        db.execute("UPDATE memecoin_cases SET stage = 'protected', ledger = 'live' WHERE id = ?", (live["case_id"],))
+        replay = memecoin_desk.confirm_entry(live["case_id"], "sig-synthetic", NOW)
+        self.assertEqual(replay["reason"], "cross_ledger_replay")
+        self.assertEqual(memecoin_desk.view(live["case_id"])["stage"], "protected")
+        for number in range(12):
+            mint = solana_tx.b58encode(bytes([number + 1]) * 32)
+            db.execute(
+                "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger) VALUES (?, ?, 'protected', ?, ?, ?, 'live')",
+                ("live-%s" % number, mint, json.dumps({"reserved_usd": "8.00"}), NOW, NOW),
+            )
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger) VALUES ('live-fee', ?, 'protected', ?, ?, ?, 'live')",
+            (solana_tx.b58encode(b"\x63" * 32), json.dumps({"reserved_usd": "4.00"}), NOW, NOW),
+        )
+        self.assertFalse(db.exclusive(lambda conn: memecoin_desk._room_for(conn, "new-ticket", Decimal("8"))))
+        db.init_db()
+        self.assertFalse(db.exclusive(lambda conn: memecoin_desk._room_for(conn, "new-ticket", Decimal("8"))))
+
+    def test_live_mark_uses_pool_bytes_not_a_caller_price(self):
+        import db
+        import json
+        from decimal import Decimal
+        from tests.test_jupiter_route_v2 import WHEN, _prices
+        import pyth_sponsored
+        import solana_whirlpool
+        opened = memecoin_desk.scout({
+            "mint": MINT, "source": "dexscreener", "fetched_at": WHEN,
+            "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "9", "price_change_h1": "1",
+        }, now=WHEN)
+        case_id = opened["case_id"]
+        pool = solana_tx.b58encode(b"\x21" * 32)
+        data = solana_whirlpool.reference_pool(
+            solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x31" * 32),
+            MINT, solana_tx.b58encode(b"\x32" * 32),
+            sqrt_price=1 << 64,
+        )
+        leg = pyth_sponsored.read_accounts(_prices(), WHEN)["sol"]
+        bound = memecoin_desk.read_bound_price(case_id, data, pool, leg, 6, 1_000, 1_000, WHEN)
+        self.assertIsInstance(bound, memecoin_desk.BoundPrice)
+        price = bound.price
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap.update({
+            "fill_basis_proven": True,
+            "entry_price_source": "entry_receipt",
+            "entry_price_usd": format(price, "f"),
+            "stop_price_usd": format(price * Decimal("0.94"), "f"),
+            "trail_arm_price_usd": format(price * Decimal("1.12"), "f"),
+            "trail_drop_pct": "12",
+            "discovery_price_usd": "9",
+        })
+        db.execute("UPDATE memecoin_cases SET stage = 'filled', ledger = 'live', snapshot_json = ? WHERE id = ?", (json.dumps(snap, sort_keys=True), case_id))
+        self.assertNotEqual(Decimal(snap["discovery_price_usd"]), price)
+        refused = memecoin_desk.mark(case_id, "0.10", source="caller_fixture", fetched_at=WHEN, now=WHEN)
+        self.assertEqual(refused["reason"], "mark_source")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
+        stale = memecoin_desk.read_bound_price(case_id, data, pool, leg, 6, 1, 1_000, WHEN)
+        self.assertEqual(stale["reason"], "mark_stale")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
+        other = solana_whirlpool.reference_pool(
+            solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x31" * 32),
+            solana_tx.b58encode(b"\x44" * 32), solana_tx.b58encode(b"\x32" * 32),
+            sqrt_price=1 << 64,
+        )
+        wrong = memecoin_desk.read_bound_price(case_id, other, pool, leg, 6, 1_000, 1_000, WHEN)
+        self.assertEqual(wrong["reason"], "mark_mint")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
+        held = memecoin_desk.apply_live_mark(case_id, bound, WHEN)
+        self.assertEqual(held["action"], "hold")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap["entry_price_usd"] = format(price / Decimal("0.94"), "f")
+        snap["stop_price_usd"] = format(price, "f")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap, sort_keys=True), case_id))
+        fired = memecoin_desk.apply_live_mark(case_id, bound, WHEN)
+        self.assertEqual(fired["action"], "stop")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "exit_intent")
+        intent = memecoin_desk.view(case_id)["snapshot"]["exit_intent"]
+        self.assertEqual(intent["source"], "server_pool_pyth")
+        self.assertTrue(intent["live"])
+        self.assertEqual(intent["pool"], pool)
+        self.assertTrue(memecoin_desk.view(case_id)["snapshot"]["live_ledger"])

@@ -360,6 +360,7 @@ def match_entry(reserved: dict, signature: str, pulled: dict) -> dict:
         "slot": pulled["slot"],
         "message_sha256": digest,
         "qty": received["qty"],
+        "mint_decimals": received.get("decimals"),
         "token_pre": received["pre"],
         "token_pre_source": received["pre_source"],
         "input_lamports": int(reserved["input_lamports"]),
@@ -405,7 +406,8 @@ def _received(meta, mint: str, owner: str, created: bool, pre_lamports) -> dict:
         return {"ok": False, "reason": "token_prebalance_unknown"}
     if post < pre:
         return {"ok": False, "reason": "token_delta"}
-    return {"ok": True, "qty": post - pre, "pre": pre, "pre_source": source}
+    decimals = _decimals(post_rows + pre_rows)
+    return {"ok": True, "qty": post - pre, "pre": pre, "pre_source": source, "decimals": decimals}
 
 
 def rent_ledger(decoded, meta, mint: str) -> dict:
@@ -762,6 +764,19 @@ def _token_delta(meta, mint: str, owner: str) -> int | None:
 
 def _rows(value) -> list:
     return value if isinstance(value, list) else []
+
+
+def _decimals(rows) -> int | None:
+    found = []
+    for row in rows:
+        token = row.get("uiTokenAmount") if isinstance(row, dict) else None
+        decimals = token.get("decimals") if isinstance(token, dict) else None
+        if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 0 or decimals > 18:
+            return None
+        found.append(decimals)
+    if len(found) != 1 and len(set(found)) != 1:
+        return None
+    return found[0] if found else None
 
 
 def _amount(rows, mint: str, owner: str) -> int | None:
