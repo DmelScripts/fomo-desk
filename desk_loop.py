@@ -716,7 +716,100 @@ def record_deposit_liability(case_id: str, message_sha256: str, transport, now: 
             raise
     reported = public | _ledger_fields(message_sha256) | {"recorded": True}
     reported["deposit_lines"] = None
+    reported.update(value_deposit_potential(message_sha256, transport, now))
     return reported
+
+
+def value_deposit_potential(message_sha256: str, transport, now: float) -> dict:
+    """Price this message's historical lamport maximum with one current SOL/USD read.
+
+    The quantity is the stored maximum. The price is the read taken now. A caller
+    price is not accepted. Distinct messages are not added together.
+    """
+    from decimal import Decimal
+    import pyth_sponsored
+    quiet = {
+        "deposit_potential_usd_ceiling": None,
+        "deposit_potential_usd_floor": None,
+        "deposit_valued_lamports": None,
+        "deposit_price_used": False,
+        "deposit_valuation_reason": "no_lamport_liability",
+        "deposit_oracle_fresh": False,
+        "deposit_oracle_source": None,
+        "deposit_oracle_feed_id": None,
+        "deposit_oracle_account": None,
+        "deposit_oracle_price": None,
+        "deposit_oracle_conf": None,
+        "deposit_oracle_expo": None,
+        "deposit_oracle_publish_time": None,
+        "deposit_oracle_observed_at": None,
+        "deposit_oracle_age_s": None,
+        "deposit_oracle_slot": None,
+        "deposit_oracle_upper": None,
+        "deposit_oracle_lower": None,
+        "deposit_price_is_future_guarantee": False,
+    }
+    ledger = deposit_liability(message_sha256)
+    quantity = ledger["potential_lamports"]
+    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 0:
+        return quiet | {"deposit_valuation_reason": "deposit_unobserved"}
+    if quantity == 0:
+        return quiet
+    if not callable(transport):
+        return quiet | {"deposit_valuation_reason": "deposit_source", "deposit_valued_lamports": quantity}
+    try:
+        read = pyth_sponsored.read_accounts(transport, now)
+    except Exception:
+        return quiet | {"deposit_valuation_reason": "rpc_transport", "deposit_valued_lamports": quantity}
+    sol = read.get("sol") if isinstance(read, dict) else None
+    if not isinstance(sol, dict) or sol.get("fresh") is not True or sol.get("used") is not True:
+        reason = sol.get("reason") if isinstance(sol, dict) and sol.get("reason") else (read.get("reason") if isinstance(read, dict) else None)
+        return quiet | {
+            "deposit_valuation_reason": reason or "sol_usd_unpriced",
+            "deposit_valued_lamports": quantity,
+            "deposit_oracle_source": "pyth_sponsored",
+            "deposit_oracle_feed_id": pyth_sponsored.SOL_FEED,
+            "deposit_oracle_account": pyth_sponsored.SOL_ACCOUNT,
+            "deposit_oracle_slot": read.get("slot") if isinstance(read, dict) else None,
+        }
+    price = sol.get("price")
+    conf = sol.get("conf")
+    expo = sol.get("expo")
+    if isinstance(price, bool) or isinstance(conf, bool) or isinstance(expo, bool):
+        return quiet | {"deposit_valuation_reason": "valuation_scale", "deposit_valued_lamports": quantity}
+    if not isinstance(price, int) or not isinstance(conf, int) or not isinstance(expo, int):
+        return quiet | {"deposit_valuation_reason": "valuation_scale", "deposit_valued_lamports": quantity}
+    if conf < 0 or expo < -12 or expo > 0:
+        return quiet | {"deposit_valuation_reason": "valuation_scale", "deposit_valued_lamports": quantity}
+    scale = Decimal(10) ** expo
+    ceiling_rate = (Decimal(price) + Decimal(conf)) * scale
+    floor_rate = (Decimal(price) - Decimal(conf)) * scale
+    if floor_rate <= 0 or ceiling_rate <= 0:
+        return quiet | {"deposit_valuation_reason": "valuation_not_positive", "deposit_valued_lamports": quantity}
+    lamports = Decimal(quantity)
+    ceiling = lamports * ceiling_rate / Decimal(1_000_000_000)
+    floor = lamports * floor_rate / Decimal(1_000_000_000)
+    return quiet | {
+        "deposit_potential_usd_ceiling": format(ceiling, "f"),
+        "deposit_potential_usd_floor": format(floor, "f"),
+        "deposit_valued_lamports": quantity,
+        "deposit_price_used": True,
+        "deposit_valuation_reason": None,
+        "deposit_oracle_fresh": True,
+        "deposit_oracle_source": "pyth_sponsored",
+        "deposit_oracle_feed_id": pyth_sponsored.SOL_FEED,
+        "deposit_oracle_account": pyth_sponsored.SOL_ACCOUNT,
+        "deposit_oracle_price": price,
+        "deposit_oracle_conf": conf,
+        "deposit_oracle_expo": expo,
+        "deposit_oracle_publish_time": sol.get("publish_time"),
+        "deposit_oracle_observed_at": read.get("observed_at"),
+        "deposit_oracle_age_s": sol.get("age_s"),
+        "deposit_oracle_slot": read.get("slot"),
+        "deposit_oracle_upper": sol.get("upper"),
+        "deposit_oracle_lower": format(floor_rate, "f"),
+        "deposit_price_is_future_guarantee": False,
+    }
 
 
 def _ledger_fields(message_sha256: str) -> dict:

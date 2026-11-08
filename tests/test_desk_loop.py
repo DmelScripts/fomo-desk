@@ -2089,7 +2089,27 @@ conn.close()
             if method == "getMultipleAccounts":
                 keys = request.get("accounts") or []
                 if keys == [pyth_sponsored.SOL_ACCOUNT, pyth_sponsored.USDC_ACCOUNT]:
-                    return _prices()(request)
+                    chain["oracle_calls"] = chain.get("oracle_calls", 0) + 1
+                    mode = chain.get("oracle_mode")
+                    found = _prices()(request)
+                    if mode == "malformed":
+                        return {"status": 200, "body": {"result": {"context": {"slot": 466835746}, "value": [{"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": ["", "base64"]}, found["body"]["result"]["value"][1]]}}}
+                    if mode == "cross_feed":
+                        usdc = Path("tests/fixtures/pyth_usdc_usd_price_update_v2.bin").read_bytes()
+                        found["body"]["result"]["value"][0]["data"][0] = base64.b64encode(usdc).decode("ascii")
+                    elif mode == "negative":
+                        raw = bytearray(Path("tests/fixtures/pyth_sol_usd_price_update_v2.bin").read_bytes())
+                        raw[73:81] = (-1).to_bytes(8, "little", signed=True)
+                        found["body"]["result"]["value"][0]["data"][0] = base64.b64encode(bytes(raw)).decode("ascii")
+                    elif mode == "overflow":
+                        raw = bytearray(Path("tests/fixtures/pyth_sol_usd_price_update_v2.bin").read_bytes())
+                        raw[81:89] = (2**64 - 1).to_bytes(8, "little")
+                        found["body"]["result"]["value"][0]["data"][0] = base64.b64encode(bytes(raw)).decode("ascii")
+                    elif mode == "context_missing":
+                        found["body"]["result"].pop("context", None)
+                    elif mode == "posted_future":
+                        found["body"]["result"]["context"]["slot"] = 1
+                    return found
                 value = []
                 for key in keys:
                     if key not in accounts:
@@ -2273,6 +2293,68 @@ conn.close()
         self.assertFalse(liability["permission_from_ledger"])
         self.assertEqual(liability["liability_kind"], "potential")
         self.assertNotIn("deposit_potential_lamports", memecoin_desk.view(case_id)["snapshot"])
+        from decimal import Decimal
+        valued = entry_supervised["execution"]
+        ceiling = Decimal(valued["deposit_potential_usd_ceiling"])
+        floor = Decimal(valued["deposit_potential_usd_floor"])
+        rate = (Decimal(valued["deposit_oracle_price"]) + Decimal(valued["deposit_oracle_conf"])) * (Decimal(10) ** valued["deposit_oracle_expo"])
+        self.assertEqual(ceiling, Decimal(liability["potential_lamports"]) * rate / Decimal(1_000_000_000))
+        self.assertGreater(ceiling, floor)
+        self.assertNotEqual(ceiling, ceiling.quantize(Decimal("0.01")))
+        self.assertEqual(valued["deposit_valued_lamports"], liability["potential_lamports"])
+        self.assertNotEqual(valued["deposit_valued_lamports"], liability["potential_lamports"] + liability["latest_observed_lamports"])
+        self.assertEqual(valued["deposit_oracle_source"], "pyth_sponsored")
+        self.assertEqual(valued["deposit_oracle_feed_id"], pyth_sponsored.SOL_FEED)
+        self.assertEqual(valued["deposit_oracle_account"], pyth_sponsored.SOL_ACCOUNT)
+        self.assertEqual(valued["deposit_oracle_publish_time"], 1794123880)
+        self.assertEqual(valued["deposit_oracle_conf"], 8650184)
+        self.assertTrue(valued["deposit_oracle_fresh"])
+        self.assertFalse(valued["deposit_price_is_future_guarantee"])
+        self.assertFalse(valued["price_freshness_proven"])
+        self.assertFalse(valued["ticket_limit_proven"] if "ticket_limit_proven" in valued else False)
+        self.assertFalse(valued["allocation_proven"] if "allocation_proven" in valued else False)
+        self.assertFalse(valued["rent_bound_proven"])
+        self.assertFalse(valued["fee_usd_proven"] if "fee_usd_proven" in valued else False)
+        self.assertIsNone(valued["deposit_landed_lamports"])
+        self.assertIsNone(valued["deposit_refunded_lamports"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], memecoin_desk.view(case_id)["snapshot"]["reserved_usd"])
+        held_usd_at_value = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
+
+        def refuse_oracle(request):
+            raise AssertionError(request.get("method"))
+
+        zero = desk_loop.value_deposit_potential("0" * 64, refuse_oracle, WHEN)
+        self.assertEqual(zero["deposit_valuation_reason"], "no_lamport_liability")
+        self.assertFalse(zero["deposit_price_used"])
+        self.assertIsNone(zero["deposit_potential_usd_ceiling"])
+        calls_before = chain.get("oracle_calls", 0)
+        stale = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], transport, WHEN + 120)
+        self.assertEqual(stale["deposit_valuation_reason"], "valuation_stale")
+        self.assertIsNone(stale["deposit_potential_usd_ceiling"])
+        self.assertEqual(stale["deposit_valued_lamports"], liability["potential_lamports"])
+        self.assertFalse(stale["price_freshness_proven"] if "price_freshness_proven" in stale else False)
+        future = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], transport, 1794123880 - 10)
+        self.assertEqual(future["deposit_valuation_reason"], "valuation_stale")
+        self.assertIsNone(future["deposit_potential_usd_ceiling"])
+        for mode, reason in (
+            ("malformed", "price_update_v2_layout"),
+            ("cross_feed", "feed_id"),
+            ("negative", "valuation_not_positive"),
+            ("overflow", "valuation_not_positive"),
+            ("context_missing", "slot_unproven"),
+            ("posted_future", "posted_slot_future"),
+        ):
+            chain["oracle_mode"] = mode
+            bad = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], transport, WHEN)
+            chain["oracle_mode"] = None
+            self.assertEqual(bad["deposit_valuation_reason"], reason, bad)
+            self.assertIsNone(bad["deposit_potential_usd_ceiling"], mode)
+            self.assertFalse(bad["deposit_price_used"], mode)
+            self.assertEqual(bad["deposit_valued_lamports"], liability["potential_lamports"])
+            self.assertFalse(bad["execution_eligible"] if "execution_eligible" in bad else False)
+            self.assertEqual(desk_loop.deposit_liability(entry_supervised["message_sha256"])["potential_lamports"], liability["potential_lamports"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], held_usd_at_value)
+        self.assertGreater(chain.get("oracle_calls", 0), calls_before)
         forged = desk_loop.record_deposit_liability(case_id, entry_supervised["message_sha256"], {
             "deposit_observed": True,
             "deposit_reason": "deposit_hold_unpinned",
@@ -3499,6 +3581,12 @@ conn.close()
         self.assertIsNone(exit_preflight["deposit_lamports"])
         self.assertEqual(exit_preflight["deposit_reason"], "close_without_create")
         self.assertFalse(exit_preflight["deposit_refund_credited"])
+        oracle_before_exit = chain.get("oracle_calls", 0)
+        exit_gate = desk_loop.execution_gate(case_id, stored["message_sha256"], transport, WHEN)
+        self.assertEqual(chain.get("oracle_calls", 0), oracle_before_exit)
+        self.assertFalse(exit_gate.get("deposit_price_used") is True)
+        self.assertIsNone(exit_gate.get("deposit_potential_usd_ceiling"))
+        self.assertEqual(desk_loop.deposit_liability(stored["message_sha256"])["potential_lamports"], 0)
         exit_row = next(item for item in exit_round["discovery"]["reservations"] if item.get("message_sha256") == stored["message_sha256"])
         self.assertTrue(exit_row["supervised"])
         self.assertTrue(exit_row["execution"]["reservation_valid"], exit_row)
