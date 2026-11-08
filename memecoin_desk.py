@@ -33,6 +33,9 @@ STOP = Decimal("6")
 TRAIL_ARM = Decimal("12")
 TRAIL_DROP = Decimal("12")
 LIQ_OF_MCAP = Decimal("0.25")
+DEV_HOLDING_MAX = Decimal("3")
+BUNDLE_MAX = Decimal("10")
+ALREADY_UP_1H = Decimal("80")
 # Engineering defaults. They are not the approved stop, trail, fee, or loss numbers.
 WEIGHTS = {
     "momentum": Decimal("20"),
@@ -65,6 +68,16 @@ def analyst_decision() -> dict:
             "slippage_bps": 50,
         },
         "decision_needed": "Component weights are engineering defaults. A score of 70 from those weights is not an owner-approved formula.",
+        "required_inputs": [
+            {
+                "name": name,
+                "weight": format(WEIGHTS[name], "f"),
+                "value_range": "0..100",
+                "max_age_s": FRESH_S,
+                "rejected_sources": ["dexscreener", "dexscreener_txns", "transaction_count", "dexscreener_boost", "profile"],
+            }
+            for name in COMPONENTS
+        ],
     }
 MIN_AGE_S = 30 * 60
 MAX_AGE_S = 72 * 3600
@@ -168,7 +181,7 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     dev = _num(onchain.get("dev_holding_pct"))
     if dev is None:
         return refuse("dev_holding_missing")
-    if dev > 3:
+    if dev > DEV_HOLDING_MAX:
         return refuse("dev_holding")
     rugs = onchain.get("dev_rugs")
     if not isinstance(rugs, dict) or rugs.get("status") != "checked" or not isinstance(rugs.get("source"), str) or rugs.get("source") == "dexscreener":
@@ -182,10 +195,10 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     bundled = _num(onchain.get("bundled_launch_pct"))
     if bundled is None:
         return refuse("bundle_missing")
-    if bundled > 10:
+    if bundled > BUNDLE_MAX:
         return refuse("bundle")
     change = _num(snap.get("price_change_h1"))
-    if change is None or change >= 80:
+    if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))

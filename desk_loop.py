@@ -119,6 +119,7 @@ def run_discovery(transport, now: float) -> dict:
             "quote": result.get("quote"),
             "jupiter_called": result.get("jupiter_called") is True,
             "source_fields": result.get("source_fields"),
+            "observed": result.get("observed"),
             "score_measured": False,
             "fixture_is_mainnet_proof": False,
         })
@@ -141,6 +142,23 @@ def run_discovery(transport, now: float) -> dict:
         "score_measured": False,
         "holder_growth_unproven": True,
     }
+
+
+def _read_observed(transport, mint: str) -> dict:
+    """An explicit observed-MCP fixture. A REST body is not this channel."""
+    import stalkchain_observed
+    blank = {"supplied": False, "live_ready": False, "score_measured": False, "fixture_is_mainnet_proof": False, "rest_envelope_verified": False}
+    try:
+        response = transport({"kind": "observed_mcp", "mint": mint})
+    except Exception:
+        return blank | {"reason": "not_supplied"}
+    if not isinstance(response, dict):
+        return blank | {"reason": "not_supplied"}
+    body = response.get("body")
+    if not isinstance(body, dict) or body.get("kind") != stalkchain_observed.KIND:
+        return blank | {"reason": "not_supplied"}
+    mapped = stalkchain_observed.map_fixture(body, mint)
+    return blank | mapped | {"supplied": True}
 
 
 def collect_holder_count(mint: str, reading: dict) -> dict:
@@ -286,6 +304,7 @@ def run_once(mint: str, transport, now: float) -> dict:
         if isinstance(value, dict):
             account = solana_mint_read.parse_account(value, mint)
     coverage = stalkchain_adapter.read_mint(mint, transport)
+    observed = _read_observed(transport, mint)
     onchain = {"source": solana_mint_read.SOURCE, "fetched_at": now}
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
@@ -308,6 +327,7 @@ def run_once(mint: str, transport, now: float) -> dict:
         "holder_growth": holder_growth(mint),
         "caller_named_mint": True,
         "source_fields": coverage.get("fields"),
+        "observed": observed,
         "fixture_is_mainnet_proof": False,
         "analyst": memecoin_desk.analyst_decision(),
     }

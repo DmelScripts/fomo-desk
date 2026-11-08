@@ -214,6 +214,112 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(held["fdv_used_as_market_cap"])
         self.assertFalse(desk_loop.collect_holder_count(MINT, {"source": "stalkchain", "holder_count": 12, "fetched_at": NOW})["written"])
 
+    def test_observed_mcp_measurements_do_not_become_a_pass(self):
+        import copy
+        import json
+        from pathlib import Path as FixturePath
+        import stalkchain_observed
+        payload = json.loads((FixturePath(__file__).resolve().parent / "fixtures" / "nov8_observed_mcp_fixtures.json").read_text(encoding="utf-8"))
+        mint = payload["mint"]
+        bundle = {"kind": stalkchain_observed.KIND, "responses": payload["responses"]}
+        measured = stalkchain_observed.map_fixture(bundle, mint)
+        self.assertTrue(measured["ok"], measured)
+        self.assertFalse(measured["live_ready"])
+        self.assertFalse(measured["score_measured"])
+        self.assertFalse(measured["fixture_is_mainnet_proof"])
+        self.assertFalse(measured["rest_envelope_verified"])
+        self.assertFalse(measured["creation_time_used_as_freshness"])
+        self.assertEqual(measured["freshness"], "unknown")
+        self.assertEqual(measured["dev_holding"]["value"], "0.38")
+        self.assertEqual(measured["dev_holding"]["numeric_rule_result"], "within")
+        self.assertFalse(measured["dev_holding"]["admitted"])
+        self.assertEqual(measured["lp"]["lp_burned_percent"], "91")
+        self.assertFalse(measured["lp"]["lp_burned_or_locked"])
+        self.assertEqual(measured["lp"]["reason"], "lp_burn_incomplete")
+        self.assertIsNone(measured["lp"]["lock_expiry"])
+        self.assertFalse(measured["rugs"]["clean"])
+        self.assertEqual(measured["rugs"]["tokens_launched"], 1)
+        self.assertEqual(measured["rugs"]["reason"], "launch_count_is_not_rug_history")
+        self.assertEqual(measured["bundle"]["dev_launch_percent"], "9.87")
+        self.assertEqual(measured["bundle"]["nondev_launch_percent"], "0.45")
+        self.assertEqual(measured["bundle"]["inclusive_percent"], "10.32")
+        self.assertEqual(measured["bundle"]["numeric_rule_result"], "reject")
+        self.assertFalse(measured["bundle"]["double_counted"])
+        self.assertEqual(measured["holder_growth"]["snapshot_total_holders"], 1377)
+        self.assertEqual(measured["holder_growth"]["onchain_holders_total"], 1588)
+        self.assertEqual(measured["holder_growth"]["reason"], "t0_only")
+        self.assertFalse(measured["holder_growth"]["cross_source_is_growth"])
+        self.assertEqual(measured["uniques"]["unique_buyers_1h"], 1095)
+        self.assertEqual(measured["uniques"]["unique_sellers_1h"], 731)
+        self.assertFalse(measured["uniques"]["is_analyst_component"])
+        self.assertEqual(measured["price_change_1h"]["value"], "401.13")
+        self.assertEqual(measured["price_change_1h"]["numeric_rule_result"], "reject")
+        self.assertFalse(measured["holder_quality"]["is_analyst_score"])
+        self.assertIsNone(measured["analyst_score"])
+        self.assertFalse(measured["analyst_formula"]["owner_approved"])
+        self.assertEqual([item["name"] for item in measured["analyst_formula"]["required_inputs"]], list(memecoin_desk.COMPONENTS))
+        self.assertFalse(measured["fdv_used_as_market_cap"])
+        self.assertEqual(measured["market_cap_basis"], "fully diluted")
+        series = stalkchain_observed.holder_growth_series([
+            {"source": "snapshot", "mint": mint, "metric": "totalHolders", "captured_at": "2026-11-08T06:56:01.771Z", "value": 1377},
+            {"source": "onchain", "mint": mint, "metric": "holdersTotal", "captured_at": "2026-11-08T07:56:01.771Z", "value": 1588},
+        ])
+        self.assertEqual(series["reason"], "series_mismatch")
+        self.assertFalse(series["score_measured"])
+        later = stalkchain_observed.holder_growth_series([
+            {"source": "snapshot", "mint": mint, "metric": "totalHolders", "captured_at": "2026-11-08T06:56:01.771Z", "value": 1377},
+            {"source": "snapshot", "mint": mint, "metric": "totalHolders", "captured_at": "2026-11-08T07:56:01.771Z", "value": 1400},
+        ])
+        self.assertEqual(later["delta"], 23)
+        self.assertFalse(later["score_measured"])
+        self.assertFalse(later["live_ready"])
+        self.assertFalse(later["is_analyst_component"])
+        shifted = copy.deepcopy(bundle)
+        shifted["responses"]["onchain"]["data"]["mint"] = "other-mint"
+        self.assertEqual(stalkchain_observed.map_fixture(shifted, mint)["reason"], "mint_mismatch")
+        typed = copy.deepcopy(bundle)
+        typed["responses"]["onchain"]["data"]["lpBurnedPercent"] = "91"
+        typed_map = stalkchain_observed.map_fixture(typed, mint)
+        self.assertTrue(typed_map["ok"], typed_map)
+        self.assertIsNone(typed_map["lp"]["lp_burned_percent"])
+        self.assertFalse(typed_map["lp"]["lp_burned_or_locked"])
+        doubled = copy.deepcopy(bundle)
+        doubled["responses"]["early_buyers"]["data"]["launch"]["buys"][1]["supplyPercent"] = 9.87
+        self.assertEqual(stalkchain_observed.map_fixture(doubled, mint)["bundle"]["reason"], "bundle_unjoined")
+        self.assertIsNone(stalkchain_observed.map_fixture(doubled, mint)["bundle"]["inclusive_percent"])
+
+        def transport(request):
+            if request.get("kind") == "observed_mcp":
+                self.assertEqual(request["mint"], mint)
+                return {"status": 200, "body": bundle}
+            if request.get("method") == "POST":
+                return {"status": 200, "body": {"data": {"mint": mint, "lp_burned_or_locked": True, "marketCapBasis": "fully diluted", "fdvUsd": 1}, "meta": {}}}
+            if str(request.get("url", "")).endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": mint}]}
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+            body = _pair()
+            body[0]["baseToken"] = {"address": mint}
+            return {"status": 200, "body": body}
+
+        found = desk_loop.run_discovery(transport, NOW)
+        kill = next(item for item in found["kills"] if item.get("mint") == mint)
+        self.assertEqual(kill["reason"], "lp")
+        self.assertEqual(kill["stage"], "rejected")
+        self.assertFalse(kill["score_measured"])
+        self.assertFalse(kill["fixture_is_mainnet_proof"])
+        self.assertFalse(found["armed"])
+        self.assertFalse(found["live_ready"])
+        observed = kill["observed"]
+        self.assertEqual(observed["bundle"]["inclusive_percent"], "10.32")
+        self.assertEqual(observed["price_change_1h"]["numeric_rule_result"], "reject")
+        self.assertFalse(observed["live_ready"])
+        self.assertIsNone(observed["analyst_score"])
+        self.assertFalse(observed["admits_filter"])
+        self.assertFalse(observed["admits_analyst"])
+
     def test_every_solana_boost_is_a_candidate_and_the_loop_can_be_stopped(self):
         other = solana_tx.b58encode(b"\x44" * 32)
 
