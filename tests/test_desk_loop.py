@@ -259,6 +259,9 @@ class DeskLoopTests(unittest.TestCase):
         accounts[solana_whirlpool.oracle_address(new_pool)] = (
             solana_whirlpool.PROGRAM_ID, solana_whirlpool.oracle_account(new_pool),
         )
+        accounts.pop(solana_tx.associated_token_address(
+            __import__("phantom_transport").REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM,
+        ), None)
         slot = {"context": 2_000_000, "tip": 2_000_028, "owner": None, "price_scale": 1, "pyth": True}
         provided = {}
         import pyth_sponsored
@@ -280,6 +283,8 @@ class DeskLoopTests(unittest.TestCase):
                 if mint == swap_mint:
                     pair[0]["dexId"] = "whirlpool"
                     pair[0]["pairAddress"] = values["pool"]
+                    if slot.get("mark"):
+                        pair[0]["priceUsd"] = slot["mark"]
                 body = pair
             elif url.startswith("https://api.jup.ag/swap/v2/build"):
                 query = parse_qs(urlparse(url).query)
@@ -306,7 +311,9 @@ class DeskLoopTests(unittest.TestCase):
                 payload = json.loads(req.data.decode())
                 method = payload["method"]
                 seen.append(method)
-                if method == "getMinimumBalanceForRentExemption":
+                if method == "getGenesisHash":
+                    body = {"jsonrpc": "2.0", "result": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}
+                elif method == "getMinimumBalanceForRentExemption":
                     body = {"jsonrpc": "2.0", "result": solana_tx.TOKEN_ACCOUNT_RENT}
                 elif method == "getSlot":
                     body = {"jsonrpc": "2.0", "result": slot["tip"]}
@@ -339,7 +346,7 @@ class DeskLoopTests(unittest.TestCase):
                     raw = bytearray(82)
                     raw[44] = 6
                     raw[45] = 1
-                    body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode("ascii"), "base64"]}}}
+                    body = {"jsonrpc": "2.0", "result": {"context": {"slot": slot["context"]}, "value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode("ascii"), "base64"]}}}
                 else:
                     raise AssertionError(method)
             class _Response:
@@ -359,22 +366,21 @@ class DeskLoopTests(unittest.TestCase):
         os.environ["DESK_PRICE_LOOP"] = "0"
         self.addCleanup(lambda: os.environ.pop("DESK_PRICE_LOOP", None))
         moment = WHEN + 1
-        os.environ["STALKCHAIN_API_KEY"] = "sc_test_not_a_real_key"
-        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
 
-        def stalk(request):
-            token = request["json"]["token"]
-            if token != swap_mint:
-                return {"status": 200, "body": {"data": {"marketCapBasis": "market_cap"}, "meta": {}}}
-            components = {name: {"value": "70", "source": "synthetic_test_adapter", "fetched_at": moment} for name in memecoin_desk.COMPONENTS}
-            return {"status": 200, "body": {"data": {
-                "marketCapBasis": "market_cap",
-                "lp_burned_or_locked": True,
-                "dev_holding_pct": "1",
-                "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
-                "bundled_launch_pct": "1",
-                "components": components,
-            }, "meta": {}}}
+        def features():
+            return {
+                "mint": swap_mint,
+                "source": "synthetic_test_adapter",
+                "fetched_at": moment,
+                "onchain": {
+                    "source": "synthetic_test_adapter", "fetched_at": moment,
+                    "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True,
+                    "dev_holding_pct": "1",
+                    "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
+                    "bundled_launch_pct": "1",
+                },
+                "components": {name: {"value": "70", "source": "synthetic_test_adapter", "fetched_at": moment} for name in memecoin_desk.COMPONENTS},
+            }
 
         db.set_setting("memecoin_scheduler_authorized", "1", "synthetic_test_consent")
 
@@ -386,16 +392,20 @@ class DeskLoopTests(unittest.TestCase):
                 self.assertFalse(status["armed"])
                 self.assertIn("lp_fields_unpublished", status["ready_because"])
                 self.assertIn("holder_growth_unproven", status["ready_because"])
-                return desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)
+                screened = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
+                real = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)
+                return screened, real
 
-        found = asyncio.run(boot())
+        screened, found = asyncio.run(boot())
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         self.assertFalse(found["live_ready"])
+        self.assertFalse(screened["live_capital"], screened)
+        self.assertEqual(screened.get("reason"), None, screened)
+        self.assertEqual(memecoin_desk.view(swap_mint)["snapshot"]["capital_ledger"], "synthetic")
         found = found["discovery"]
         builds = [url for url in seen if "/swap/v2/build?" in url]
         self.assertEqual(len(builds), 1, seen)
-        screened = found.get("screened") or found["kills"]
-        quoted = next(item["quote"] for item in screened if item.get("mint") == swap_mint)
+        quoted = screened["quote"]
         raw_amount = memecoin_desk.view(swap_mint)["snapshot"]["entry_amount_raw"]
         chosen = jupiter_route_v2.encoded_slippage(quoted["measured_est_out"])
         self.assertIn("amount=%s" % raw_amount, builds[0])
@@ -425,7 +435,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(quoted["oracle_price_proven"])
         slot["price_scale"] = 2
         seen.clear()
-        doubled = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        doubled = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         doubled_urls = [url for url in seen if "/swap/v2/build?" in url]
         self.assertFalse(any(("amount=%s" % raw_amount) in url for url in doubled_urls), doubled_urls)
         smaller = memecoin_desk.view(swap_mint)["snapshot"]["entry_amount_raw"]
@@ -436,28 +446,28 @@ class DeskLoopTests(unittest.TestCase):
         slot["price_scale"] = 1
         slot["pyth"] = False
         seen.clear()
-        dark = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        dark = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
         self.assertEqual(memecoin_desk.view(swap_mint)["snapshot"]["entry_amount_raw"], smaller)
-        self.assertNotEqual(next(item["quote"]["reason"] for item in dark["screened"] if item.get("mint") == swap_mint), None)
+        self.assertIsNotNone(dark["quote"]["reason"])
         slot["pyth"] = True
 
         hostile = bytearray(accounts[fields[1]][1])
         hostile[32:64] = b"\x99" * 32
         accounts[fields[1]] = (solana_tx.TOKEN_PROGRAM, bytes(hostile))
         seen.clear()
-        hostile_run = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        hostile_run = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
-        self.assertEqual(next(item["quote"] for item in hostile_run["kills"] if item.get("mint") == swap_mint)["reason"], "whirlpool_vault_unbound")
+        self.assertEqual(hostile_run["quote"]["reason"], "whirlpool_vault_unbound")
         restored = bytearray(solana_whirlpool.reference_token_account(fields[0], new_pool))
         restored[108] = 1
         accounts[fields[1]] = (solana_tx.TOKEN_PROGRAM, bytes(restored))
 
         seen.clear()
         slot["owner"] = solana_tx.TOKEN_PROGRAM
-        wrong = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        wrong = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
-        wrong_quote = next(item["quote"] for item in wrong["kills"] if item.get("mint") == swap_mint)
+        wrong_quote = wrong["quote"]
         self.assertEqual(wrong_quote["reason"], "whirlpool_pool_unbound")
         self.assertFalse(wrong_quote["jupiter_called"])
         self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "protected")
@@ -465,14 +475,14 @@ class DeskLoopTests(unittest.TestCase):
         seen.clear()
         slot["owner"] = None
         slot["tip"] = slot["context"] + 400
-        stale = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        stale = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
-        self.assertEqual(next(item["quote"] for item in stale["kills"] if item.get("mint") == swap_mint)["reason"], "slot_lag")
+        self.assertEqual(stale["quote"]["reason"], "rent_slot_stale")
         slot["tip"] = slot["context"] - 10
         seen.clear()
-        future = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        future = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
         self.assertFalse(any("/swap/v2/" in url for url in seen))
-        self.assertEqual(next(item["quote"] for item in future["kills"] if item.get("mint") == swap_mint)["reason"], "slot_lag")
+        self.assertEqual(future["quote"]["reason"], "rent_slot_stale")
         slot["tip"] = slot["context"] + 28
         up = []
         for start in [base + i * step for i in range(3)]:
@@ -481,33 +491,244 @@ class DeskLoopTests(unittest.TestCase):
         exit_qty = 999_899
         exit_est = solana_whirlpool_quote.quote_exact_in(state, up, exit_qty, False, 0, 0, slot["context"])["token_est_out"]
         held = memecoin_desk.view(swap_mint)["snapshot"]
-        held.pop("remaining_raw", None)
+        held["remaining_raw"] = exit_qty
+        held["live_receipts"] = []
+        held["capital_ledger"] = "live"
+        held["live_capital"] = True
         held["entry_funding"] = {"source": "entry_receipt", "proven": True, "signature": "receipt-supervised-exit"}
         db.execute(
             "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             ("receipt-supervised-exit", swap_mint, "supervised", slot["context"], exit_qty, 1, 5000, 1, "0.01"),
         )
         db.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty) VALUES (?, ?, ?, ?, ?, ?)",
+            ("exit-row-400k", swap_mint, "supervised-exit", slot["context"], "0.01", 400_000),
+        )
+        db.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty) VALUES (?, ?, ?, ?, ?, ?)",
+            ("exit-row-other", "other-case", "other", slot["context"], "0.01", 400_000),
+        )
+        db.execute(
             "UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ? WHERE id = ?",
             (json.dumps(held, sort_keys=True), swap_mint),
         )
         db.set_setting("memecoin_entry_halt", "1", "test")
+        slot["mark"] = "1.20"
         seen.clear()
-        exited = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        held_quiet = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)["discovery"]
+        self.assertFalse(any("/swap/v2/" in url for url in seen), seen)
+        self.assertEqual(held_quiet["positions"][0]["reason"], "exit_hold")
+        slot["mark"] = "0.90"
+        seen.clear()
+        exited = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)["discovery"]
         exit_url = next(url for url in seen if "/swap/v2/build?" in url)
+        exit_left = 999_899 - 400_000
+        exit_est = solana_whirlpool_quote.quote_exact_in(state, up, exit_left, False, 0, 0, slot["context"])["token_est_out"]
         exit_bps = jupiter_route_v2.encoded_slippage(exit_est)["slippage_bps"]
-        self.assertIn("amount=%s" % exit_qty, exit_url)
+        self.assertIn("amount=%s" % exit_left, exit_url)
+        self.assertNotIn("amount=%s" % exit_qty, exit_url)
         self.assertIn("slippageBps=%s" % exit_bps, exit_url)
         self.assertLessEqual(exit_bps, 50)
-        self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "filled")
+        self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "exit_intent")
         self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
-        self.assertEqual(next(item["quote"] for item in exited["kills"] if item.get("mint") == swap_mint)["side"], "exit")
+        self.assertEqual(exited["positions"][0]["quote"]["side"], "exit")
+        self.assertNotIn(swap_mint, [item.get("mint") for item in exited["kills"]])
 
         db.execute("DELETE FROM settings WHERE key = ?", ("memecoin_max_slippage_bps",))
         db.init_db()
         seen.clear()
-        missing = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1, stalk_transport=stalk)["discovery"]
+        missing = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)["discovery"]
         self.assertFalse(any("/swap/v2/" in url or "getMultipleAccounts" in url for url in seen), seen)
-        self.assertEqual(next(item["quote"] for item in missing["kills"] if item.get("mint") == swap_mint)["reason"], "owner_slippage_unapproved")
+        self.assertEqual(missing["positions"][0]["quote"]["reason"], "owner_slippage_unapproved")
         self.assertFalse(jupiter_route_v2.quote_request(999_899)["ok"])
         self.assertIsNone(db.get_setting("memecoin_max_slippage_bps", None))
+
+    def test_open_receipt_is_supervised_off_the_boost_list(self):
+        other = solana_tx.b58encode(b"\x77" * 32)
+        opened = memecoin_desk.scout({
+            "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+        }, now=NOW)
+        snap = memecoin_desk.view(opened["case_id"])["snapshot"]
+        snap["entry_price_usd"] = "1"
+        snap["stop_price_usd"] = "0.94"
+        snap["trail_drop_pct"] = "12"
+        import db
+        import json
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ? WHERE id = ?",
+            (json.dumps(snap, sort_keys=True), opened["case_id"]),
+        )
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            ("entry-open", opened["case_id"], "open", 1, 100, 1, 1, 1, "0.01"),
+        )
+        price = {"usd": "1.00"}
+
+        def transport(request):
+            url = request.get("url") or ""
+            if url.endswith("/token-boosts/latest/v1"):
+                if price["usd"] == "fault":
+                    raise RuntimeError("boosts down")
+                return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": other}]}
+            if "/token-pairs/" in url:
+                pair = _pair()
+                pair[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                pair[0]["priceUsd"] = "1.00" if price["usd"] != "fault" else "0.50"
+                return {"status": 200, "body": pair}
+            raw = bytearray(82)
+            raw[45] = 1
+            return {"status": 200, "body": {"result": {"context": {"slot": 10}, "value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+
+        held = desk_loop.run_discovery(transport, NOW)
+        self.assertEqual(held["positions"][0]["reason"], "exit_hold")
+        self.assertNotIn(MINT, [item.get("mint") for item in held["kills"]])
+        self.assertFalse(held["positions"][0]["jupiter_called"])
+        price["usd"] = "0.50"
+        pair = _pair()
+        pair[0]["priceUsd"] = "0.50"
+        pair[0]["baseToken"] = {"address": MINT}
+
+        def marked(request):
+            url = request.get("url") or ""
+            if url.endswith("/token-boosts/latest/v1"):
+                raise RuntimeError("boosts down")
+            if "/token-pairs/" in url:
+                body = _pair()
+                body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                body[0]["priceUsd"] = "0.50"
+                return {"status": 200, "body": body}
+            raise AssertionError("rpc")
+
+        fired = desk_loop.run_discovery(marked, NOW)
+        self.assertTrue(fired["entry_halt"])
+        self.assertEqual(fired["reason"], "discovery_fault")
+        self.assertEqual(memecoin_desk.view(MINT)["stage"], "exit_intent")
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        snap = memecoin_desk.view(MINT)["snapshot"]
+        snap["inflight"] = {"message_sha256": "already"}
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap, sort_keys=True), MINT))
+        again = desk_loop.run_discovery(marked, NOW)
+        self.assertEqual(again["positions"][0]["reason"], "exit_inflight")
+        self.assertFalse(again["positions"][0]["jupiter_called"])
+        self.assertEqual(memecoin_desk.view(MINT)["snapshot"]["inflight"]["message_sha256"], "already")
+
+    def test_remaining_qty_is_the_exit_table(self):
+        import db
+        import json
+        import threading
+        opened = memecoin_desk.scout({
+            "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+        }, now=NOW)
+        case_id = opened["case_id"]
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            ("entry-qty", case_id, "qty", 1, 999_899, 1, 1, 1, "0.01"),
+        )
+        db.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty) VALUES (?, ?, ?, ?, ?, ?)",
+            ("sold-400", case_id, "sold", 2, "0.01", 400_000),
+        )
+        db.execute(
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty) VALUES (?, ?, ?, ?, ?, ?)",
+            ("sold-else", "another-case", "else", 2, "0.01", 400_000),
+        )
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap["remaining_raw"] = 999_899
+        snap["live_receipts"] = []
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'exit_intent', snapshot_json = ? WHERE id = ?",
+            (json.dumps(snap, sort_keys=True), case_id),
+        )
+        self.assertEqual(memecoin_desk.receipt_remaining(case_id)["remaining"], 599_899)
+        intent = desk_loop._quote_intent(MINT, solana_tx.b58encode(b"\x11" * 32))
+        self.assertEqual(intent["amount"], 599_899)
+        seen = []
+
+        def read():
+            seen.append(memecoin_desk.receipt_remaining(case_id)["remaining"])
+
+        threads = [threading.Thread(target=read) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(set(seen), {599_899})
+        import db as again
+        self.assertEqual(again.query("SELECT qty FROM memecoin_exit_receipts WHERE case_id = ?", (case_id,))[0]["qty"], 400_000)
+        self.assertEqual(memecoin_desk.receipt_remaining(case_id)["remaining"], 599_899)
+        db.execute("UPDATE memecoin_exit_receipts SET qty = ? WHERE signature = ?", (999_899, "sold-400"))
+        self.assertEqual(memecoin_desk.receipt_remaining(case_id)["remaining"], 0)
+        flat = desk_loop._quote_intent(MINT, solana_tx.b58encode(b"\x11" * 32))
+        self.assertEqual(flat["reason"], "flat")
+        self.assertNotIn("amount", flat)
+
+    def test_rent_uses_the_classic_account_and_refuses_the_rest(self):
+        import base64
+        import phantom_transport
+        import solana_whirlpool
+        wallet = phantom_transport.REQUIRED_WALLET
+        tip = {"slot": 1_000}
+        wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+        ata = solana_tx.associated_token_address(wallet, MINT, solana_tx.TOKEN_PROGRAM)
+
+        def mint_account(owner):
+            raw = bytearray(82)
+            raw[45] = 1
+            return {"owner": owner, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}
+
+        def classic(mint):
+            raw = bytearray(solana_whirlpool.reference_token_account(mint, wallet))
+            raw[108] = 1
+            return {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}
+
+        def transport(accounts, owner=solana_tx.TOKEN_PROGRAM, context=1_000, genesis="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"):
+            def send(request):
+                method = request.get("method")
+                if method == "getGenesisHash":
+                    return {"status": 200, "body": {"result": genesis}}
+                if method == "getSlot":
+                    return {"status": 200, "body": {"result": tip["slot"]}}
+                if method == "getAccountInfo":
+                    return {"status": 200, "body": {"result": {"context": {"slot": context}, "value": mint_account(owner)}}}
+                if method == "getMinimumBalanceForRentExemption":
+                    return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
+                if method == "getMultipleAccounts":
+                    value = []
+                    for key in request["accounts"]:
+                        value.append(accounts.get(key))
+                    return {"status": 200, "body": {"result": {"context": {"slot": context}, "value": value}}}
+                raise AssertionError(method)
+            return send
+
+        both = desk_loop._account_rent(transport({}), MINT)
+        self.assertTrue(both["ok"], both)
+        self.assertEqual(both["count"], 2)
+        self.assertEqual(both["lamports"], solana_tx.TOKEN_ACCOUNT_RENT * 2)
+        one = desk_loop._account_rent(transport({wsol: classic(solana_tx.NATIVE_MINT)}), MINT)
+        self.assertEqual(one["count"], 1)
+        self.assertEqual(one["lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        present = desk_loop._account_rent(transport({wsol: classic(solana_tx.NATIVE_MINT), ata: classic(MINT)}), MINT)
+        self.assertEqual(present["count"], 0)
+        self.assertEqual(present["lamports"], 0)
+        short = {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(b"\x01").decode(), "base64"]}
+        refused = desk_loop._account_rent(transport({wsol: short}), MINT)
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["reason"], "rent_account_unbound")
+        self.assertNotIn("lamports", refused)
+        token2022 = desk_loop._account_rent(transport({}, owner=solana_tx.TOKEN_2022), MINT)
+        self.assertEqual(token2022["reason"], "token_2022_unsupported")
+        self.assertIsNone(token2022["lamports"])
+        stale = desk_loop._account_rent(transport({}, context=1), MINT)
+        tip["slot"] = 1_000
+        self.assertEqual(stale["reason"], "rent_slot_stale")
+        future = desk_loop._account_rent(transport({}, context=1_100), MINT)
+        self.assertEqual(future["reason"], "rent_slot_stale")
+        bad = desk_loop._account_rent(transport({}, genesis="not-mainnet"), MINT)
+        self.assertEqual(bad["reason"], "genesis")
+        wrong = {"mint": "other", "source": "synthetic_test_adapter", "fetched_at": NOW, "onchain": {}, "components": {}}
+        self.assertEqual(desk_loop.synthetic_screen(MINT, wrong, transport({}), NOW)["reason"], "synthetic_mint")
+        self.assertIsNone(memecoin_desk.view("other"))

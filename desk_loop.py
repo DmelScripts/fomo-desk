@@ -82,7 +82,7 @@ def scheduler_status() -> dict:
     }
 
 
-def run_discovery(transport, now: float, stalk_transport=None) -> dict:
+def run_discovery(transport, now: float) -> dict:
     """Pick one mint from the documented boost list, then hand it to the six stages.
 
     A caller does not name the mint. The default process does not call this.
@@ -90,21 +90,25 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
     stopped = scheduler_status() | {"ok": False, "send": False, "live_ready": False}
     if transport is None:
         return stopped | {"reason": "network_disabled", "mint": None}
+    positions = _supervise_open(transport, now)
     try:
         response = transport({"kind": "http", "url": dexscreener_public.BOOSTS_URL})
     except Exception:
         _halt_entries()
-        return stopped | {"reason": "discovery_fault", "entry_halt": True, "mint": None}
+        return stopped | {"reason": "discovery_fault", "entry_halt": True, "mint": None, "positions": positions}
     if not isinstance(response, dict) or response.get("status") != 200:
-        return stopped | {"reason": "dexscreener_status", "mint": None}
+        return stopped | {"reason": "dexscreener_status", "mint": None, "positions": positions}
     selected = dexscreener_public.parse_boost_mints(response.get("body"))
     if selected.get("ok") is not True:
-        return stopped | {"reason": selected.get("reason"), "source": selected.get("source"), "mint": None, "caller_named_mint": False, "kills": []}
+        return stopped | {"reason": selected.get("reason"), "source": selected.get("source"), "mint": None, "caller_named_mint": False, "kills": [], "positions": positions}
     kills = list(selected.get("skipped") or [])
     ranked = []
     screened = []
+    supervised = {item.get("mint") for item in positions}
     for mint in selected["mints"]:
-        result = run_once(mint, transport, now, stalk_transport)
+        if mint in supervised:
+            continue
+        result = run_once(mint, transport, now)
         screened.append({
             "mint": mint,
             "reason": result.get("reason"),
@@ -125,6 +129,7 @@ def run_discovery(transport, now: float, stalk_transport=None) -> dict:
         "candidates": len(selected["mints"]),
         "kills": kills,
         "screened": screened,
+        "positions": positions,
         "ranked": [item.get("mint") for item in ranked],
         "score_measured": False,
         "holder_growth_unproven": True,
@@ -203,7 +208,7 @@ def _observe(mint: str, source: str, metric: str, value: str, fetched_at: float)
     db.exclusive(work)
 
 
-def run_supervised(transport, now: float, *, rounds: int = 1, stalk_transport=None) -> dict:
+def run_supervised(transport, now: float, *, rounds: int = 1) -> dict:
     """The loop the server would start. Tests call it with a mock. Production does not."""
     if _runtime["running"]:
         return {"ok": False, "reason": "already_running", "started": True, "agents_enabled": False, "live_ready": False}
@@ -216,7 +221,7 @@ def run_supervised(transport, now: float, *, rounds: int = 1, stalk_transport=No
     try:
         for _ in range(rounds):
             try:
-                last = run_discovery(transport, now, stalk_transport)
+                last = run_discovery(transport, now)
                 _runtime["passes"] += 1
             except Exception as exc:
                 _runtime["faults"] += 1
@@ -240,7 +245,7 @@ def run_supervised(transport, now: float, *, rounds: int = 1, stalk_transport=No
     }
 
 
-def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
+def run_once(mint: str, transport, now: float) -> dict:
     """Fetch, then hand off. No loop is started and no flag is turned on."""
     stopped = {"ok": False, "send": False, "sign": False, "live_ready": False, "armed": False, "mint": mint}
     if transport is None:
@@ -273,70 +278,32 @@ def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
         value = (rpc["body"].get("result") or {}).get("value") if isinstance(rpc["body"].get("result"), dict) else None
         if isinstance(value, dict):
             account = solana_mint_read.parse_account(value, mint)
-    coverage = stalkchain_adapter.read_mint(mint, stalk_transport if stalk_transport is not None else transport)
-    onchain = {"source": "synthetic_test_adapter" if coverage.get("synthetic_fields") else solana_mint_read.SOURCE, "fetched_at": now}
-    if not isinstance(onchain["source"], str):
-        onchain["source"] = solana_mint_read.SOURCE
+    coverage = stalkchain_adapter.read_mint(mint, transport)
+    onchain = {"source": solana_mint_read.SOURCE, "fetched_at": now}
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
         onchain["freeze_authority_revoked"] = account["freeze_authority_revoked"]
-    for key, value in (coverage.get("proven") or {}).items():
-        onchain[key] = value
     filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
-    if filtered.get("ok") is not True:
-        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": filtered.get("reason"), "send": False, "live_ready": False, "sources_are_live_mcp": False}
-        return stopped | {
-            "reason": filtered.get("reason"), "stage": filtered.get("stage"), "case_id": opened["case_id"],
-            "stalkchain": coverage, "mint_account_ok": account.get("ok") is True,
-            "quote": blocked, "jupiter_called": False, "score_measured": False, "quote_expiry_proven": False,
-            "effectual_entry": False, "sources_are_live_mcp": False, "usd_live": False,
-        }
-    components = coverage.get("components") if isinstance(coverage.get("components"), dict) else {}
-    missing = [name for name in memecoin_desk.COMPONENTS if not isinstance(components.get(name), dict)]
-    if missing:
-        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": missing[0] + "_unproven", "send": False, "live_ready": False}
-        return stopped | {"reason": missing[0] + "_unproven", "stage": "filter_passed", "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
-    analyzed = memecoin_desk.analyze(opened["case_id"], components, now=now)
-    if analyzed.get("ok") is not True:
-        blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": analyzed.get("reason"), "send": False}
-        return stopped | {"reason": analyzed.get("reason"), "stage": analyzed.get("stage"), "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
-    proof = _account_rent(transport, mint)
-    if proof.get("ok") is not True:
-        blocked = {"attempted": False, "jupiter_called": False, "reason": proof.get("reason"), "score_measured": False, "send": False}
-        return stopped | {"reason": proof.get("reason"), "stage": "analyst_passed", "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
-    _fresh_sol(transport, now)
-    protected = memecoin_desk.protect(opened["case_id"], now=now, rent_proof=proof)
-    if protected.get("ok") is not True:
-        blocked = {"attempted": False, "jupiter_called": False, "reason": protected.get("reason"), "score_measured": False, "send": False}
-        return stopped | {"reason": protected.get("reason"), "stage": protected.get("stage"), "case_id": opened["case_id"], "quote": blocked, "jupiter_called": False, "score_measured": False, "effectual_entry": False}
-    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
-    return {
-        "ok": False,
-        "reason": quote.get("reason"),
-        "stage": "protected" if quote.get("jupiter_called") is True else protected.get("stage"),
+    blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": filtered.get("reason") or "features_unpublished", "send": False, "live_ready": False, "sources_are_live_mcp": False}
+    return stopped | {
+        "reason": filtered.get("reason") or "features_unpublished",
+        "stage": filtered.get("stage"),
         "case_id": opened["case_id"],
-        "mint": mint,
         "stalkchain": coverage,
         "mint_account_ok": account.get("ok") is True,
+        "quote": blocked,
+        "jupiter_called": False,
         "score_measured": False,
-        "holder_growth": holder_growth(mint),
-        "caller_named_mint": True,
-        "send": False,
-        "sign": False,
-        "live_ready": False,
-        "armed": False,
-        "server_loop": False,
-        "scheduled": False,
-        "usd_live": False,
-        "onchain_pyth": pyth_sponsored.status(),
-        "quote": quote,
-        "jupiter_called": quote.get("jupiter_called") is True,
         "quote_expiry_proven": False,
         "effectual_entry": False,
+        "sources_are_live_mcp": False,
+        "usd_live": False,
+        "holder_growth": holder_growth(mint),
+        "caller_named_mint": True,
     }
 
 
-def _screen_quote(transport, now: float, mint: str, evidence: dict) -> dict:
+def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthetic: bool = False) -> dict:
     """Read-only pool review. Authorization and the owner record are required first.
 
     A missing policy does not fetch the pool or Jupiter. An unsupported pair,
@@ -352,7 +319,7 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict) -> dict:
     identity = dexscreener_public.supported_pool(evidence)
     if identity.get("ok") is not True:
         return quiet | {"attempted": True, "reason": identity.get("reason"), "dex_id": identity.get("dex_id")}
-    intent = _quote_intent(mint, identity["pool"])
+    intent = _quote_intent(mint, identity["pool"], allow_synthetic=allow_synthetic)
     if intent.get("ok") is not True:
         return quiet | {"attempted": True, "reason": intent.get("reason"), "pool": identity["pool"]}
     if intent["side"] == "entry":
@@ -447,75 +414,128 @@ def _fresh_sol(transport, now: float) -> dict:
         return {"fresh": False, "reason": "sol_usd_unpriced"}
 
 
-def _account_rent(transport, mint: str) -> dict:
-    """Rent-exemption lamports for the token accounts this entry would create.
+def _slot_fresh(context_slot, tip_slot) -> bool:
+    import jupiter_route_v2
+    if isinstance(context_slot, bool) or isinstance(tip_slot, bool):
+        return False
+    if not isinstance(context_slot, int) or not isinstance(tip_slot, int):
+        return False
+    lag = tip_slot - context_slot
+    return 0 <= lag <= jupiter_route_v2.SLOT_LAG_MAX
 
-    A missing read is a refusal. An account that is absent is counted. An
-    account that is already a token account is not counted again.
+
+def _context_slot(response) -> int | None:
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    context = result.get("context") if isinstance(result, dict) else None
+    slot = context.get("slot") if isinstance(context, dict) else None
+    if isinstance(slot, bool) or not isinstance(slot, int):
+        return None
+    return slot
+
+
+def _classic_ata(item, mint: str, wallet: str) -> bool:
+    """Exact 165-byte initialized SPL account for this mint and wallet."""
+    import base64
+    import solana_tx
+    if not isinstance(item, dict) or item.get("owner") != solana_tx.TOKEN_PROGRAM:
+        return False
+    data = item.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], str) or data[1:] not in ([], ["base64"]):
+        return False
+    try:
+        raw = base64.b64decode(data[0], validate=True)
+    except Exception:
+        return False
+    if len(raw) != solana_tx.TOKEN_ACCOUNT_SPACE or raw[108] != 1:
+        return False
+    if solana_tx.b58encode(raw[0:32]) != mint or solana_tx.b58encode(raw[32:64]) != wallet:
+        return False
+    return True
+
+
+def _account_rent(transport, mint: str) -> dict:
+    """Rent for the classic wSOL and mint accounts this entry would create.
+
+    The mint program is read first. Token-2022 is refused. A null account is
+    counted. Any other account is not treated as already created. The context
+    slot has to sit inside the current tip window, and the genesis has to be
+    mainnet.
     """
     import phantom_transport
+    import solana_inspect
     import solana_tx
     refused = {"ok": False, "reason": "rent_unpriced"}
     try:
-        response = transport({"kind": "rpc", "method": "getMinimumBalanceForRentExemption", "size": solana_tx.TOKEN_ACCOUNT_SPACE})
+        genesis = transport({"kind": "rpc", "method": "getGenesisHash"})
+        tip = transport({"kind": "rpc", "method": "getSlot"})
+        mint_info = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})
+        exemption = transport({"kind": "rpc", "method": "getMinimumBalanceForRentExemption", "size": solana_tx.TOKEN_ACCOUNT_SPACE})
     except Exception:
         return refused
-    body = response.get("body") if isinstance(response, dict) else None
-    each = body.get("result") if isinstance(body, dict) else None
+    genesis_body = genesis.get("body") if isinstance(genesis, dict) else None
+    if not isinstance(genesis_body, dict) or genesis_body.get("result") != solana_inspect.MAINNET_GENESIS:
+        return refused | {"reason": "genesis"}
+    tip_body = tip.get("body") if isinstance(tip, dict) else None
+    tip_slot = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip_slot, bool) or not isinstance(tip_slot, int) or tip_slot < 0:
+        return refused
+    mint_body = mint_info.get("body") if isinstance(mint_info, dict) else None
+    mint_result = mint_body.get("result") if isinstance(mint_body, dict) else None
+    mint_value = mint_result.get("value") if isinstance(mint_result, dict) else None
+    if not isinstance(mint_value, dict):
+        return refused | {"reason": "mint_program_unproven"}
+    program = mint_value.get("owner")
+    if program == solana_tx.TOKEN_2022:
+        return {"ok": False, "reason": "token_2022_unsupported", "lamports": None}
+    if program != solana_tx.TOKEN_PROGRAM:
+        return refused | {"reason": "mint_program_unproven"}
+    parsed = solana_mint_read.parse_account(mint_value, mint)
+    if parsed.get("ok") is not True:
+        return refused | {"reason": "mint_program_unproven"}
+    if not _slot_fresh(_context_slot(mint_info), tip_slot):
+        return refused | {"reason": "rent_slot_stale"}
+    exempt_body = exemption.get("body") if isinstance(exemption, dict) else None
+    each = exempt_body.get("result") if isinstance(exempt_body, dict) else None
     if isinstance(each, bool) or not isinstance(each, int) or each < 1:
         return refused
     wallet = phantom_transport.REQUIRED_WALLET
     keys = [
-        solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM),
-        solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM),
+        (solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM), solana_tx.NATIVE_MINT),
+        (solana_tx.associated_token_address(wallet, mint, program), mint),
     ]
     try:
-        listed = transport({"kind": "rpc", "method": "getMultipleAccounts", "accounts": keys})
+        listed = transport({"kind": "rpc", "method": "getMultipleAccounts", "accounts": [item[0] for item in keys]})
     except Exception:
         return refused
+    if not _slot_fresh(_context_slot(listed), tip_slot):
+        return refused | {"reason": "rent_slot_stale"}
     listed_body = listed.get("body") if isinstance(listed, dict) else None
     result = listed_body.get("result") if isinstance(listed_body, dict) else None
     value = result.get("value") if isinstance(result, dict) else None
     if not isinstance(value, list) or len(value) != len(keys):
         return refused
     count = 0
-    for item in value:
+    for (address, expected_mint), item in zip(keys, value):
         if item is None:
             count += 1
             continue
-        if isinstance(item, dict) and item.get("owner") == solana_tx.TOKEN_PROGRAM:
-            continue
-        return refused
-    return {"ok": True, "lamports": each * count, "each": each, "count": count, "space": solana_tx.TOKEN_ACCOUNT_SPACE}
+        if not _classic_ata(item, expected_mint, wallet):
+            return refused | {"reason": "rent_account_unbound", "account": address}
+    return {
+        "ok": True,
+        "lamports": each * count,
+        "each": each,
+        "count": count,
+        "space": solana_tx.TOKEN_ACCOUNT_SPACE,
+        "slot": _context_slot(listed),
+        "tip_slot": tip_slot,
+        "genesis": solana_inspect.MAINNET_GENESIS,
+        "mint_program": program,
+    }
 
 
-def _receipt_remaining(case_id: str, snap: dict) -> int | None:
-    """Token quantity still held, from the entry receipt minus booked exit slices."""
-    import db
-    funding = snap.get("entry_funding") if isinstance(snap.get("entry_funding"), dict) else {}
-    if funding.get("source") != "entry_receipt" or funding.get("proven") is not True:
-        return None
-    signature = funding.get("signature")
-    if not isinstance(signature, str):
-        return None
-    try:
-        rows = db.query(
-            "SELECT qty FROM memecoin_entry_receipts WHERE signature = ? AND case_id = ? AND failed = 0",
-            (signature, case_id),
-        )
-    except Exception:
-        return None
-    if len(rows) != 1 or isinstance(rows[0]["qty"], bool) or not isinstance(rows[0]["qty"], int):
-        return None
-    sold = 0
-    for item in snap.get("live_receipts") or []:
-        if isinstance(item, dict) and item.get("exit_chain_proven") is True and isinstance(item.get("qty"), int) and not isinstance(item.get("qty"), bool):
-            sold += item["qty"]
-    left = rows[0]["qty"] - sold
-    return left if left > 0 else None
-
-
-def _quote_intent(mint: str, pool: str) -> dict:
+def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
     """Quantity from an open protected entry or a filled exit. No invented size."""
     import db
     import solana_tx
@@ -537,15 +557,143 @@ def _quote_intent(mint: str, pool: str) -> dict:
     if not isinstance(snap, dict):
         return refused
     stage = rows[0]["stage"]
-    if stage in {"filled", "partial"}:
-        left = _receipt_remaining(rows[0]["id"], snap)
-        if left is None:
-            return refused | {"reason": "exit_receipt_unproven"}
-        return {"ok": True, "side": "exit", "amount": left, "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
+    synthetic = snap.get("capital_ledger") == "synthetic"
+    if synthetic and not allow_synthetic:
+        return refused | {"reason": "synthetic_not_live"}
+    if stage in {"filled", "partial", "exit_intent"}:
+        if isinstance(snap.get("inflight"), dict):
+            return refused | {"reason": "exit_inflight"}
+        if stage == "filled":
+            return refused | {"reason": "exit_hold"}
+        left = memecoin_desk.receipt_remaining(rows[0]["id"])
+        if left.get("ok") is not True or not isinstance(left.get("remaining"), int) or left["remaining"] <= 0:
+            return refused | {"reason": "flat" if left.get("remaining") == 0 else left.get("reason")}
+        return {"ok": True, "side": "exit", "amount": left["remaining"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
     amount = snap.get("entry_amount_raw")
     if stage == "protected" and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
         return {"ok": True, "side": "entry", "amount": amount, "input_mint": solana_tx.NATIVE_MINT, "output_mint": mint, "a_to_b": True, "case_id": rows[0]["id"], "pool": pool}
     return refused
+
+
+def _open_positions() -> list:
+    import db
+    try:
+        memecoin_desk.loss_totals()
+        return db.query(
+            """
+            SELECT id, mint, stage, snapshot_json FROM memecoin_cases
+            WHERE stage IN ('filled', 'partial', 'exit_intent')
+              AND EXISTS (
+                SELECT 1 FROM memecoin_entry_receipts
+                WHERE case_id = memecoin_cases.id AND failed = 0 AND qty > 0
+              )
+            """
+        )
+    except Exception:
+        return []
+
+
+def _supervise_open(transport, now: float) -> list:
+    """Mark and, when the stop or trail has fired, quote each open receipt position.
+
+    This does not read the boost list and it does not apply the new-entry halt.
+    """
+    import json
+    found = []
+    for row in _open_positions():
+        try:
+            snap = json.loads(row["snapshot_json"])
+        except Exception:
+            found.append({"mint": row["mint"], "reason": "snapshot", "jupiter_called": False, "supervised": True})
+            continue
+        if isinstance(snap.get("inflight"), dict):
+            found.append({"mint": row["mint"], "reason": "exit_inflight", "jupiter_called": False, "supervised": True})
+            continue
+        balance = memecoin_desk.receipt_remaining(row["id"])
+        if balance.get("remaining") == 0:
+            found.append({"mint": row["mint"], "reason": "flat", "jupiter_called": False, "supervised": True})
+            continue
+        if balance.get("ok") is not True:
+            found.append({"mint": row["mint"], "reason": balance.get("reason"), "jupiter_called": False, "supervised": True})
+            continue
+        try:
+            response = transport({"kind": "http", "url": dexscreener_public.pairs_url(row["mint"])})
+        except Exception:
+            found.append({"mint": row["mint"], "reason": "exit_mark_unpriced", "jupiter_called": False, "supervised": True})
+            continue
+        parsed = dexscreener_public.parse_pairs(response.get("body") if isinstance(response, dict) else None, row["mint"], now)
+        if parsed.get("ok") is not True:
+            found.append({"mint": row["mint"], "reason": "exit_mark_unpriced", "jupiter_called": False, "supervised": True})
+            continue
+        if row["stage"] == "filled":
+            marked = memecoin_desk.mark(row["id"], parsed["scout"]["price_usd"], source="dexscreener", fetched_at=now, now=now)
+            if marked.get("action") not in {"stop", "trail"}:
+                found.append({"mint": row["mint"], "reason": marked.get("reason") or "exit_hold", "action": marked.get("action"), "jupiter_called": False, "supervised": True})
+                continue
+        quote = _screen_quote(transport, now, row["mint"], parsed.get("evidence") or {})
+        found.append({
+            "mint": row["mint"],
+            "reason": quote.get("reason"),
+            "quote": quote,
+            "jupiter_called": quote.get("jupiter_called") is True,
+            "supervised": True,
+            "side": quote.get("side"),
+        })
+    return found
+
+
+def synthetic_screen(mint: str, features: dict, transport, now: float) -> dict:
+    """Test-only handoff. It does not reserve live capital and the live round does not call it."""
+    quiet = {"ok": False, "send": False, "sign": False, "live_ready": False, "live_capital": False, "ledger": "synthetic", "jupiter_called": False}
+    if not isinstance(features, dict) or features.get("mint") != mint or not isinstance(mint, str):
+        return quiet | {"reason": "synthetic_mint"}
+    if features.get("source") != "synthetic_test_adapter":
+        return quiet | {"reason": "synthetic_provenance"}
+    fetched = features.get("fetched_at")
+    if isinstance(fetched, bool) or not isinstance(fetched, (int, float)) or abs(float(now) - float(fetched)) > 30:
+        return quiet | {"reason": "synthetic_timestamp"}
+    onchain = features.get("onchain")
+    components = features.get("components")
+    if not isinstance(onchain, dict) or onchain.get("source") != "synthetic_test_adapter":
+        return quiet | {"reason": "synthetic_types"}
+    if not isinstance(components, dict) or any(name not in components for name in memecoin_desk.COMPONENTS):
+        return quiet | {"reason": "synthetic_types"}
+    try:
+        response = transport({"kind": "http", "url": dexscreener_public.pairs_url(mint)})
+    except Exception:
+        return quiet | {"reason": "dexscreener_transport"}
+    parsed = dexscreener_public.parse_pairs(response.get("body") if isinstance(response, dict) else None, mint, now)
+    if parsed.get("ok") is not True:
+        return quiet | {"reason": parsed.get("reason")}
+    opened = memecoin_desk.scout(parsed["scout"], now=now)
+    if opened.get("ok") is True:
+        filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
+        if filtered.get("ok") is not True:
+            return quiet | {"reason": filtered.get("reason"), "stage": filtered.get("stage")}
+        analyzed = memecoin_desk.analyze(opened["case_id"], components, now=now)
+        if analyzed.get("ok") is not True:
+            return quiet | {"reason": analyzed.get("reason"), "stage": analyzed.get("stage")}
+        proof = _account_rent(transport, mint)
+        if proof.get("ok") is not True:
+            return quiet | {"reason": proof.get("reason")}
+        _fresh_sol(transport, now)
+        protected = memecoin_desk.protect(opened["case_id"], now=now, rent_proof=proof, ledger="synthetic")
+        if protected.get("ok") is not True:
+            return quiet | {"reason": protected.get("reason"), "stage": protected.get("stage")}
+    elif opened.get("reason") != "already_open":
+        return quiet | {"reason": opened.get("reason")}
+    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {}, allow_synthetic=True)
+    stored = memecoin_desk.view(mint)
+    live = stored is None or (stored.get("snapshot") or {}).get("live_capital") is not False
+    return quiet | {
+        "ok": quote.get("jupiter_called") is True,
+        "reason": quote.get("reason"),
+        "quote": quote,
+        "jupiter_called": quote.get("jupiter_called") is True,
+        "stage": None if stored is None else stored.get("stage"),
+        "live_capital": False,
+        "counted_as_live": live,
+    }
 
 
 def _halt_entries() -> None:

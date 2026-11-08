@@ -59,43 +59,37 @@ def request_for(tool: str, mint: str) -> dict:
     }
 
 
-def normalize(body) -> dict:
-    """Map a documented envelope. Unpublished facts stay unpublished."""
+def normalize(body, mint: str | None = None) -> dict:
+    """Map a documented envelope. Unpublished facts stay unpublished.
+
+    Extra keys, including LP, rug, growth, and score, are not promoted.
+    A body that names a different mint is refused.
+    """
     refused = {
         "ok": False,
         "fdv_used_as_market_cap": False,
         "unproven": list(UNPROVEN),
         "named": {},
+        "proven": {},
+        "components": {},
+        "synthetic_fields": False,
+        "live_mcp": False,
         "score_measured": False,
     }
     if not isinstance(body, dict) or set(body) - {"data", "notes", "credits", "meta"} or not isinstance(body.get("data"), dict):
         return refused | {"reason": "envelope"}
     data = body["data"]
+    echoed = data.get("mint", data.get("token"))
+    if echoed is not None and (not isinstance(echoed, str) or (mint is not None and echoed != mint)):
+        return refused | {"reason": "mint_mismatch"}
     named = {}
     for key in NAMED:
         if key in data:
             named[key] = data[key]
-    proven = {}
-    unproven = list(UNPROVEN)
-    for key in (
-        "lp_burned_or_locked", "dev_holding_pct", "dev_rugs", "bundled_launch_pct",
-    ):
-        if key in data:
-            proven[key] = data[key]
-            if key in unproven:
-                unproven.remove(key)
-    components = data.get("components") if isinstance(data.get("components"), dict) else {}
-    synthetic = bool(proven or components)
-    reason = None if not unproven and components else "response_fields_unpublished"
     return refused | {
         "ok": True,
-        "reason": reason,
+        "reason": "response_fields_unpublished",
         "named": named,
-        "proven": proven,
-        "unproven": unproven,
-        "components": components,
-        "synthetic_fields": synthetic,
-        "live_mcp": False,
         "fdv_used_as_market_cap": False,
     }
 
@@ -144,10 +138,6 @@ def read_mint(mint: str, transport) -> dict:
         return public | {"ok": False, "reason": "stalkchain_transport_missing"}
     secret = os.environ.get(ENV, "").strip()
     named = {}
-    proven = {}
-    components = {}
-    synthetic = False
-    unproven = list(UNPROVEN)
     for tool in TOOLS:
         request = request_for(tool, mint)
         request["headers"] = {"authorization": "Bearer " + secret}
@@ -160,23 +150,18 @@ def read_mint(mint: str, transport) -> dict:
             return public | {"ok": False, "reason": "stalkchain_unauthorized", "called": True, "http_status": status}
         if status != 200 or not isinstance(response, dict):
             return public | {"ok": False, "reason": "stalkchain_status", "called": True, "http_status": status}
-        parsed = normalize(response.get("body"))
+        parsed = normalize(response.get("body"), mint)
         if parsed.get("ok") is not True:
             return public | {"ok": False, "reason": parsed.get("reason"), "called": True}
         named.update(parsed["named"])
-        proven.update(parsed.get("proven") or {})
-        components.update(parsed.get("components") or {})
-        synthetic = synthetic or parsed.get("synthetic_fields") is True
-        unproven = parsed.get("unproven") or unproven
-    published = not synthetic and bool(unproven)
     return public | {
         "ok": False,
         "called": True,
-        "reason": "response_fields_unpublished" if published or unproven else "synthetic_features",
+        "reason": "response_fields_unpublished",
         "named": named,
-        "proven": proven,
-        "unproven": unproven,
-        "components": components,
-        "synthetic_fields": synthetic,
+        "proven": {},
+        "unproven": list(UNPROVEN),
+        "components": {},
+        "synthetic_fields": False,
         "live_mcp": False,
     }

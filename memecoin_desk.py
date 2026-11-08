@@ -276,6 +276,50 @@ def _entry_lamports(sol_leg: dict, rent_lamports: int | None = None) -> dict:
     }
 
 
+def receipt_remaining(case_id: str) -> dict:
+    """Token qty still held. Entry rows minus exit rows. The snapshot is not a balance."""
+    refused = {"ok": False, "reason": "exit_receipt_unproven", "remaining": None}
+
+    def work(conn):
+        _ensure_conn(conn)
+        bought_rows = conn.execute(
+            "SELECT signature, qty FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
+            (case_id,),
+        ).fetchall()
+        sold_rows = conn.execute(
+            "SELECT signature, qty FROM memecoin_exit_receipts WHERE case_id = ?",
+            (case_id,),
+        ).fetchall()
+        if not bought_rows:
+            return refused
+        bought = 0
+        seen = set()
+        for item in bought_rows:
+            if item["signature"] in seen:
+                continue
+            seen.add(item["signature"])
+            qty = item["qty"]
+            if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
+                return refused
+            bought += qty
+        sold = 0
+        exited = set()
+        for item in sold_rows:
+            if item["signature"] in exited:
+                continue
+            exited.add(item["signature"])
+            qty = item["qty"]
+            if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
+                return refused | {"reason": "exit_qty_unproven"}
+            sold += qty
+        left = bought - sold
+        if left < 0:
+            return refused | {"reason": "exit_qty_exceeds_entry", "remaining": None}
+        return {"ok": True, "reason": None, "remaining": left, "bought": bought, "sold": sold}
+
+    return db.exclusive(work)
+
+
 def refresh_entry_intent(case_id: str, sized: dict, now: float) -> dict:
     """Replace a quotable size that no longer fits. An inflight message is not edited."""
     row = _case(case_id)
@@ -324,7 +368,7 @@ def refresh_entry_intent(case_id: str, sized: dict, now: float) -> dict:
     return db.exclusive(work)
 
 
-def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None, now: float | None = None, rent_proof: dict | None = None) -> dict:
+def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None, now: float | None = None, rent_proof: dict | None = None, ledger: str | None = None) -> dict:
     """Persist the stop and the 12/12 trail before an entry can become eligible."""
     row = _case(case_id)
     if row is None or row["stage"] != "analyst_passed":
@@ -371,6 +415,10 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
             snap["reserved_includes_deposit"] = True
             snap["rent_account_count"] = rent_proof.get("count")
             snap["rent_proof"] = "getMinimumBalanceForRentExemption"
+            snap["rent_slot"] = rent_proof.get("slot")
+            snap["rent_tip_slot"] = rent_proof.get("tip_slot")
+            snap["rent_genesis"] = rent_proof.get("genesis")
+            snap["mint_program"] = rent_proof.get("mint_program")
     if snap.get("reserved_includes_deposit") is not True:
         return {"ok": False, "reason": "deposit_unpriced", "case_id": row["id"], "stage": row["stage"], "mint": row["mint"], "send": False, "live_ready": False}
     rent_for_size = None
@@ -385,6 +433,8 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
     snap["entry_amount_is_a_fill"] = False
     snap["send"] = False
     snap["live_ready"] = False
+    snap["capital_ledger"] = "synthetic" if ledger == "synthetic" else "live"
+    snap["live_capital"] = ledger != "synthetic"
     if sized.get("ok") is True:
         snap["entry_amount_raw"] = sized["lamports"]
         snap["entry_intent_version"] = 1
@@ -1060,12 +1110,13 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
                 (moment,),
             )
         conn.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, snapshot_slot, provenance_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, snapshot_slot, provenance_json, qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 signature, row["id"], proven["message_sha256"], proven["slot"],
                 "unpriced" if fee_usd is None else format(fee_usd, "f"),
                 proven.get("snapshot_slot"),
                 json.dumps({"dex_fee_source": "reserved_pool_state", "dex_fee_remeasured": False, "blockhash_rechecked": False, "quote_clock_proven": False, "pool": proven.get("pool")}, sort_keys=True),
+                qty,
             ),
         )
         conn.execute(
@@ -1533,6 +1584,8 @@ def _held_conn(conn) -> Decimal:
         deposit_open = body.get("deposit_refund_proven") is not True and (isinstance(remaining, int) and remaining == 0 and (body.get("deposits") or body.get("live_receipts")))
         failed_hold = item["stage"] in {"entry_failed", "entry_unreconciled"} and (_reserved_amount(body.get("reserved_usd")) or Decimal("0")) > 0
         unresolved = (isinstance(remaining, int) and remaining > 0) or isinstance(body.get("inflight"), dict) or isinstance(body.get("entry_inflight"), dict) or deposit_open or failed_hold
+        if body.get("capital_ledger") == "synthetic":
+            continue
         if item["stage"] not in _OPEN_CAPITAL and not unresolved:
             continue
         if item["stage"] == "exited" and not unresolved:
@@ -2178,6 +2231,7 @@ def _ensure_conn(conn) -> None:
     for statement in (
         "ALTER TABLE memecoin_exit_receipts ADD COLUMN snapshot_slot INTEGER",
         "ALTER TABLE memecoin_exit_receipts ADD COLUMN provenance_json TEXT",
+        "ALTER TABLE memecoin_exit_receipts ADD COLUMN qty INTEGER",
     ):
         try:
             conn.execute(statement)
