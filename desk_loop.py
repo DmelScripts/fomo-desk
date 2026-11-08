@@ -1597,7 +1597,13 @@ def _message_tick_arrays(transport, hop: dict, state: dict, tip: int, blockhash:
 
 
 def _exact_in_ceiling(hop: dict) -> dict:
-    """Fee ceiling for a successful classic exact-in. It is the message's input."""
+    """Fee <= the message input on a successful classic exact-in.
+
+    The inequality holds for every successful exact-in of this program.
+    Tightness does not. The step that meets the input has zero output, and
+    swap.rs rejects that outcome when the threshold is positive. The route
+    bytes do not carry that threshold, so this does not claim equality.
+    """
     import solana_tx
     import solana_whirlpool_quote
     unit = "lamports" if hop["source_mint"] == solana_tx.NATIVE_MINT else "token_raw"
@@ -1605,7 +1611,7 @@ def _exact_in_ceiling(hop: dict) -> dict:
         "dex_fee_input_ceiling_raw": solana_whirlpool_quote.exact_in_input_ceiling(hop["in_amount"]),
         "dex_fee_input_ceiling_unit": unit,
         "dex_fee_input_ceiling_proven": True,
-        "dex_fee_input_ceiling_tight": True,
+        "dex_fee_input_ceiling_tight": False,
         "dex_fee_input_ceiling_is_inclusion_bound": True,
         "dex_fee_step_count_is_maximum": False,
         "dex_fee_ceiling_program": "orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d",

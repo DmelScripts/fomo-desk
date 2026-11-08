@@ -38,13 +38,16 @@ def exact_in_input_ceiling(amount: int) -> int:
 
     compute_swap subtracts amount_in + fee_amount from amount_remaining.
     A subtraction that does not fit is not a successful swap, so the fees
-    add to at most the input. A step that does not reach its target sets
-    fee_amount = amount_remaining - amount_in. When the price does not move,
-    amount_in is 0 and the fee is the whole remainder. The ceiling is the
-    input, and it is tight. It does not use the current fee rate: set_fee_rate
-    may raise a static pool to MAX_STATIC_FEE_RATE before inclusion. Counting
-    tick crossings does not lower it. A crossing charges less than the input,
-    and one partial step can charge the input itself.
+    add to at most the input. It does not use the current fee rate.
+
+    Equality is not proven for a frozen route. A step that does not move
+    the price can set amount_in to 0, the fee to the whole remainder, and
+    the output to 0. programs/whirlpool/src/instructions/swap.rs at 2509ad9
+    returns AmountOutBelowMinimum when other_amount_threshold is greater
+    than that output. route_v2 does not encode other_amount_threshold or
+    sqrt_price_limit, so that step is not a successful execution of a
+    message with a positive minimum output, and it does not prove the fee
+    can equal the input on such a message.
     """
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or amount >= 2**64:
         raise QuoteError("spend_unbound")

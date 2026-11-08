@@ -79,13 +79,14 @@ class WhirlpoolQuoteTests(unittest.TestCase):
                         best[left] = max(best[left], step_fee + best[left - consumed])
                 self.assertEqual(best[amount], amount)
 
-    def test_a_partial_step_can_charge_the_whole_input(self):
+    def test_a_zero_output_step_meets_the_input_and_fails_a_positive_threshold(self):
         price = quote.sqrt_price_from_tick(0)
         target = quote.sqrt_price_from_tick(-100)
         step = quote._swap_step(4, 3000, 10**24, price, target, True, True)
-        self.assertEqual(step["amount_in"], 0)
-        self.assertEqual(step["fee_amount"], 4)
+        self.assertEqual((step["amount_in"], step["amount_out"], step["fee_amount"]), (0, 0, 4))
         self.assertEqual(step["fee_amount"], quote.exact_in_input_ceiling(4))
+        # swap.rs exact-in: other_amount_threshold > output returns AmountOutBelowMinimum.
+        self.assertGreater(1, step["amount_out"])
 
     def test_slippage_floor_matches_the_published_996_case(self):
         self.assertEqual(quote.min_amount(996, 1000), 896)
