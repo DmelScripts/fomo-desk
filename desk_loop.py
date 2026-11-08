@@ -623,6 +623,11 @@ def _preflight_report(**extra) -> dict:
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": None,
         "combined_fee_usd_proven": False, "allocation_proven": False,
+        "deposit_observed": False, "deposit_lamports": None, "deposit_space": None,
+        "deposit_account_count": None, "deposit_rent_each": None,
+        "deposit_principal_lamports": None, "deposit_refund_credited": False,
+        "deposit_counts_as_fee": False, "preexisting_close_refused": False,
+        "deposit_reason": None,
         "lookup_unresolved": False, "instruction_unproven": True, "economic_reason": None,
         "sig_verify": False, "replace_recent_blockhash": False, "message_rewritten": False,
         "holds": True, "resend": False, "operation": "unimplemented", "reason": None,
@@ -985,6 +990,297 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     }
 
 
+def _deposit_blank(**extra) -> dict:
+    return {
+        "deposit_observed": False, "deposit_lamports": None, "deposit_space": None,
+        "deposit_account_count": None, "deposit_rent_each": None,
+        "deposit_principal_lamports": None, "deposit_refund_credited": False,
+        "deposit_counts_as_fee": False, "preexisting_close_refused": False,
+        "deposit_reason": "deposit_unobserved", "rent_bound_proven": False,
+    } | extra
+
+
+def _classic_deposit_plan(decoded) -> dict:
+    """ATA creates, the wrap transfer, and closes named by this message.
+
+    Addresses come from the instruction accounts and the associated-token PDA.
+    Classic SPL token accounts are 165 bytes. That length is not a lamport rent.
+    """
+    import jupiter_route_v2
+    import phantom_transport
+    import solana_jupiter
+    import solana_tx
+    if getattr(decoded, "lookups", None):
+        return {"ok": False, "reason": "lookup_unresolved"}
+    if getattr(decoded, "required_signatures", None) != 1:
+        return {"ok": False, "reason": "extra_signer"}
+    wallet = phantom_transport.REQUIRED_WALLET
+    try:
+        wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    creates = []
+    closes = []
+    transfer = None
+    swap = None
+    kinds = []
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return {"ok": False, "reason": "deposit_grammar_unsupported"}
+        data = bytes(instruction.data)
+        if program == solana_tx.COMPUTE_BUDGET:
+            kinds.append("compute")
+            continue
+        if program == solana_tx.ASSOCIATED_TOKEN and data == bytes([1]) and len(keys) == 6:
+            payer, ata, owner, mint, system, token_program = keys
+            if token_program == solana_tx.TOKEN_2022:
+                return {"ok": False, "reason": "token_2022_unsupported"}
+            if payer != wallet or owner != wallet or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
+                return {"ok": False, "reason": "deposit_grammar_unsupported"}
+            try:
+                expected = solana_tx.associated_token_address(owner, mint, token_program)
+            except Exception:
+                return {"ok": False, "reason": "deposit_grammar_unsupported"}
+            if ata != expected or any(item["address"] == ata for item in creates):
+                return {"ok": False, "reason": "deposit_grammar_unsupported"}
+            creates.append({
+                "address": ata, "mint": mint, "owner": owner, "payer": payer,
+                "space": solana_tx.TOKEN_ACCOUNT_SPACE,
+            })
+            kinds.append("create")
+            continue
+        if program == solana_tx.SYSTEM_PROGRAM and solana_tx.system_transfer(data) is not None and len(keys) == 2:
+            if transfer is not None or keys[0] != wallet or keys[1] != wsol:
+                return {"ok": False, "reason": "deposit_grammar_unsupported"}
+            transfer = solana_tx.system_transfer(data)
+            kinds.append("transfer")
+            continue
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([17]) and keys == [wsol]:
+            kinds.append("sync")
+            continue
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and keys == [wsol, wallet, wallet]:
+            closes.append(wsol)
+            kinds.append("close")
+            continue
+        if program == solana_jupiter.PROGRAM_ID:
+            if swap is not None:
+                return {"ok": False, "reason": "deposit_grammar_unsupported"}
+            swap = instruction
+            kinds.append("swap")
+            continue
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    if swap is None or len(swap.account_indexes) < 5:
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    parsed = jupiter_route_v2.parse(bytes(swap.data))
+    if parsed.get("ok") is not True or parsed.get("hop") != "Whirlpool":
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    try:
+        source_mint = decoded.static_keys[swap.account_indexes[3]]
+        dest_mint = decoded.static_keys[swap.account_indexes[4]]
+    except (IndexError, TypeError):
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    allowed = {solana_tx.NATIVE_MINT, source_mint, dest_mint}
+    if any(item["mint"] not in allowed for item in creates):
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    body = [kind for kind in kinds if kind != "compute"]
+    while body and body[0] == "create":
+        body = body[1:]
+    if transfer is not None:
+        if body != ["transfer", "sync", "swap", "close"] or transfer != parsed.get("in_amount"):
+            return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    elif body != ["swap", "close"]:
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    if closes != [wsol]:
+        return {"ok": False, "reason": "deposit_grammar_unsupported"}
+    return {"ok": True, "creates": creates, "closes": closes, "principal": transfer, "wsol": wsol}
+
+
+def _deposit_context(result, tip: int, blockhash: str) -> str | None:
+    import jupiter_route_v2
+    if not isinstance(result, dict):
+        return "deposit_account_malformed"
+    echoed = result.get("blockhash")
+    if echoed is not None and echoed != blockhash:
+        return "deposit_hash_mismatch"
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return "deposit_context_missing"
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return "deposit_context_malformed"
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        return "deposit_context_stale" if slot < tip else "deposit_context_future"
+    return None
+
+
+def _deposit_view(value, mint: str, wallet: str) -> dict:
+    """One account response. Null is absent. A system-owned balance is prefunded."""
+    import solana_tx
+    if value is None:
+        return {"kind": "absent"}
+    if not isinstance(value, dict) or value.get("executable") is not False:
+        return {"kind": "malformed"}
+    raw = _decoded_account_data(value.get("data"))
+    owner = value.get("owner")
+    if owner == solana_tx.SYSTEM_PROGRAM and raw == b"":
+        lamports = value.get("lamports")
+        if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports <= 0 or lamports >= 2**64:
+            return {"kind": "malformed"}
+        return {"kind": "prefunded", "lamports": lamports}
+    if owner != solana_tx.TOKEN_PROGRAM or raw is None or len(raw) != solana_tx.TOKEN_ACCOUNT_SPACE:
+        return {"kind": "malformed"}
+    fields = solana_tx.token_account_fields(raw)
+    if fields is None or fields != (mint, wallet) or raw[108] != 1:
+        return {"kind": "malformed"}
+    return {"kind": "present", "raw": raw}
+
+
+def _read_deposit_account(transport, address: str, mint: str, wallet: str, tip: int, blockhash: str) -> dict:
+    def once() -> dict:
+        try:
+            response = transport({
+                "method": "getAccountInfo",
+                "purpose": "token_deposit",
+                "account": address,
+                "commitment": "confirmed",
+                "minContextSlot": tip,
+                "blockhash": blockhash,
+            })
+        except Exception:
+            return {"kind": "transport"}
+        body = response.get("body") if isinstance(response, dict) else None
+        result = body.get("result") if isinstance(body, dict) else None
+        context_reason = _deposit_context(result, tip, blockhash)
+        if context_reason is not None:
+            return {"kind": "context", "reason": context_reason}
+        return _deposit_view(result.get("value"), mint, wallet)
+
+    first = once()
+    if first["kind"] in {"transport", "context"}:
+        return first
+    second = once()
+    if second["kind"] in {"transport", "context"}:
+        return second
+    if first["kind"] != second["kind"]:
+        return {"kind": "race"}
+    if first["kind"] == "present" and first.get("raw") != second.get("raw"):
+        return {"kind": "race"}
+    if first["kind"] == "prefunded" and first.get("lamports") != second.get("lamports"):
+        return {"kind": "race"}
+    return first
+
+
+def _read_rent_exemption(transport, space: int, tip: int) -> dict:
+    """Official getMinimumBalanceForRentExemption returns a bare u64, not a slot."""
+    try:
+        response = transport({
+            "method": "getMinimumBalanceForRentExemption",
+            "purpose": "rent_exemption",
+            "size": space,
+            "commitment": "confirmed",
+            "minContextSlot": tip,
+        })
+    except Exception:
+        return {"ok": False, "reason": "deposit_transport"}
+    body = response.get("body") if isinstance(response, dict) else None
+    value = body.get("result") if isinstance(body, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value >= 2**64:
+        return {"ok": False, "reason": "deposit_rent_malformed"}
+    return {"ok": True, "lamports": value}
+
+
+def _deposit_hold(transport, decoded, tip: int, blockhash: str) -> dict:
+    """Lamports this message adds for missing classic ATAs. A close is not a refund.
+
+    The wrap transfer is the swap principal and is not added again. An account
+    that already exists is not closed here. The rent figure is the server's
+    current exemption for 165 bytes. It is not pinned to inclusion, so it is
+    not rent_bound_proven and it is not a ticket or fee pass.
+    """
+    import phantom_transport
+    import solana_tx
+    plan = _classic_deposit_plan(decoded)
+    if plan.get("ok") is not True:
+        extra = {"deposit_reason": plan.get("reason") or "deposit_grammar_unsupported"}
+        if plan.get("reason") == "lookup_unresolved":
+            extra["lookup_unresolved"] = True
+        return _deposit_blank(**extra)
+    wallet = phantom_transport.REQUIRED_WALLET
+    views = {}
+
+    def view(address: str, mint: str) -> dict:
+        if address not in views:
+            views[address] = _read_deposit_account(transport, address, mint, wallet, tip, blockhash)
+        return views[address]
+
+    held = 0
+    missing = 0
+    rent_each = None
+    for created in plan["creates"]:
+        found = view(created["address"], created["mint"])
+        if found["kind"] == "transport":
+            return _deposit_blank(deposit_reason="deposit_transport", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "context":
+            return _deposit_blank(deposit_reason=found["reason"], deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "race":
+            return _deposit_blank(deposit_reason="deposit_race", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "prefunded":
+            return _deposit_blank(deposit_reason="deposit_prefunded_unpriced", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "malformed":
+            return _deposit_blank(deposit_reason="deposit_account_malformed", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "present" and created["address"] in plan["closes"]:
+            return _deposit_blank(
+                deposit_reason="preexisting_close_refused", preexisting_close_refused=True,
+                deposit_principal_lamports=plan["principal"],
+            )
+        if found["kind"] == "absent":
+            if rent_each is None:
+                priced = _read_rent_exemption(transport, created["space"], tip)
+                if priced.get("ok") is not True:
+                    return _deposit_blank(deposit_reason=priced.get("reason"), deposit_principal_lamports=plan["principal"])
+                rent_each = priced["lamports"]
+            held += rent_each
+            missing += 1
+        elif found["kind"] != "present":
+            return _deposit_blank(deposit_reason="deposit_account_malformed", deposit_principal_lamports=plan["principal"])
+    for address in plan["closes"]:
+        if any(item["address"] == address for item in plan["creates"]):
+            continue
+        found = view(address, solana_tx.NATIVE_MINT)
+        if found["kind"] == "transport":
+            return _deposit_blank(deposit_reason="deposit_transport", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "context":
+            return _deposit_blank(deposit_reason=found["reason"], deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "race":
+            return _deposit_blank(deposit_reason="deposit_race", deposit_principal_lamports=plan["principal"])
+        if found["kind"] == "present":
+            return _deposit_blank(
+                deposit_reason="preexisting_close_refused", preexisting_close_refused=True,
+                deposit_principal_lamports=plan["principal"],
+            )
+        if found["kind"] == "prefunded":
+            return _deposit_blank(deposit_reason="deposit_prefunded_unpriced", deposit_principal_lamports=plan["principal"])
+        if found["kind"] != "absent":
+            return _deposit_blank(deposit_reason="deposit_account_malformed", deposit_principal_lamports=plan["principal"])
+        return _deposit_blank(deposit_reason="close_without_create", deposit_principal_lamports=plan["principal"])
+    return _deposit_blank(
+        deposit_observed=True,
+        deposit_lamports=held,
+        deposit_space=solana_tx.TOKEN_ACCOUNT_SPACE,
+        deposit_account_count=missing,
+        deposit_rent_each=rent_each,
+        deposit_principal_lamports=plan["principal"],
+        deposit_refund_credited=False,
+        deposit_counts_as_fee=False,
+        preexisting_close_refused=False,
+        deposit_reason="deposit_hold_unpinned",
+        rent_bound_proven=False,
+    )
+
+
 def preflight_reserved(case_id: str, message_sha256: str, transport, now: float) -> dict:
     """Unsigned simulateTransaction of the stored message. The bytes are not replaced.
 
@@ -1018,6 +1314,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
         return _preflight_report(reason="simulation_context_missing", case_id=case_id, message_sha256=message_sha256)
     pool_fee = _reserved_pool_fee(transport, proof, decoded, tip)
+    deposit = _deposit_hold(transport, decoded, tip, proof["blockhash"])
     fee_quote = _fee_for_message(transport, solana_tx.message_bytes(encoded), tip) if decoded.required_signatures == 1 else {
         "fee_for_message_observed": False, "fee_for_message_lamports": None,
         "charged_fee_proven": False, "fee_for_message_reason": "extra_signer",
@@ -1079,7 +1376,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
         fee_lamports_match=False, fee_composition_proven=False, rent_unproven=True, fee_usd_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
         context_slot=parsed["slot"], lookups_resolved=False, signature_validated=False,
-        **(fee_quote | economics | pool_fee),
+        **(fee_quote | economics | pool_fee | deposit),
     )
 
 
@@ -1694,7 +1991,7 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") == "whirlpool_pool":
+    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption"}:
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

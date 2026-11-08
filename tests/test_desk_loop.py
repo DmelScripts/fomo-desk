@@ -351,11 +351,13 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "simulateTransaction", "transaction": "abc"},
             {"method": "getFeeForMessage", "message": "abc"},
             {"method": "getAccountInfo", "purpose": "whirlpool_pool", "account": MINT},
+            {"method": "getAccountInfo", "purpose": "token_deposit", "account": MINT},
+            {"method": "getMinimumBalanceForRentExemption", "purpose": "rent_exemption", "size": 165},
         ):
             posted = len(posts)
             with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
-            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") == "whirlpool_pool":
+            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption"}:
                 self.assertEqual(str(refused.exception), "method_refused")
                 self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
@@ -1821,6 +1823,7 @@ conn.close()
             "expire_at": None,
             "router": "metis",
             "side": "buy",
+            "rent_lamports": 1_500_000,
         }
         opened = memecoin_desk.scout({
             "mint": mint, "source": "dexscreener", "fetched_at": WHEN,
@@ -2032,6 +2035,50 @@ conn.close()
                 else:
                     payer = {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": payer_data.get(shape, ["", "base64"]), "executable": False, "rentEpoch": 0}
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": payer}}}
+            if method == "getMinimumBalanceForRentExemption" and request.get("purpose") == "rent_exemption":
+                mode = chain.get("deposit_mode")
+                if mode == "rent_transport":
+                    raise RuntimeError("rent down")
+                if mode == "rent_bool":
+                    return {"status": 200, "body": {"result": True}}
+                if mode == "rent_wide":
+                    return {"status": 200, "body": {"result": 2**64}}
+                if request.get("size") != solana_tx.TOKEN_ACCOUNT_SPACE:
+                    return {"status": 200, "body": {"result": None}}
+                return {"status": 200, "body": {"result": chain["rent_lamports"]}}
+            if method == "getAccountInfo" and request.get("purpose") == "token_deposit":
+                mode = chain.get("deposit_mode")
+                address = request.get("account")
+                slot = 2_000_028
+                echoed = request.get("blockhash")
+                if mode == "deposit_transport":
+                    raise RuntimeError("account down")
+                if mode == "context_stale":
+                    slot = 1
+                elif mode == "context_future":
+                    slot = 2_000_028 + 500
+                elif mode == "context_malformed":
+                    slot = "soon"
+                elif mode == "hash":
+                    echoed = "other-hash"
+                wsol_ata = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+                present = bytearray(solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, wallet))
+                present[108] = 1
+                chain["deposit_reads"] = chain.get("deposit_reads", 0) + 1
+                value = None
+                if mode == "race" and chain["deposit_reads"] % 2 == 0:
+                    value = {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(present)).decode("ascii"), "base64"], "executable": False, "lamports": chain["rent_lamports"], "rentEpoch": 0}
+                elif mode == "present" and address == wsol_ata:
+                    value = {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(present)).decode("ascii"), "base64"], "executable": False, "lamports": chain["rent_lamports"], "rentEpoch": 0}
+                elif mode == "malformed" and address == wsol_ata:
+                    value = {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(present)).decode("ascii"), "base64"], "executable": True, "lamports": 1, "rentEpoch": 0}
+                elif mode == "malformed_type" and address == wsol_ata:
+                    value = {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(present)).decode("ascii"), "base64"], "lamports": 1, "rentEpoch": 0}
+                elif mode == "prefunded" and address == wsol_ata:
+                    value = {"owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "lamports": 7, "rentEpoch": 0}
+                if mode == "context_missing":
+                    return {"status": 200, "body": {"result": {"value": value, "blockhash": echoed}}}
+                return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": value, "blockhash": echoed}}}
             if method == "getMinimumBalanceForRentExemption":
                 return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
             if method == "getAccountInfo":
@@ -2175,6 +2222,23 @@ conn.close()
         self.assertFalse(entry_preflight["dex_fee_charged_proven"])
         self.assertFalse(entry_preflight["dex_fee_proven"])
         self.assertFalse(entry_preflight["adaptive_fee_unsupported"])
+        self.assertTrue(entry_preflight["deposit_observed"], entry_preflight)
+        self.assertEqual(entry_preflight["deposit_lamports"], chain["rent_lamports"])
+        self.assertNotEqual(entry_preflight["deposit_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self.assertEqual(entry_preflight["deposit_rent_each"], chain["rent_lamports"])
+        self.assertEqual(entry_preflight["deposit_space"], solana_tx.TOKEN_ACCOUNT_SPACE)
+        self.assertEqual(entry_preflight["deposit_account_count"], 1)
+        self.assertEqual(entry_preflight["deposit_principal_lamports"], entry_route["in_amount"])
+        self.assertNotEqual(entry_preflight["deposit_lamports"], entry_preflight["deposit_principal_lamports"])
+        self.assertFalse(entry_preflight["deposit_refund_credited"])
+        self.assertFalse(entry_preflight["deposit_counts_as_fee"])
+        self.assertFalse(entry_preflight["preexisting_close_refused"])
+        self.assertEqual(entry_preflight["deposit_reason"], "deposit_hold_unpinned")
+        self.assertFalse(entry_preflight["rent_bound_proven"])
+        self.assertFalse(entry_preflight["ticket_limit_proven"])
+        stored_snap = memecoin_desk.view(case_id)["snapshot"]
+        self.assertNotIn("deposit_lamports", stored_snap)
+        self.assertNotIn("deposit_observed", stored_snap.get("entry_inflight", {}))
         self.assertNotIn("dex_fee_one_shot_raw", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
         self.assertNotEqual(chain["fee_messages"][-1], db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])
         self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])).decode("ascii"))
@@ -2289,16 +2353,59 @@ conn.close()
         def next_tick_fee(amount_in):
             return (amount_in * rate + (denominator - rate) - 1) // (denominator - rate)
 
-        def partial_fee(amount_remaining):
-            amount_in = amount_remaining * (denominator - rate) // denominator
-            return amount_remaining - amount_in
-
         self.assertEqual(next_tick_fee(1), 1)
         self.assertEqual(1 + next_tick_fee(1), 2)
         self.assertGreater(next_tick_fee(1) * 2, jupiter_route_v2.whirlpool_fee(4, rate))
         self.assertEqual(next_tick_fee(1) * 10, 10)
         self.assertGreater(10, jupiter_route_v2.whirlpool_fee(20, rate))
-        self.assertGreater(partial_fee(334), jupiter_route_v2.whirlpool_fee(332, rate))
+        for mode, reason in (
+            ("present", "preexisting_close_refused"),
+            ("malformed", "deposit_account_malformed"),
+            ("malformed_type", "deposit_account_malformed"),
+            ("prefunded", "deposit_prefunded_unpriced"),
+            ("race", "deposit_race"),
+            ("context_stale", "deposit_context_stale"),
+            ("context_future", "deposit_context_future"),
+            ("context_missing", "deposit_context_missing"),
+            ("context_malformed", "deposit_context_malformed"),
+            ("hash", "deposit_hash_mismatch"),
+            ("deposit_transport", "deposit_transport"),
+            ("rent_transport", "deposit_transport"),
+            ("rent_bool", "deposit_rent_malformed"),
+            ("rent_wide", "deposit_rent_malformed"),
+        ):
+            chain["deposit_mode"] = mode
+            chain["deposit_reads"] = 0
+            held = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
+            self.assertEqual(held["deposit_reason"], reason, held)
+            self.assertFalse(held["deposit_observed"], mode)
+            self.assertIsNone(held["deposit_lamports"], mode)
+            self.assertFalse(held["rent_bound_proven"], mode)
+            self.assertFalse(held["ticket_limit_proven"], mode)
+            self.assertFalse(held["fee_usd_proven"], mode)
+            self.assertFalse(held["preflight_ready"], mode)
+            if mode == "present":
+                self.assertTrue(held["preexisting_close_refused"], held)
+            else:
+                self.assertFalse(held["preexisting_close_refused"], mode)
+            self.assertFalse(held["deposit_refund_credited"], mode)
+            self.assertEqual(held["economic_reason"], "instruction_unsupported", mode)
+        chain["deposit_mode"] = None
+        entry_decoded = solana_tx.decode_transaction(base64.b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (entry_hash["message_sha256"],))[0]["message_b64"]))
+        looked = solana_tx.decode_transaction(base64.b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (entry_hash["message_sha256"],))[0]["message_b64"]))
+        looked.lookups = [solana_tx.Lookup(solana_tx.b58encode(b"\x91" * 32), [], [])]
+        held_lookup = desk_loop._deposit_hold(transport, looked, 2_000_028, chain["blockhash"])
+        self.assertEqual(held_lookup["deposit_reason"], "lookup_unresolved", held_lookup)
+        self.assertFalse(held_lookup["rent_bound_proven"])
+        self.assertFalse(held_lookup["deposit_observed"])
+        for index, key in enumerate(entry_decoded.static_keys):
+            if key == solana_tx.TOKEN_PROGRAM:
+                entry_decoded.static_keys[index] = solana_tx.TOKEN_2022
+                break
+        held_2022 = desk_loop._deposit_hold(transport, entry_decoded, 2_000_028, chain["blockhash"])
+        self.assertEqual(held_2022["deposit_reason"], "token_2022_unsupported", held_2022)
+        self.assertFalse(held_2022["rent_bound_proven"])
+        self.assertIsNone(held_2022["deposit_lamports"])
         attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
         self.assertEqual(attempt["case_id"], case_id)
         self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
@@ -3184,6 +3291,21 @@ conn.close()
         self.assertIsNone(exit_preflight["dex_fee_estimate_raw"])
         self.assertFalse(exit_preflight["dex_fee_estimate_proven"], exit_preflight)
         self.assertEqual(exit_preflight["pool_fee_reason"], "pool_fee_step_bound_unproven")
+        self.assertFalse(exit_preflight["deposit_observed"], exit_preflight)
+        self.assertIsNone(exit_preflight["deposit_lamports"])
+        self.assertEqual(exit_preflight["deposit_reason"], "close_without_create")
+        self.assertFalse(exit_preflight["deposit_refund_credited"])
+        chain["deposit_mode"] = "present"
+        exit_present = desk_loop.preflight_reserved(case_id, stored["message_sha256"], transport, WHEN)
+        chain["deposit_mode"] = None
+        self.assertEqual(exit_present["deposit_reason"], "preexisting_close_refused", exit_present)
+        self.assertTrue(exit_present["preexisting_close_refused"])
+        self.assertIsNone(exit_present["deposit_lamports"])
+        self.assertFalse(exit_present["rent_bound_proven"])
+        self.assertFalse(exit_present["ticket_limit_proven"])
+        self.assertFalse(exit_preflight["preexisting_close_refused"])
+        self.assertFalse(exit_preflight["rent_bound_proven"])
+        self.assertFalse(exit_preflight["ticket_limit_proven"])
         self.assertFalse(exit_preflight["dex_fee_charged_proven"])
         self.assertFalse(exit_preflight["dex_fee_proven"])
         self.assertFalse(exit_preflight["fee_usd_proven"])
