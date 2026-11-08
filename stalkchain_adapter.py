@@ -16,7 +16,10 @@ https://data.stalkchain.com/api/v1/openapi.json
 
 from __future__ import annotations
 
+import json
 import os
+import urllib.error
+import urllib.request
 
 URL = "https://data.stalkchain.com/api/v1/tools/"
 ENV = "STALKCHAIN_API_KEY"
@@ -78,6 +81,31 @@ def normalize(body) -> dict:
         "named": named,
         "fdv_used_as_market_cap": False,
     }
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def post(request: dict) -> dict:
+    """POST one documented tool URL. Redirects are refused. The bearer is not logged."""
+    url = request.get("url") if isinstance(request, dict) else None
+    if not isinstance(url, str) or not url.startswith(URL) or not isinstance(request.get("json"), dict):
+        return {"status": None, "body": None}
+    headers = {"accept": "application/json", "content-type": "application/json"}
+    authorization = (request.get("headers") or {}).get("authorization")
+    if isinstance(authorization, str):
+        headers["authorization"] = authorization
+    payload = json.dumps(request["json"]).encode("utf-8")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(urllib.request.Request(url, data=payload, headers=headers, method="POST"), timeout=8) as response:
+            return {"status": response.status, "body": json.loads(response.read().decode("utf-8"))}
+    except urllib.error.HTTPError as exc:
+        return {"status": exc.code, "body": None}
+    except Exception:
+        return {"status": None, "body": None}
 
 
 def read_mint(mint: str, transport) -> dict:

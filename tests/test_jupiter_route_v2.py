@@ -1,9 +1,12 @@
 """route_v2 minimum, message binding, and the combined fee. Nothing is sent."""
 import hashlib
 import json
+import time
 import unittest
 from decimal import Decimal
 from pathlib import Path
+
+import usdc_valuation
 
 import jupiter_route_v2
 import phantom_transport
@@ -15,7 +18,16 @@ WALLET = phantom_transport.REQUIRED_WALLET
 TOKEN = solana_tx.b58encode(b"\x55" * 32)
 SQRT = 5531210526019943285
 CAPTURED = bytes.fromhex("bb64facc31c4af14809698000000000061910d000000000032000000000001000000c310270001")
-QUOTE = {"usable": True, "upper": "1", "lower": "1", "origin": "test_harness", "authenticated_live": False}
+def _quote():
+    return {
+        "feed_id": usdc_valuation.FEED_ID,
+        "price": 100_000_000,
+        "conf": 0,
+        "expo": -8,
+        "publish_time": int(time.time()),
+        "origin": "test_harness",
+        "authenticated_live": False,
+    }
 
 
 def _route(quoted: int, slippage: int, a_to_b: bool = True, amount: int = 1_000_000) -> bytes:
@@ -32,7 +44,7 @@ def _route(quoted: int, slippage: int, a_to_b: bool = True, amount: int = 1_000_
     )
 
 
-def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100):
+def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100, liquidity: int = 10**18):
     pool = solana_tx.b58encode(b"\x21" * 32)
     wsol = solana_tx.associated_token_address(WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
     source = wsol if source_mint == solana_tx.NATIVE_MINT else solana_tx.b58encode(b"\x66" * 32)
@@ -51,7 +63,7 @@ def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100):
     }
     pool_data = solana_whirlpool.reference_pool(
         source_mint, vault_a, dest_mint, vault_b, spacing, current,
-        sqrt_price=1 << 64, fee_rate=fee_rate, liquidity=10**18,
+        sqrt_price=1 << 64, fee_rate=fee_rate, liquidity=liquidity,
     )
     accounts = {
         pool: (solana_whirlpool.PROGRAM_ID, pool_data),
@@ -102,7 +114,7 @@ def _canonical() -> bytes:
     )
 
 
-def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None) -> str:
+def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None, signers: int = 1) -> str:
     ordered = []
     def add(pubkey: str) -> None:
         if pubkey not in ordered:
@@ -140,7 +152,7 @@ def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000
         if extra_transfer not in index:
             raise AssertionError("extra")
         instructions.append((index[solana_tx.SYSTEM_PROGRAM], [index[WALLET], index[extra_transfer]], (2).to_bytes(4, "little") + (1).to_bytes(8, "little")))
-    return solana_tx.encode_legacy(WALLET, ordered, len(readonly), instructions, solana_tx.b58encode(b"\x44" * 32))
+    return solana_tx.encode_legacy(WALLET, ordered, len(readonly), instructions, solana_tx.b58encode(b"\x44" * 32), required=signers)
 
 
 class RouteV2Tests(unittest.TestCase):
@@ -175,24 +187,24 @@ class RouteV2Tests(unittest.TestCase):
         values, data = _pool(solana_tx.NATIVE_MINT, TOKEN)
         canonical = _canonical()
         buy = jupiter_route_v2.decode_message(
-            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 50)),
-            data, canonical, QUOTE, side="buy", mint=TOKEN,
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            data, canonical, _quote(), side="buy", mint=TOKEN,
         )
-        self.assertTrue(buy["ok"], buy)
+        self.assertFalse(buy["ok"], buy)
+        self.assertEqual(buy["reason"], "usd_not_live")
         self.assertTrue(buy["message_bound"])
-        self.assertEqual(buy["min_out"], 999_899 * 9950 // 10_000)
-        self.assertGreaterEqual(buy["min_out"], buy["amm_min_out"])
-        self.assertLessEqual(buy["quoted_out_amount"], buy["amm_est_out"])
-        self.assertLessEqual(Decimal(buy["combined_fee_usd"]), Decimal("0.05"))
+        self.assertEqual(buy["amm_est_out"], 999_899)
+        self.assertGreaterEqual(buy["min_out"], buy["amm_est_out"])
         self.assertFalse(buy["usd_live"])
         self.assertFalse(buy["send"])
         self.assertFalse(buy["live_ready"])
+        self.assertFalse(buy["buy_proven"])
         values_out, data_out = _pool(TOKEN, solana_tx.NATIVE_MINT)
         sell = jupiter_route_v2.decode_message(
-            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(999_899, 50, True), side="exit"),
-            data_out, canonical, QUOTE, side="exit", mint=TOKEN,
+            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(999_899, 0, True), side="exit"),
+            data_out, canonical, _quote(), side="exit", mint=TOKEN,
         )
-        self.assertTrue(sell["ok"], sell)
+        self.assertEqual(sell["reason"], "usd_not_live", sell)
         self.assertEqual(sell["dex_fee_unit"], "token_raw")
         self.assertNotEqual(sell["dex_fee_lamports"], jupiter_route_v2.lamports_to_micro_usdc(sell["dex_fee_raw"], 89_908_537))
 
@@ -201,30 +213,96 @@ class RouteV2Tests(unittest.TestCase):
         canonical = _canonical()
         loose = jupiter_route_v2.decode(
             _metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 50),
-            side="buy", mint=TOKEN, account_data=data, compute=[], canonical_pool=canonical, quote=QUOTE,
+            side="buy", mint=TOKEN, account_data=data, compute=[], canonical_pool=canonical, quote=_quote(),
         )
         self.assertEqual(loose["reason"], "message_unbound")
         self.assertFalse(loose["ok"])
         tiny = jupiter_route_v2.decode_message(
-            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(1, 0)),
-            data, canonical, QUOTE, side="buy", mint=TOKEN,
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 9999)),
+            data, canonical, _quote(), side="buy", mint=TOKEN,
         )
         self.assertEqual(tiny["reason"], "min_below_amm")
+        self.assertFalse(tiny["ok"])
+        cheap = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            data, canonical, {"usable": True, "upper": "0.01", "origin": "test_harness"}, side="buy", mint=TOKEN,
+        )
+        self.assertEqual(cheap["reason"], "valuation_fields")
+        self.assertFalse(cheap["ok"])
+        huge = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0, amount=200_000_000)),
+            data, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertEqual(huge["reason"], "exposure_cap", huge)
+        preexisting = dict(data)
+        raw = bytearray(preexisting[values["source"]][1])
+        raw[64:72] = (10**12).to_bytes(8, "little")
+        preexisting[values["source"]] = (preexisting[values["source"]][0], bytes(raw))
+        held = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            preexisting, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertEqual(held["reason"], "preexisting_wsol")
+        self.assertFalse(held.get("wrap_verified"))
         metas = _metas(solana_tx.NATIVE_MINT, TOKEN, values)
         metas.insert(7, {"pubkey": solana_tx.b58encode(b"\x44" * 32), "isWritable": False, "isSigner": False})
         unknown = jupiter_route_v2.decode_message(
-            _tx(metas, _route(999_899, 50)), data, canonical, QUOTE, side="buy", mint=TOKEN,
+            _tx(metas, _route(999_899, 0)), data, canonical, _quote(), side="buy", mint=TOKEN,
         )
         self.assertEqual(unknown["reason"], "unidentified_account")
         missing = jupiter_route_v2.decode_message(
             _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 50), omit_limit=True),
-            data, canonical, QUOTE, side="buy", mint=TOKEN,
+            data, canonical, _quote(), side="buy", mint=TOKEN,
         )
         self.assertEqual(missing["reason"], "compute_unit_limit_missing")
         rich, rich_data = _pool(solana_tx.NATIVE_MINT, TOKEN, fee_rate=60_000)
         capped = jupiter_route_v2.decode_message(
             _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, rich), _route(1_000_000, 50, amount=50_000_000)),
-            rich_data, canonical, QUOTE, side="buy", mint=TOKEN,
+            rich_data, canonical, _quote(), side="buy", mint=TOKEN,
         )
         self.assertEqual(capped["reason"], "fee_cap", capped)
         self.assertFalse(capped["live_ready"])
+        two = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0), signers=2),
+            data, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertEqual(two["reason"], "extra_signer")
+        self.assertEqual(two["required_signatures"], 2)
+        corrupt = dict(data)
+        tick = values["ticks"][0]
+        blob = bytearray(corrupt[tick][1])
+        blob[0] ^= 0xFF
+        corrupt[tick] = (corrupt[tick][0], bytes(blob))
+        bad = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            corrupt, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertFalse(bad["ok"])
+        self.assertNotEqual(bad.get("amm_est_out"), 999_899)
+        thin, thin_data = _pool(solana_tx.NATIVE_MINT, TOKEN, liquidity=10**9)
+        plain = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, thin), _route(998_901, 0)),
+            thin_data, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        crossed = dict(thin_data)
+        tick = thin["ticks"][0]
+        blob = bytearray(crossed[tick][1])
+        slot = (8 - 0) // 8
+        at = 12 + slot * 113
+        blob[at] = 1
+        blob[at + 1:at + 17] = (-(10**9 // 2)).to_bytes(16, "little", signed=True)
+        crossed[tick] = (crossed[tick][0], bytes(blob))
+        moved = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, thin), _route(998_901, 0)),
+            crossed, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertEqual(plain.get("amm_est_out"), 998_901)
+        self.assertEqual(moved.get("amm_est_out"), 1_000_297)
+        self.assertNotEqual(moved.get("amm_est_out"), plain.get("amm_est_out"))
+        readonly = _metas(solana_tx.NATIVE_MINT, TOKEN, values)
+        tick_meta = next(item for item in readonly if item["pubkey"] == values["ticks"][0])
+        tick_meta["isWritable"] = False
+        denied = jupiter_route_v2.decode_message(
+            _tx(readonly, _route(999_899, 0)), data, canonical, _quote(), side="buy", mint=TOKEN,
+        )
+        self.assertEqual(denied["reason"], "privilege")

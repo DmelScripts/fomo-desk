@@ -382,7 +382,7 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         notional = _money(snap.get("notional_usd")) or TICKET
         proceeds = (notional * price / entry)
         entry_fee = _money(snap["fill"]["fee_usd"])
-        exit_fee = _money(snap["route"]["fee_usd"])
+        exit_fee = _money(snap["exit_fee_usd"]) if snap.get("exit_fee_usd") else Decimal("0")
         realized = proceeds - notional - entry_fee - exit_fee
         snap["exit"] = {
             "proceeds_usd": format(proceeds, "f"),
@@ -390,6 +390,7 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
             "exit_fee_usd": format(exit_fee, "f"),
             "realized_pnl": format(realized, "f"),
             "fee_counted_once": True,
+            "exit_fee_is_separate": snap.get("exit_fee_usd") is not None,
         }
         snap["realized_pnl"] = format(realized, "f")
         snap["reserved_usd"] = "0.00"

@@ -14,6 +14,9 @@ https://docs.pyth.network/api-reference/hermes/price-feeds
 
 from __future__ import annotations
 
+# A test may replace this. Unset, the HTTP route uses the public reader. Nothing starts a loop.
+FETCH = None
+
 import dexscreener_public
 import memecoin_desk
 import pyth_sponsored

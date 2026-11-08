@@ -302,19 +302,18 @@ class MemecoinDeskTests(unittest.TestCase):
             memecoin_desk._log = original
         self.assertIsNone(memecoin_desk.view(_mint(90)))
 
-    def test_exit_pnl_counts_the_entry_fee_and_the_exit_fee_once_each(self):
+    def test_exit_pnl_counts_the_recorded_entry_fee_once(self):
         case_id = self._filled(91)
-        snap = memecoin_desk.view(case_id)["snapshot"]
-        snap["fill"]["fee_usd"] = "0.02"
-        snap["route"]["fee_usd"] = "0.03"
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
         closed = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(closed["action"], "stop")
-        body = memecoin_desk.view(case_id)["snapshot"]["exit"]
-        notional = Decimal(memecoin_desk.view(case_id)["snapshot"]["notional_usd"])
+        body = memecoin_desk.view(case_id)["snapshot"]
+        booked = body["exit"]
+        notional = Decimal(body["notional_usd"])
         proceeds = notional * Decimal("0.94")
-        self.assertEqual(Decimal(body["realized_pnl"]), proceeds - notional - Decimal("0.02") - Decimal("0.03"))
-        self.assertTrue(body["fee_counted_once"])
+        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05"))
+        self.assertEqual(booked["exit_fee_usd"], "0")
+        self.assertFalse(booked["exit_fee_is_separate"])
+        self.assertTrue(booked["fee_counted_once"])
 
     def test_a_restart_keeps_the_fill_and_does_not_send_again(self):
         kept = self._filled(63)
@@ -346,9 +345,51 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(routed.status_code, 400)
         moment = time.time()
         opened = client.post("/api/memecoin/scout", headers=AUTH, json=_pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000)))
-        self.assertEqual(opened.status_code, 200, opened.text)
-        self.assertEqual(opened.json()["stage"], "scout_passed")
+        self.assertEqual(opened.status_code, 409, opened.text)
+        self.assertEqual(opened.json()["reason"], "caller_snapshot_not_the_handoff")
+        import desk_loop
+        previous = desk_loop.FETCH
+
+        def fetch(request):
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode("ascii"), "base64"]}}}}
+            return {"status": 200, "body": [{
+                "chainId": "solana", "baseToken": {"address": _mint(81)}, "priceUsd": "1",
+                "marketCap": 1_000_000, "fdv": 2, "liquidity": {"usd": 250_000},
+                "pairCreatedAt": int((moment - 3600) * 1000), "priceChange": {"h1": 1},
+            }]}
+
+        desk_loop.FETCH = fetch
+        self.addCleanup(lambda: setattr(desk_loop, "FETCH", previous))
+        ran = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81)})
+        self.assertEqual(ran.status_code, 409, ran.text)
+        self.assertEqual(ran.json()["reason"], "lp")
+        self.assertFalse(ran.json()["stalkchain"]["called"])
+        self.assertFalse(ran.json()["scheduled"])
+        self.assertFalse(ran.json()["deployed"])
+        import os
+        import stalkchain_adapter
+        os.environ["STALKCHAIN_API_KEY"] = "sc_test_not_a_real_key"
+        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
+        seen = []
+
+        def posted(request):
+            seen.append(request["url"])
+            self.assertNotIn("authorization", json.dumps({key: value for key, value in request.items() if key != "headers"}))
+            return {"status": 200, "body": {"data": {"marketCapBasis": "market_cap"}, "meta": {}}}
+
+        previous_post = stalkchain_adapter.post
+        stalkchain_adapter.post = posted
+        self.addCleanup(lambda: setattr(stalkchain_adapter, "post", previous_post))
+        keyed = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81)})
+        self.assertEqual(len(seen), 4, keyed.text)
+        self.assertTrue(keyed.json()["stalkchain"]["called"])
+        self.assertNotIn("sc_test_not_a_real_key", keyed.text)
+        self.assertEqual(keyed.json()["reason"], "lp")
         self.assertEqual(db.get_setting("agents_enabled"), "0")
-        body = client.get("/api/memecoin/" + opened.json()["case_id"], headers=AUTH).json()
+        body = client.get("/api/memecoin/" + ran.json()["case_id"], headers=AUTH).json()
         self.assertFalse(body["live_ready"])
         self.assertFalse(body["send"])

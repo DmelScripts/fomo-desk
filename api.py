@@ -1277,48 +1277,51 @@ def memecoin_readiness(request: Request) -> JSONResponse:
     return JSONResponse(desk_loop.readiness(), headers={"Cache-Control": "no-store"})
 
 
+@router.post("/api/memecoin/run")
+def memecoin_run(request: Request, body: dict | None = None) -> JSONResponse:
+    """One invoked handoff for a mint. Caller snapshots are not this route. It is not a loop."""
+    require_app_token(request)
+    parsed = _memecoin_body(body, {"mint"})
+    if not isinstance(parsed.get("mint"), str):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import desk_loop
+    import public_market
+    import stalkchain_adapter
+    transport = desk_loop.FETCH if desk_loop.FETCH is not None else public_market.live_transport
+    result = desk_loop.run_once(parsed["mint"], transport, time.time(), stalkchain_adapter.post)
+    result["deployed"] = False
+    result["scheduled"] = False
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/memecoin/scout")
 def memecoin_scout(request: Request, body: dict | None = None) -> JSONResponse:
-    """DexScreener snapshot only. A passed flag is not a field."""
+    """Caller snapshots are not the server handoff."""
     require_app_token(request)
-    pair = _memecoin_body(body, _MEMECOIN_SCOUT)
-    import memecoin_desk
-    result = memecoin_desk.scout(pair)
-    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+    _memecoin_body(body, _MEMECOIN_SCOUT)
+    return JSONResponse({"ok": False, "reason": "caller_snapshot_not_the_handoff", "send": False, "live_ready": False, "deployed": False}, status_code=409, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/memecoin/filter")
 def memecoin_filter(request: Request, body: dict | None = None) -> JSONResponse:
     require_app_token(request)
-    parsed = _memecoin_body(body, {"case_id", "onchain"})
-    if not isinstance(parsed["case_id"], str) or not isinstance(parsed["onchain"], dict):
-        raise HTTPException(status_code=400, detail="unexpected field")
-    import memecoin_desk
-    result = memecoin_desk.filter_case(parsed["case_id"], parsed["onchain"])
-    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+    _memecoin_body(body, {"case_id", "onchain"})
+    return JSONResponse({"ok": False, "reason": "caller_snapshot_not_the_handoff", "send": False, "live_ready": False, "deployed": False}, status_code=409, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/memecoin/analyst")
 def memecoin_analyst(request: Request, body: dict | None = None) -> JSONResponse:
     require_app_token(request)
-    parsed = _memecoin_body(body, {"case_id", "components"})
-    if not isinstance(parsed["case_id"], str) or not isinstance(parsed["components"], dict):
-        raise HTTPException(status_code=400, detail="unexpected field")
-    import memecoin_desk
-    result = memecoin_desk.analyze(parsed["case_id"], parsed["components"])
-    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+    _memecoin_body(body, {"case_id", "components"})
+    return JSONResponse({"ok": False, "reason": "caller_snapshot_not_the_handoff", "send": False, "live_ready": False, "deployed": False}, status_code=409, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/memecoin/protect")
 def memecoin_protect(request: Request, body: dict | None = None) -> JSONResponse:
-    """Persist the stop and trail. This route does not accept a transaction."""
+    """A case id alone cannot price the deposit or the message."""
     require_app_token(request)
-    parsed = _memecoin_body(body, {"case_id"})
-    if not isinstance(parsed["case_id"], str):
-        raise HTTPException(status_code=400, detail="unexpected field")
-    import memecoin_desk
-    result = memecoin_desk.protect(parsed["case_id"])
-    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+    _memecoin_body(body, {"case_id"})
+    return JSONResponse({"ok": False, "reason": "caller_snapshot_not_the_handoff", "send": False, "live_ready": False, "deployed": False}, status_code=409, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/memecoin/{case_id}")

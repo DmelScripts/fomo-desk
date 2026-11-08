@@ -22,6 +22,7 @@ IDL does not list their remaining accounts.
 
 from __future__ import annotations
 
+import time
 from decimal import Decimal
 
 import phantom_transport
@@ -130,7 +131,15 @@ def parse(data: bytes) -> dict:
     return body
 
 
-def network_fee(instructions: list[bytes]) -> dict:
+def _wsol_amount(record) -> int | None:
+    if not isinstance(record, tuple) or len(record) != 2 or not isinstance(record[1], (bytes, bytearray)):
+        return None
+    if len(record[1]) < 72:
+        return None
+    return int.from_bytes(record[1][64:72], "little")
+
+
+def network_fee(instructions: list[bytes], signatures: int = 1) -> dict:
     """Priority fee from the two compute-budget instructions, plus one signature."""
     limit = None
     price = None
@@ -148,7 +157,10 @@ def network_fee(instructions: list[bytes]) -> dict:
             return {"ok": False, "reason": "compute_budget", "network_fee_proven": False}
     if limit is None or price is None or limit <= 0:
         return {"ok": False, "reason": "compute_unit_limit_missing", "network_fee_proven": False}
+    if isinstance(signatures, bool) or not isinstance(signatures, int) or signatures < 1:
+        return {"ok": False, "reason": "extra_signer", "network_fee_proven": False}
     priority = (price * limit + 999_999) // 1_000_000
+    base = BASE_FEE_LAMPORTS * signatures
     return {
         "ok": True,
         "reason": None,
@@ -156,8 +168,9 @@ def network_fee(instructions: list[bytes]) -> dict:
         "compute_unit_limit": limit,
         "micro_lamports_per_cu": price,
         "priority_lamports": priority,
-        "base_lamports": BASE_FEE_LAMPORTS,
-        "network_lamports": priority + BASE_FEE_LAMPORTS,
+        "base_lamports": base,
+        "signatures": signatures,
+        "network_lamports": priority + base,
     }
 
 
@@ -215,28 +228,42 @@ def sol_micro_from_pool(pool_data: bytes) -> int | None:
         return None
 
 
-def _amm_bound(parsed: dict, state: dict, a_to_b: bool) -> dict:
-    """Independent Whirlpool quote. The instruction's quoted output cannot exceed it."""
+def _hop_privileges(accounts: list[dict], remaining: list[int]) -> str | None:
+    """Writable and signer bits for the hop. The inner swap is not a second instruction."""
+    if len(remaining) != 12:
+        return "privilege"
+    def meta(index: int) -> dict:
+        return accounts[remaining[index]]
+    for index in (1, 11):
+        if meta(index).get("isWritable") is True or meta(index).get("isSigner") is True:
+            return "privilege"
+    if meta(2).get("isSigner") is not True:
+        return "privilege"
+    for index in (3, 4, 5, 6, 7, 8, 9, 10):
+        if meta(index).get("isWritable") is not True or meta(index).get("isSigner") is True:
+            return "privilege"
+    return None
+
+
+def _amm_bound(parsed: dict, state: dict, a_to_b: bool, tick_accounts: list[bytes], pool: str) -> dict:
+    """Quote from the tick accounts in the message. Empty stand-ins are not a quote."""
     import solana_whirlpool_quote
-    spacing = state["tick_spacing"]
-    current = state["tick_current_index"]
-    base = solana_whirlpool.start_tick_index(current, spacing)
-    step = solana_whirlpool.TICK_ARRAY_SIZE * spacing
-    starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
-    arrays = [
-        {"start_tick_index": start, "ticks": [{"initialized": False, "liquidity_net": 0} for _ in range(solana_whirlpool.TICK_ARRAY_SIZE)]}
-        for start in sorted(starts)
-    ]
+    arrays = []
+    for raw in tick_accounts:
+        parsed_array = solana_whirlpool.tick_array_state(raw)
+        if parsed_array is None or parsed_array.get("pool") != pool:
+            return {"ok": False, "reason": "tick_state_unverified"}
+        arrays.append({"start_tick_index": parsed_array["start_tick_index"], "ticks": parsed_array["ticks"]})
     try:
-        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, parsed["in_amount"], a_to_b, parsed["slippage_bps"], 0, 1)
+        quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, parsed["in_amount"], a_to_b, 0, 0, 1)
     except solana_whirlpool_quote.QuoteError:
         return {"ok": False, "reason": "amm_quote_failed"}
     if quoted.get("token_est_out", 0) <= 0:
         return {"ok": False, "reason": "amm_quote_zero"}
     if parsed["quoted_out_amount"] > quoted["token_est_out"]:
-        return {"ok": False, "reason": "quoted_above_amm"}
-    if parsed["min_out"] < quoted["token_min_out"]:
-        return {"ok": False, "reason": "min_below_amm"}
+        return {"ok": False, "reason": "quoted_above_amm", "est_out": quoted["token_est_out"]}
+    if parsed["min_out"] < quoted["token_est_out"]:
+        return {"ok": False, "reason": "min_below_amm", "est_out": quoted["token_est_out"]}
     return {"ok": True, "est_out": quoted["token_est_out"], "min_out": quoted["token_min_out"]}
 
 
@@ -315,6 +342,8 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
         return refused | {"reason": "message"}
     if decoded.lookups:
         return refused | {"reason": "lookup_unresolved", "message_bound": True}
+    if decoded.required_signatures != 1:
+        return refused | {"reason": "extra_signer", "message_bound": True, "required_signatures": decoded.required_signatures}
     shape = _wrap_shape(decoded, side=side, mint=mint)
     if shape.get("error"):
         return refused | {"reason": shape["error"], "message_bound": True}
@@ -326,6 +355,11 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
         return refused | {"reason": "wrap_unbound", "message_bound": True}
     if side == "exit" and decoded.static_keys[swap.account_indexes[2]] != shape["wsol"]:
         return refused | {"reason": "wrap_unbound", "message_bound": True}
+    held = _wsol_amount(account_data.get(shape["wsol"]))
+    if held is None:
+        return refused | {"reason": "wsol_balance_unproven", "message_bound": True}
+    if held > 0:
+        return refused | {"reason": "preexisting_wsol", "message_bound": True, "wrap_verified": False}
     accounts = []
     for index in swap.account_indexes:
         try:
@@ -397,6 +431,8 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         )
     except solana_whirlpool.WhirlpoolError as exc:
         return result | {"reason": exc.category, "min_out": parsed["min_out"], "min_out_proven": True}
+    if _hop_privileges(accounts, remaining) is not None:
+        return result | {"reason": "privilege", "min_out": parsed["min_out"], "min_out_proven": True}
     pool = keys[remaining[3]]
     state = solana_whirlpool.pool_state(account_data[pool][1])
     fee = None if state is None else whirlpool_fee(parsed["in_amount"], state["fee_rate"])
@@ -411,8 +447,9 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     if priced.get("ok") is not True:
         return result | {"reason": priced.get("reason"), "min_out": parsed["min_out"], "min_out_proven": True}
     sol_micro = sol_micro_from_pool(canonical_pool) if isinstance(canonical_pool, (bytes, bytearray)) else None
-    if sol_micro is None or not isinstance(quote, dict) or quote.get("usable") is not True or quote.get("origin") not in {"test_harness", "hermes"}:
-        return result | {"reason": "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
+    assessed = usdc_valuation.assess(quote, time.time()) if isinstance(quote, dict) else {"usable": False, "reason": "valuation_missing"}
+    if sol_micro is None or assessed.get("usable") is not True:
+        return result | {"reason": assessed.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
     mint_a, _vault_a, mint_b, _vault_b = solana_whirlpool.pool_fields(account_data[pool][1])
     if bound["source_mint"] == solana_tx.NATIVE_MINT:
         dex_lamports = fee
@@ -422,33 +459,37 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         return result | {"reason": "dex_fee_dimension", "min_out": parsed["min_out"], "min_out_proven": True}
     micro = lamports_to_micro_usdc(dex_lamports + priced["network_lamports"], sol_micro)
     result["dex_fee_lamports"] = dex_lamports
-    ceiling = usdc_valuation.usd_ceiling(micro, quote)
+    ceiling = usdc_valuation.usd_ceiling(micro, assessed)
     if ceiling is None or micro is None:
         return result | {"reason": quote.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
     result["combined_fee_usd"] = format(ceiling, "f")
     result["combined_fee_usd_proven"] = True
-    result["usd_live"] = quote.get("authenticated_live") is True
+    result["usd_live"] = quote.get("authenticated_live") is True and quote.get("origin") == "hermes"
     if ceiling > Decimal("0.05"):
         return result | {"reason": "fee_cap", "min_out": parsed["min_out"]}
-    quoted_ok = _amm_bound(parsed, state, parsed["a_to_b"] is True)
+    exposure = usdc_valuation.usd_ceiling(lamports_to_micro_usdc(parsed["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT * 2, sol_micro), assessed)
+    result["exposure_usd"] = None if exposure is None else format(exposure, "f")
+    if exposure is None or exposure > Decimal("8.00"):
+        return result | {"reason": "exposure_cap", "min_out": parsed["min_out"]}
+    tick_bytes = []
+    for index in remaining[8:11]:
+        record = account_data.get(keys[index])
+        if not isinstance(record, tuple):
+            return result | {"reason": "tick_state_unverified", "min_out": parsed["min_out"]}
+        tick_bytes.append(record[1])
+    quoted_ok = _amm_bound(parsed, state, parsed["a_to_b"] is True, tick_bytes, pool)
     if quoted_ok.get("ok") is not True:
-        return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"]}
+        return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"], "amm_est_out": quoted_ok.get("est_out")}
     result["amm_est_out"] = quoted_ok.get("est_out")
     result["amm_min_out"] = quoted_ok.get("min_out")
-    return result | {
-        "ok": True,
-        "reason": None,
-        "decoded": True,
-        "buy_proven": side == "buy",
-        "exit_proven": side == "exit",
-        "min_out": parsed["min_out"],
-        "min_out_proven": True,
-        "in_amount": parsed["in_amount"],
-        "quoted_out_amount": parsed["quoted_out_amount"],
-        "slippage_bps": parsed["slippage_bps"],
-        "a_to_b": parsed["a_to_b"],
-        "fee_micro_usdc": micro,
-    }
+    if parsed["slippage_bps"] != 0 or not result["usd_live"]:
+        return result | {
+            "reason": "slippage_unapproved" if result["usd_live"] else "usd_not_live",
+            "min_out": parsed["min_out"],
+            "slippage_bps": parsed["slippage_bps"],
+            "buy_proven": False,
+            "exit_proven": False,
+        }
 
 
 def _fixed_accounts(accounts: list[dict]) -> dict:
