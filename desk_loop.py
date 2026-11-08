@@ -557,13 +557,13 @@ def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
     if not isinstance(snap, dict):
         return refused
     stage = rows[0]["stage"]
-    synthetic = snap.get("capital_ledger") == "synthetic"
-    if synthetic and not allow_synthetic:
+    mode = memecoin_desk.execution_mode(rows[0])
+    conflict = isinstance(snap.get("capital_ledger"), str) and snap.get("capital_ledger") != mode
+    if mode == "synthetic" and not allow_synthetic:
         return refused | {"reason": "synthetic_not_live"}
+    if mode not in {"live", "synthetic"} and stage in {"filled", "partial", "exit_intent", "protected"}:
+        return refused | {"reason": "paper_not_live" if mode == "paper" else "exit_unproven"}
     if stage in {"filled", "partial", "exit_intent"}:
-        mode = memecoin_desk.execution_mode(rows[0])
-        if mode != "live":
-            return refused | {"reason": "paper_not_live" if mode == "paper" else "exit_unproven"}
         if isinstance(snap.get("inflight"), dict):
             return refused | {"reason": "exit_inflight"}
         if stage == "filled":
@@ -576,7 +576,7 @@ def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
         left = memecoin_desk.receipt_remaining(rows[0]["id"])
         if left.get("ok") is not True or not isinstance(left.get("remaining"), int) or left["remaining"] <= 0:
             return refused | {"reason": "flat" if left.get("remaining") == 0 else left.get("reason")}
-        return {"ok": True, "side": "exit", "amount": left["remaining"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": intent_row["pool"], "intent_id": intent_row["id"]}
+        return {"ok": True, "side": "exit", "amount": left["remaining"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": intent_row["pool"], "intent_id": intent_row["id"], "snapshot_mode_conflict": conflict}
     amount = snap.get("entry_amount_raw")
     if stage == "protected" and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
         return {"ok": True, "side": "entry", "amount": amount, "input_mint": solana_tx.NATIVE_MINT, "output_mint": mint, "a_to_b": True, "case_id": rows[0]["id"], "pool": pool}

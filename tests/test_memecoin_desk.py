@@ -146,14 +146,14 @@ def _arm_recorded_exit(case_id: str) -> None:
     )
 
 
-def _protect(case_id: str):
+def _protect(case_id: str, ledger: str | None = None):
     pool = solana_whirlpool.reference_pool(
         solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
         solana_tx.USDC_MINT, solana_tx.b58encode(b"\x12" * 32),
         sqrt_price=5531210526019943285,
     )
     quote = {"usable": True, "upper": "1", "lower": "1", "origin": "test_harness"}
-    return memecoin_desk.protect(case_id, pool, quote)
+    return memecoin_desk.protect(case_id, pool, quote, ledger=ledger)
 
 
 def _buy(mint: str, amount: int = 1000, minimum: int = 50) -> str:
@@ -215,7 +215,7 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def _filled(self, number: int):
         case_id = self._analyzed(number)
-        protected = _protect(case_id)
+        protected = _protect(case_id, "paper")
         self.assertEqual(protected["stage"], "protected", protected)
         tx = _buy(_mint(number))
         offered = memecoin_desk.offer_fixture_route(case_id, tx, amount_in=1000, minimum_out=50, fee_usd="0.05")
@@ -422,6 +422,37 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertFalse(memecoin_desk.view(kept)["snapshot"]["send"])
         again = memecoin_desk.harness_fill(kept, {"message_sha256": "nope", "tokens_out": 50})
         self.assertEqual(again["reason"], "stage")
+        live = self._analyzed(64)
+        _protect(live)
+        held = memecoin_desk.view(live)["snapshot"]["reserved_usd"]
+        for stage in ("protected", "entry_ready", "entry_inflight", "filled", "partial", "exit_intent"):
+            db.execute("UPDATE memecoin_cases SET stage = ? WHERE id = ?", (stage, live))
+            refused = memecoin_desk.harness_fill(live, {"message_sha256": "nope", "tokens_out": 50})
+            self.assertEqual(refused["reason"], "paper_not_live", stage)
+            self.assertEqual(memecoin_desk.view(live)["stage"], stage)
+            self.assertEqual(db.query("SELECT ledger, ledger_provenance FROM memecoin_cases WHERE id = ?", (live,))[0]["ledger"], "live")
+            self.assertEqual(memecoin_desk.view(live)["snapshot"]["reserved_usd"], held)
+        db.execute("UPDATE memecoin_cases SET stage = 'entry_ready' WHERE id = ?", (live,))
+        snap = memecoin_desk.view(live)["snapshot"]
+        snap["entry_inflight"] = {"message_sha256": "held"}
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), live))
+        refused = memecoin_desk.harness_fill(live, {"message_sha256": "held", "tokens_out": 50})
+        self.assertEqual(refused["reason"], "paper_not_live")
+        self.assertEqual(memecoin_desk.view(live)["snapshot"]["entry_inflight"]["message_sha256"], "held")
+        import threading
+        reasons = []
+
+        def hit():
+            reasons.append(memecoin_desk.harness_fill(live, {"message_sha256": "held", "tokens_out": 50})["reason"])
+
+        threads = [threading.Thread(target=hit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(reasons, ["paper_not_live", "paper_not_live"])
+        self.assertEqual(memecoin_desk.view(live)["snapshot"]["reserved_usd"], held)
+        self.assertEqual(db.query("SELECT ledger, ledger_provenance FROM memecoin_cases WHERE id = ?", (live,))[0]["ledger_provenance"], "server")
         self.assertEqual(db.query("SELECT intent_id FROM phantom_reservations"), [])
 
     def test_decoder_rejects_a_different_program_and_http_cannot_skip(self):
@@ -480,13 +511,15 @@ class MemecoinDeskTests(unittest.TestCase):
         import base64
         from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _snap, _tx
         case_id = self._filled(91)
-        snap = memecoin_desk.view(case_id)["snapshot"]
-        snap["fill"]["fixture"] = True
-        snap["entry_funding"]["source"] = "paper_harness"
-        snap["remaining_raw"] = 50
+        live = self._analyzed(92)
+        _protect(live)
+        live_snap = memecoin_desk.view(live)["snapshot"]
+        live_snap["fill"] = {"fixture": True}
+        live_snap["entry_funding"] = {"source": "paper_harness"}
+        live_snap["remaining_raw"] = 50
         db.execute(
-            "UPDATE memecoin_cases SET ledger = 'live', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
-            (json.dumps(snap), case_id),
+            "UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ? WHERE id = ?",
+            (json.dumps(live_snap), live),
         )
         calls = []
 
@@ -494,13 +527,17 @@ class MemecoinDeskTests(unittest.TestCase):
             calls.append(now)
             return {"fresh": False}
 
-        blocked = memecoin_desk.reserve_exit(case_id, "not-a-message", 50, None, prices, NOW)
+        blocked = memecoin_desk.reserve_exit(live, "not-a-message", 50, None, prices, NOW)
         self.assertEqual(blocked["reason"], "exit_unproven")
         self.assertEqual(calls, [])
-        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["remaining_raw"], 50)
+        self.assertEqual(memecoin_desk.view(live)["snapshot"]["remaining_raw"], 50)
+        self.assertEqual(db.query("SELECT ledger, ledger_provenance FROM memecoin_cases WHERE id = ?", (live,))[0]["ledger"], "live")
+        snap = memecoin_desk.view(case_id)["snapshot"]
         snap["fill"]["fixture"] = True
+        snap["entry_funding"]["source"] = "paper_harness"
+        snap["remaining_raw"] = 50
         db.execute(
-            "UPDATE memecoin_cases SET ledger = 'paper', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
+            "UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?",
             (json.dumps(snap), case_id),
         )
         mint = memecoin_desk.view(case_id)["mint"]

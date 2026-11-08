@@ -437,8 +437,9 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
     snap["entry_amount_is_a_fill"] = False
     snap["send"] = False
     snap["live_ready"] = False
-    snap["capital_ledger"] = "synthetic" if ledger == "synthetic" else "live"
-    snap["live_capital"] = ledger != "synthetic"
+    stored_ledger = ledger if ledger in {"synthetic", "paper"} else "live"
+    snap["capital_ledger"] = stored_ledger
+    snap["live_capital"] = stored_ledger == "live"
     if sized.get("ok") is True:
         snap["entry_amount_raw"] = sized["lamports"]
         snap["entry_intent_version"] = 1
@@ -479,7 +480,7 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
             return {"ok": False, "reason": "allocation", "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
         conn.execute(
             "UPDATE memecoin_cases SET stage = 'protected', snapshot_json = ?, ledger = ?, ledger_provenance = 'server', updated_at = ? WHERE id = ? AND stage = 'analyst_passed'",
-            (json.dumps(snap, sort_keys=True), "synthetic" if ledger == "synthetic" else "live", moment, row["id"]),
+            (json.dumps(snap, sort_keys=True), stored_ledger, moment, row["id"]),
         )
         _log(conn, row["id"], row["mint"], "executor", "pass", None, None, evidence, moment)
         return {"ok": True, "reason": None, "case_id": row["id"], "stage": "protected", "mint": row["mint"]}
@@ -520,9 +521,13 @@ def offer_fixture_route(case_id: str, tx_b64: str, *, amount_in: int, minimum_ou
 
 
 def harness_fill(case_id: str, receipt: dict) -> dict:
-    """Book one fixture fill. The receipt has to match the fixture route."""
+    """Book one fixture fill. Only a case created as paper can take this path."""
     row = _case(case_id)
-    if row is None or row["stage"] != "entry_ready":
+    if row is None:
+        return _kill(case_id, None, "executor", "stage", None)
+    if execution_mode(row) != "paper":
+        return _note(row, "executor", "paper_not_live")
+    if row["stage"] != "entry_ready":
         return _kill(case_id, None, "executor", "stage", None)
     snap = _snapshot(row)
     route = snap.get("route") if isinstance(snap.get("route"), dict) else {}
@@ -556,9 +561,7 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
     snap["live_ledger"] = False
     snap["peak_price_usd"] = snap["entry_price_usd"]
     snap["trail_armed"] = False
-    if execution_mode(row) not in {"live", "paper"}:
-        return _note(row, "executor", "paper_not_live")
-    return _advance(row, "filled", "executor", snap["fill"], snap, ledger="paper")
+    return _advance(row, "filled", "executor", snap["fill"], snap)
 
 
 def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None, now: float | None = None) -> dict:
@@ -2698,13 +2701,25 @@ def _ensure_conn(conn) -> None:
             CREATE TRIGGER IF NOT EXISTS {table}_provenance_update
             BEFORE UPDATE OF ledger, ledger_provenance, case_id ON {table}
             FOR EACH ROW
-            WHEN (OLD.ledger_provenance = 'server' AND (NEW.ledger_provenance IS NOT 'server' OR NEW.ledger IS NOT OLD.ledger OR NEW.case_id IS NOT OLD.case_id))
+            WHEN (OLD.ledger_provenance IS NOT NULL AND (NEW.ledger_provenance IS NOT OLD.ledger_provenance OR NEW.ledger IS NOT OLD.ledger OR NEW.case_id IS NOT OLD.case_id))
               OR (NEW.ledger_provenance IS NOT NULL AND NEW.ledger_provenance NOT IN ('server', 'legacy_default'))
             BEGIN
                 SELECT RAISE(ABORT, 'ledger_tamper');
             END
             """
         )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS memecoin_cases_lineage
+        BEFORE UPDATE OF ledger, ledger_provenance ON memecoin_cases
+        FOR EACH ROW
+        WHEN (OLD.ledger_provenance IS NOT NULL AND (NEW.ledger_provenance IS NOT OLD.ledger_provenance OR NEW.ledger IS NOT OLD.ledger))
+          OR (NEW.ledger_provenance IS NOT NULL AND NEW.ledger_provenance NOT IN ('server', 'legacy_default'))
+        BEGIN
+            SELECT RAISE(ABORT, 'ledger_tamper');
+        END
+        """
+    )
     _classify_ledgers(conn)
 
 
@@ -2722,7 +2737,7 @@ def _legacy_live_default(conn, table: str) -> bool:
 
 
 def _classify_ledgers(conn) -> None:
-    """Stamp legacy default-live rows once. Explicit names on a schema with no default stay server."""
+    """Stamp rows that never received server provenance. A named ledger without provenance stays quarantined."""
     global _LEGACY_LEDGER_DEFAULT
     tables = ("memecoin_cases", "memecoin_entry_receipts", "memecoin_exit_receipts", "memecoin_refunds")
     legacy = any(_legacy_live_default(conn, table) for table in tables)
@@ -2737,7 +2752,7 @@ def _classify_ledgers(conn) -> None:
             )
         else:
             conn.execute(
-                f"UPDATE {table} SET ledger_provenance = 'server' WHERE ledger_provenance IS NULL AND ledger IN ('live', 'synthetic', 'paper')"
+                f"UPDATE {table} SET ledger_provenance = 'legacy_default' WHERE ledger_provenance IS NULL AND ledger IS NOT NULL"
             )
     conn.execute(
         "INSERT INTO settings (key, value, updated_at) VALUES ('memecoin_ledger_migration', '13', ?) ON CONFLICT(key) DO UPDATE SET value = '13', updated_at = excluded.updated_at",

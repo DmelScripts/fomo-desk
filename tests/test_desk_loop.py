@@ -516,11 +516,11 @@ class DeskLoopTests(unittest.TestCase):
             "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, 'live', 'server')",
             ("exit-row-other", "other-case", "other", slot["context"], "0.01", 400_000),
         )
+        db.execute("DELETE FROM memecoin_cases WHERE id = ?", (swap_mint,))
         db.execute(
-            "UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ? WHERE id = ?",
-            (json.dumps(held, sort_keys=True), swap_mint),
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'filled', ?, ?, ?, 'live', 'server')",
+            (swap_mint, swap_mint, json.dumps(held, sort_keys=True), NOW, NOW),
         )
-        db.execute("UPDATE memecoin_cases SET ledger = 'live' WHERE id = ?", (swap_mint,))
         db.set_setting("memecoin_entry_halt", "1", "test")
         slot["mark"] = "1.20"
         seen.clear()
@@ -686,6 +686,28 @@ class DeskLoopTests(unittest.TestCase):
         intent = desk_loop._quote_intent(MINT, pool)
         self.assertEqual(intent["amount"], 599_899)
         self.assertEqual(intent["pool"], pool)
+        reserved_before = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]).get("reserved_usd")
+        for label in ("synthetic", "paper", "live", None):
+            body = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+            if label is None:
+                body.pop("capital_ledger", None)
+            else:
+                body["capital_ledger"] = label
+            db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
+            again = desk_loop._quote_intent(MINT, pool)
+            self.assertEqual(again["amount"], 599_899, label)
+            self.assertEqual(again["pool"], pool)
+            self.assertEqual(again.get("snapshot_mode_conflict"), label not in {None, "live"})
+        self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]).get("reserved_usd"), reserved_before)
+        synthetic_mint = solana_tx.b58encode(b"\x53" * 32)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'exit_intent', ?, ?, ?, 'synthetic', 'server')",
+            (synthetic_mint, synthetic_mint, json.dumps({"capital_ledger": "live", "reserved_usd": "8.00"}), NOW, NOW),
+        )
+        blocked = desk_loop._quote_intent(synthetic_mint, pool)
+        self.assertEqual(blocked["reason"], "synthetic_not_live")
+        self.assertNotIn("amount", blocked)
+        self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]).get("reserved_usd"), reserved_before)
         seen = []
 
         def read():
@@ -1024,9 +1046,70 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(db.query("SELECT ledger_provenance, cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'same-sig'")[0]["cost_basis_lamports"], 1)
         self.assertEqual(db.query("SELECT ledger_provenance FROM memecoin_entry_receipts WHERE signature = 'same-sig'")[0]["ledger_provenance"], "server")
 
+    def test_set_lineage_cannot_be_rewritten(self):
+        import db
+        import sqlite3
+        conn = db.connect()
+        conn.execute(
+            """
+            CREATE TABLE memecoin_cases (
+                id TEXT PRIMARY KEY, mint TEXT NOT NULL, stage TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                ledger TEXT, ledger_provenance TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE memecoin_entry_receipts (
+                signature TEXT PRIMARY KEY, case_id TEXT NOT NULL, message_sha256 TEXT NOT NULL,
+                slot INTEGER NOT NULL, qty INTEGER NOT NULL, cost_basis_lamports INTEGER NOT NULL,
+                network_fee_lamports INTEGER NOT NULL, dex_fee_lamports INTEGER NOT NULL,
+                fee_usd TEXT NOT NULL, failed INTEGER NOT NULL,
+                ledger TEXT, ledger_provenance TEXT
+            )
+            """
+        )
+        rows = (
+            ("live-row", "live", "server", 11),
+            ("paper-row", "paper", "server", 12),
+            ("synthetic-row", "synthetic", "server", 13),
+            ("unknown-row", "live", "mystery", 14),
+            ("legacy-row", "live", "legacy_default", 15),
+            ("omitted-row", "live", None, 16),
+        )
+        for signature, ledger, provenance, cost in rows:
+            conn.execute(
+                "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, 'case', 'old', 1, 1, ?, 1, 1, '0.01', 0, ?, ?)",
+                (signature, cost, ledger, provenance),
+            )
+        conn.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('scout-row', ?, 'scouted', '{}', ?, ?, NULL, NULL)",
+            (MINT, NOW, NOW),
+        )
+        conn.commit()
+        conn.close()
+        memecoin_desk.loss_totals()
+        omitted = db.query("SELECT ledger_provenance, cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'omitted-row'")[0]
+        self.assertEqual(omitted["ledger_provenance"], "legacy_default")
+        self.assertEqual(omitted["cost_basis_lamports"], 16)
+        self.assertIsNone(db.query("SELECT ledger_provenance FROM memecoin_cases WHERE id = 'scout-row'")[0]["ledger_provenance"])
+        for signature, ledger, provenance, cost in rows:
+            target = "paper" if ledger != "paper" else "live"
+            next_provenance = "legacy_default" if provenance == "server" else "server"
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE memecoin_entry_receipts SET ledger = ? WHERE signature = ?", (target, signature))
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = ? WHERE signature = ?", (next_provenance, signature))
+            self.assertEqual(db.query("SELECT cost_basis_lamports, ledger, ledger_provenance FROM memecoin_entry_receipts WHERE signature = ?", (signature,))[0]["cost_basis_lamports"], cost)
+        memecoin_desk.loss_totals()
+        self.assertEqual(db.query("SELECT SUM(cost_basis_lamports) AS total FROM memecoin_entry_receipts")[0]["total"], 11 + 12 + 13 + 14 + 15 + 16)
+        self.assertIsNone(memecoin_desk._live_entry_receipt("case"))
+
     def test_legacy_default_live_is_quarantined_and_the_hold_stays(self):
         import db
         import json
+        import sqlite3
         import threading
         from decimal import Decimal
         conn = db.connect()
@@ -1078,3 +1161,13 @@ class DeskLoopTests(unittest.TestCase):
             (solana_tx.b58encode(b"\x41" * 32), json.dumps({"reserved_usd": "4.00"}), NOW, NOW),
         )
         self.assertEqual(memecoin_desk._ledger_of(db.query("SELECT * FROM memecoin_cases WHERE id = 'new'")[0]), "live")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'old-fill'")
+        self.assertEqual(db.query("SELECT cost_basis_lamports, ledger_provenance FROM memecoin_entry_receipts WHERE signature = 'old-fill'")[0]["cost_basis_lamports"], 5)
+        self.assertEqual(db.query("SELECT ledger_provenance FROM memecoin_entry_receipts WHERE signature = 'old-fill'")[0]["ledger_provenance"], "legacy_default")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_entry_receipts SET ledger = 'paper' WHERE signature = 'old-fill'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_cases SET ledger = 'paper', ledger_provenance = 'server' WHERE id = 'old'")
+        self.assertEqual(db.query("SELECT cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'old-fill'")[0]["cost_basis_lamports"], 5)
+        self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'old'")[0]["snapshot_json"])["reserved_usd"], "8.00")
