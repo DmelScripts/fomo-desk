@@ -1459,11 +1459,15 @@ conn.close()
         chain = {
             "genesis": solana_inspect.MAINNET_GENESIS,
             "blockhash": solana_tx.b58encode(b"\x46" * 32),
+            "latest_blockhash": solana_tx.b58encode(b"\x48" * 32),
             "last_valid": 1_000_000,
+            "latest_last": 1_000_200,
             "height": 999_000,
             "malformed": False,
+            "valid": True,
             "publish_expiry": True,
             "expire_at": None,
+            "router": "metis",
             "side": "buy",
         }
         opened = memecoin_desk.scout({
@@ -1521,7 +1525,7 @@ conn.close()
                     if chain["side"] == "exit":
                         side = "exit"
                     tx, _declared, _estimate = message(side, amount if side == "exit" else 1_000_000, chain.get("message_blockhash") or chain["blockhash"])
-                    body = {"router": "metis", "inAmount": str(amount), "outAmount": "1", "transaction": None if chain.get("omit_tx") else tx}
+                    body = {"router": chain["router"], "inAmount": str(amount), "outAmount": "1", "transaction": None if chain.get("omit_tx") else tx}
                     if chain["publish_expiry"] and not chain["malformed"]:
                         body["lastValidBlockHeight"] = str(chain["last_valid"])
                     if chain["malformed"]:
@@ -1550,7 +1554,13 @@ conn.close()
             if method == "getGenesisHash":
                 return {"status": 200, "body": {"result": chain["genesis"]}}
             if method == "getLatestBlockhash":
-                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": {"blockhash": chain["blockhash"], "lastValidBlockHeight": chain["last_valid"]}}}}
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": {"blockhash": chain["latest_blockhash"], "lastValidBlockHeight": chain["latest_last"]}}}}
+            if method == "isBlockhashValid":
+                if chain["valid"] == "missing":
+                    return {"status": 200, "body": {"result": {}}}
+                if chain["valid"] == "malformed":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": "yes"}}}
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": request.get("blockhash") == chain["blockhash"] and chain["valid"] is True}}}
             if method == "getBlockHeight":
                 result = "soon" if chain["malformed"] else chain["height"]
                 return {"status": 200, "body": {"result": result}}
@@ -1589,7 +1599,7 @@ conn.close()
         chain["omit_tx"] = False
         chain["publish_expiry"] = False
         unpublished = desk_loop._screen_quote(transport, WHEN, mint, evidence)
-        self.assertEqual(unpublished["reserve_reason"], "provider_expiry_unpublished")
+        self.assertEqual(unpublished["reserve_reason"], "route_expiry_missing")
         self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("entry_inflight"))
         chain["publish_expiry"] = True
         chain["malformed"] = True
@@ -1606,29 +1616,61 @@ conn.close()
         chain["height"] = 999_000
         saved_hash = chain["blockhash"]
         chain["message_blockhash"] = solana_tx.b58encode(b"\x47" * 32)
-        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_mismatch")
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_invalid")
         chain.pop("message_blockhash")
+        chain["valid"] = False
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_invalid")
+        chain["valid"] = "malformed"
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_validity_malformed")
+        chain["valid"] = "missing"
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_validity_missing")
+        chain["valid"] = True
+        chain["router"] = "jupiterz"
+        chain["publish_expiry"] = False
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "route_expiry_missing")
+        chain["router"] = "metis"
+        chain["publish_expiry"] = True
         chain["expire_at"] = int(WHEN) - 10
         self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "quote_expired")
         chain["expire_at"] = None
         self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("entry_inflight"))
         booked = desk_loop.run_supervised(transport, WHEN, rounds=1)
         quote = next(item["quote"] for item in booked["discovery"]["screened"] if item.get("mint") == mint)
-        self.assertTrue(quote["quote_expiry_proven"], quote)
+        self.assertFalse(quote["quote_expiry_proven"], quote)
+        self.assertFalse(quote["price_freshness_proven"])
+        self.assertTrue(quote["inclusion_window_proven"], quote)
         self.assertTrue(quote["reserved"], quote)
+        self.assertTrue(quote["execution_eligible"], quote)
+        self.assertEqual(quote["operation"], "unimplemented")
+        self.assertFalse(quote["latest_blockhash_paired"])
+        self.assertEqual(quote["last_valid_provenance"], "jupiter_order")
         self.assertFalse(quote["block_height_missing"])
-        self.assertEqual(quote["quote_expiry_source"], "getLatestBlockhash.lastValidBlockHeight")
         self.assertIsNone(quote["internal_time_limit"])
         self.assertFalse(quote["send"])
         self.assertFalse(quote["sign"])
+        self.assertFalse(quote["execution"]["simulate"])
         flight = memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]
         self.assertEqual(flight["blockhash"], saved_hash)
+        self.assertNotEqual(flight["blockhash"], chain["latest_blockhash"])
         self.assertEqual(flight["last_valid_block_height"], 1_000_000)
+        self.assertEqual(flight["last_valid_provenance"], "jupiter_order")
         self.assertEqual(flight["block_height"], 999_000)
         self.assertLessEqual(flight["instruction_slippage_bps"], 50)
         self.assertIsNone(flight.get("resend"))
         reserved_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
         digest = flight["message_sha256"]
+        stripped = memecoin_desk.view(case_id)["snapshot"]
+        stripped["entry_inflight"].pop("last_valid_block_height")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(stripped), case_id))
+        legacy = desk_loop.execution_gate(case_id, transport, WHEN)
+        self.assertFalse(legacy["execution_eligible"])
+        self.assertEqual(legacy["reason"], "reservation_proof_missing")
+        self.assertEqual(legacy["operation"], "unimplemented")
+        self.assertFalse(legacy["rewritten"])
+        self.assertEqual(legacy["message_sha256"], digest)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        stripped["entry_inflight"]["last_valid_block_height"] = 1_000_000
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(stripped), case_id))
         chain["height"] = 999_100
         again = desk_loop._screen_quote(transport, WHEN + 5, mint, evidence)
         self.assertEqual(again["reason"], "intent_inflight", again)
@@ -1718,7 +1760,12 @@ conn.close()
         exited = desk_loop.run_supervised(transport, WHEN, rounds=1)
         self.assertTrue(exited.get("discovery"), exited)
         position = next(item for item in exited["discovery"]["positions"] if item.get("mint") == mint)
-        self.assertTrue(position["quote"]["quote_expiry_proven"], position)
+        self.assertFalse(position["quote"]["quote_expiry_proven"])
+        self.assertTrue(position["quote"]["inclusion_window_proven"], position)
+        self.assertTrue(position["execution"]["execution_eligible"], position)
+        self.assertEqual(position["execution"]["operation"], "unimplemented")
+        self.assertFalse(position["execution"]["sign"])
+        self.assertFalse(position["execution"]["send"])
         self.assertTrue(position["quote"]["reserved"], position)
         self.assertEqual(position["quote"]["pool"], pool)
         self.assertLessEqual(position["quote"]["requested_slippage_bps"], 50)

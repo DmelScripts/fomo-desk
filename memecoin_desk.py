@@ -627,7 +627,7 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         return _note(row, "executor", slip.get("reason") or "slippage_exceeds")
     chain = getattr(snapshot, "server_chain", None)
     if isinstance(chain, dict):
-        if chain.get("quote_expiry_proven") is not True or decoded.blockhash != chain.get("blockhash"):
+        if chain.get("bind_ok") is not True or decoded.blockhash != chain.get("blockhash"):
             reason = "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing")
 
             def refuse(conn):
@@ -641,8 +641,9 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
 
             return db.exclusive(refuse)
         clock = {
-            "quote_clock_proven": True,
-            "quote_expiry_proven": True,
+            "quote_clock_proven": False,
+            "quote_expiry_proven": False,
+            "inclusion_window_proven": chain.get("inclusion_window_proven") is True,
             "reason": None,
         }
     else:
@@ -704,8 +705,12 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         "snapshot_fetched_at": snapshot.fetched_at,
         "blockhash": decoded.blockhash,
         "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
+        "last_valid_provenance": None if not isinstance(chain, dict) else chain.get("last_valid_provenance"),
+        "router": None if not isinstance(chain, dict) else chain.get("router"),
         "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),
         "expire_at": None if not isinstance(chain, dict) else chain.get("expire_at"),
+        "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True,
+        "price_freshness_proven": False,
         "quote_observed_at": None if not isinstance(chain, dict) else chain.get("observed_at"),
         "quote_expiry_source": None if not isinstance(chain, dict) else chain.get("quote_expiry_source"),
         "provider_quote_expiry_published": isinstance(chain, dict) and chain.get("provider_quote_expiry_published") is True,
@@ -1027,7 +1032,7 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             return {"ok": False, "reason": "stage", "case_id": row["id"]}
         fresh = json.loads(current["snapshot_json"])
         chain = getattr(snapshot, "server_chain", None)
-        if isinstance(chain, dict) and (chain.get("quote_expiry_proven") is not True or decoded.blockhash != chain.get("blockhash")):
+        if isinstance(chain, dict) and (chain.get("bind_ok") is not True or decoded.blockhash != chain.get("blockhash")):
             if fresh.get("inflight"):
                 return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
             return {"ok": False, "reason": "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing"), "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False}
@@ -1058,8 +1063,12 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "snapshot_fetched_at": snapshot.fetched_at,
             "blockhash": decoded.blockhash,
             "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
+            "last_valid_provenance": None if not isinstance(chain, dict) else chain.get("last_valid_provenance"),
+            "router": None if not isinstance(chain, dict) else chain.get("router"),
             "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),
             "expire_at": None if not isinstance(chain, dict) else chain.get("expire_at"),
+            "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True,
+            "price_freshness_proven": False,
             "quote_observed_at": None if not isinstance(chain, dict) else chain.get("observed_at"),
             "quote_expiry_source": None if not isinstance(chain, dict) else chain.get("quote_expiry_source"),
             "provider_quote_expiry_published": isinstance(chain, dict) and chain.get("provider_quote_expiry_published") is True,
@@ -1068,8 +1077,10 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "dex_fee_remeasured": False,
             "quote_expiry_rule": "getBlockHeight_le_lastValidBlockHeight" if isinstance(chain, dict) else "slot_distance_guard_not_block_height",
             "slot_distance_is_blockhash_proof": False,
-            "quote_clock_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
-            "quote_expiry_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
+            "quote_clock_proven": False,
+            "quote_expiry_proven": False,
+            "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True,
+            "price_freshness_proven": False,
             "status": "reserved",
             "signature": None,
         }
@@ -1087,8 +1098,10 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest,
             "instruction_slippage_bps": parsed.get("slippage_bps"), "quoted_out_amount": parsed.get("quoted_out_amount"),
             "min_out": route["min_out"], "amm_est_out": est,
-            "quote_clock_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
-            "quote_expiry_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
+            "quote_clock_proven": False,
+            "quote_expiry_proven": False,
+            "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True,
+            "price_freshness_proven": False,
             "blockhash": decoded.blockhash,
             "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
             "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),

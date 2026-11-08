@@ -303,142 +303,201 @@ def run_once(mint: str, transport, now: float) -> dict:
     }
 
 
-def read_chain_window(transport, now: float) -> dict:
-    """Mainnet genesis, getLatestBlockhash, and getBlockHeight. A slot is not a height.
+_AGGREGATOR_ROUTERS = {"metis", "dflow", "okx"}
+_RFQ_ROUTERS = {"jupiterz"}
 
-    No wall-clock TTL is applied. That would be a new limit, and it is not an
-    owner-approved policy. Expiry is lastValidBlockHeight against getBlockHeight.
-    Jupiter expireAt is used only when that response publishes it.
+
+def _rpc_result(response):
+    body = response.get("body") if isinstance(response, dict) else None
+    if not isinstance(body, dict):
+        return None
+    return body.get("result")
+
+
+def read_message_validity(transport, blockhash: str, now: float) -> dict:
+    """Confirm the exact message hash. The latest blockhash is not a substitute.
+
+    isBlockhashValid and getBlockHeight use commitment confirmed. getLatestBlockhash
+    is recorded beside them and is not paired with this message unless the hashes match.
+    No owner wall-clock TTL is applied.
     """
     import solana_inspect
     import solana_tx
     refused = {
-        "ok": False, "quote_expiry_proven": False, "block_height_missing": True,
+        "ok": False, "quote_expiry_proven": False, "price_freshness_proven": False,
+        "inclusion_window_proven": False, "block_height_missing": True,
         "slot_is_block_height": False, "internal_time_limit": None,
-        "internal_time_limit_is_owner_approved": False, "quote_expiry_source": None,
+        "internal_time_limit_is_owner_approved": False,
     }
-    if transport is None or isinstance(now, bool) or not isinstance(now, (int, float)):
-        return refused | {"reason": "block_height_missing"}
-    try:
-        genesis = transport({"kind": "rpc", "method": "getGenesisHash"})
-        latest = transport({"kind": "rpc", "method": "getLatestBlockhash"})
-        height = transport({"kind": "rpc", "method": "getBlockHeight"})
-    except Exception:
-        return refused | {"reason": "block_height_missing"}
-    genesis_body = genesis.get("body") if isinstance(genesis, dict) else None
-    genesis_hash = genesis_body.get("result") if isinstance(genesis_body, dict) else None
-    if genesis_hash != solana_inspect.MAINNET_GENESIS:
-        return refused | {"reason": "genesis", "block_height_missing": True}
-    latest_body = latest.get("body") if isinstance(latest, dict) else None
-    latest_result = latest_body.get("result") if isinstance(latest_body, dict) else None
-    value = latest_result.get("value") if isinstance(latest_result, dict) else None
-    blockhash = value.get("blockhash") if isinstance(value, dict) else None
-    last_valid = value.get("lastValidBlockHeight") if isinstance(value, dict) else None
-    height_body = height.get("body") if isinstance(height, dict) else None
-    current = height_body.get("result") if isinstance(height_body, dict) else None
-    if not isinstance(blockhash, str) or blockhash == "":
+    if transport is None or not isinstance(blockhash, str) or blockhash == "":
         return refused | {"reason": "blockhash_missing"}
     try:
-        raw_hash = solana_tx.b58decode(blockhash)
+        raw = solana_tx.b58decode(blockhash)
     except Exception:
         return refused | {"reason": "blockhash_malformed"}
-    if len(raw_hash) != 32:
+    if len(raw) != 32:
         return refused | {"reason": "blockhash_malformed"}
-    if isinstance(last_valid, bool) or not isinstance(last_valid, int) or last_valid <= 0:
-        return refused | {"reason": "block_height_malformed"}
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return refused | {"reason": "block_clock_future"}
+    try:
+        genesis = transport({"kind": "rpc", "method": "getGenesisHash"})
+        valid = transport({"kind": "rpc", "method": "isBlockhashValid", "blockhash": blockhash})
+        height = transport({"kind": "rpc", "method": "getBlockHeight"})
+        latest = transport({"kind": "rpc", "method": "getLatestBlockhash"})
+    except Exception:
+        return refused | {"reason": "blockhash_validity_missing"}
+    if _rpc_result(genesis) != solana_inspect.MAINNET_GENESIS:
+        return refused | {"reason": "genesis"}
+    validity = _rpc_result(valid)
+    if not isinstance(validity, dict) or "value" not in validity:
+        return refused | {"reason": "blockhash_validity_missing"}
+    bit = validity.get("value")
+    if not isinstance(bit, bool):
+        return refused | {"reason": "blockhash_validity_malformed"}
+    current = _rpc_result(height)
     if isinstance(current, bool) or not isinstance(current, int) or current <= 0:
-        return refused | {"reason": "block_height_malformed", "block_height_missing": True}
-    if current > last_valid:
-        return refused | {
-            "reason": "blockhash_expired", "block_height_missing": False,
-            "block_height": current, "last_valid_block_height": last_valid, "blockhash": blockhash,
-            "genesis": genesis_hash, "observed_at": float(now),
-        }
-    return {
-        "ok": True, "reason": None, "quote_expiry_proven": False,
-        "block_height_missing": False, "slot_is_block_height": False,
-        "internal_time_limit": None, "internal_time_limit_is_owner_approved": False,
-        "quote_expiry_source": "getLatestBlockhash.lastValidBlockHeight",
-        "genesis": genesis_hash, "blockhash": blockhash,
-        "last_valid_block_height": last_valid, "block_height": current,
-        "observed_at": float(now), "provider_quote_expiry_published": False,
+        return refused | {"reason": "block_height_malformed", "blockhash_valid": bit}
+    latest_result = _rpc_result(latest)
+    latest_value = latest_result.get("value") if isinstance(latest_result, dict) else None
+    latest_hash = latest_value.get("blockhash") if isinstance(latest_value, dict) else None
+    latest_last = latest_value.get("lastValidBlockHeight") if isinstance(latest_value, dict) else None
+    observed = {
+        "block_height": current, "blockhash_valid": bit, "latest_blockhash": latest_hash,
+        "latest_last_valid_block_height": latest_last if isinstance(latest_last, int) and not isinstance(latest_last, bool) else None,
+        "latest_blockhash_paired": latest_hash == blockhash,
+        "latest_blockhash_provenance": "rpc_getLatestBlockhash",
+        "blockhash_validity_source": "isBlockhashValid",
+        "observed_at": float(now), "genesis": solana_inspect.MAINNET_GENESIS,
     }
+    if bit is not True:
+        return refused | observed | {"reason": "blockhash_invalid", "block_height_missing": False}
+    return refused | observed | {"ok": True, "reason": None, "block_height_missing": False}
 
 
 def _bind_provider_window(window: dict, order: dict, message_blockhash: str, now: float) -> dict:
-    """The reserved message, Jupiter's published expiry, and the RPC height have to be one window."""
+    """Provider fields stay the pair for this order. A newer RPC hash is not that pair."""
+    blank = {"quote_expiry_proven": False, "price_freshness_proven": False, "inclusion_window_proven": False}
     if window.get("ok") is not True:
-        return window
+        return window | blank
     if not isinstance(order, dict):
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "provider_expiry_unpublished", "provider_quote_expiry_published": False}
+        return window | blank | {"ok": False, "reason": "route_expiry_missing", "provider_quote_expiry_published": False}
     if order.get("provider_expiry_malformed") is True:
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "block_height_malformed", "provider_quote_expiry_published": False}
+        return window | blank | {"ok": False, "reason": "block_height_malformed", "provider_quote_expiry_published": False}
     if not isinstance(order.get("transaction_b64"), str) or order.get("transaction_b64") == "":
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "provider_transaction_unpublished", "provider_quote_expiry_published": order.get("provider_expiry_field") is not None, "reserved": False}
-    if message_blockhash != window.get("blockhash"):
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "blockhash_mismatch", "provider_quote_expiry_published": order.get("provider_expiry_field") is not None}
+        return window | blank | {"ok": False, "reason": "provider_transaction_unpublished", "provider_quote_expiry_published": order.get("provider_expiry_field") is not None}
+    if not isinstance(message_blockhash, str) or message_blockhash == "":
+        return window | blank | {"ok": False, "reason": "blockhash_malformed"}
+    router = order.get("router")
     provider_height = order.get("last_valid_block_height")
     expire_at = order.get("expire_at")
-    if provider_height is None and expire_at is None:
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "provider_expiry_unpublished", "provider_quote_expiry_published": False, "reserved": False}
-    if provider_height is not None and provider_height != window.get("last_valid_block_height"):
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "last_valid_mismatch", "provider_quote_expiry_published": True}
-    if isinstance(now, bool) or not isinstance(now, (int, float)) or float(now) < float(window.get("observed_at") or 0):
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "block_clock_future"}
-    if expire_at is not None and float(now) > float(expire_at):
-        return window | {"ok": False, "quote_expiry_proven": False, "reason": "quote_expired", "provider_quote_expiry_published": True, "expire_at": expire_at}
+    if router in _AGGREGATOR_ROUTERS:
+        if provider_height is None:
+            return window | blank | {"ok": False, "reason": "route_expiry_missing", "router": router, "provider_quote_expiry_published": False}
+    elif router in _RFQ_ROUTERS:
+        if expire_at is None:
+            return window | blank | {"ok": False, "reason": "route_expiry_missing", "router": router, "provider_quote_expiry_published": False}
+    else:
+        return window | blank | {"ok": False, "reason": "route_expiry_unspecified", "router": router if isinstance(router, str) else None}
+    if isinstance(expire_at, int) and not isinstance(expire_at, bool) and float(now) > float(expire_at):
+        return window | blank | {"ok": False, "reason": "quote_expired", "router": router, "expire_at": expire_at, "provider_quote_expiry_published": True, "expire_at_enforced": True}
+    if isinstance(provider_height, int) and not isinstance(provider_height, bool) and window.get("block_height") > provider_height:
+        return window | blank | {
+            "ok": False, "reason": "blockhash_expired", "router": router,
+            "last_valid_block_height": provider_height, "last_valid_provenance": "jupiter_order",
+            "provider_quote_expiry_published": True, "block_height_missing": False,
+        }
+    inclusion = isinstance(provider_height, int) and not isinstance(provider_height, bool) and window.get("block_height") <= provider_height
     return window | {
-        "ok": True, "reason": None, "quote_expiry_proven": True,
-        "provider_quote_expiry_published": order.get("provider_expiry_field") is not None,
+        "ok": True, "bind_ok": True, "reason": None, "router": router,
+        "blockhash": message_blockhash, "blockhash_provenance": "jupiter_order.transaction",
+        "last_valid_block_height": provider_height, "last_valid_provenance": "jupiter_order" if provider_height is not None else None,
+        "expire_at": expire_at, "expire_at_enforced": expire_at is not None,
+        "request_id": order.get("request_id"),
         "provider_expiry_field": order.get("provider_expiry_field"),
-        "expire_at": expire_at, "request_id": order.get("request_id"), "router": order.get("router"),
-        "quote_expiry_source": "expireAt" if order.get("provider_expiry_field") == "expireAt" else "getLatestBlockhash.lastValidBlockHeight",
+        "provider_quote_expiry_published": order.get("provider_expiry_field") is not None,
+        "inclusion_window_proven": inclusion, "price_freshness_proven": False, "quote_expiry_proven": False,
+        "quote_expiry_source": None,
+        "inclusion_source": "jupiter_order.lastValidBlockHeight+getBlockHeight+isBlockhashValid" if inclusion else None,
+    }
+
+
+def execution_gate(case_id: str, transport, now: float) -> dict:
+    """Unsigned eligibility for one stored reservation. Signing and sending are not implemented.
+
+    A missing or invalid proof refuses a future operation and leaves the inflight
+    message and the hold where they are. A known signature is kept for reconciliation.
+    """
+    import json
+    import memecoin_desk
+    base = {
+        "execution_eligible": False, "sign": False, "send": False, "simulate": False,
+        "operation": "unimplemented", "price_freshness_proven": False, "quote_expiry_proven": False,
+        "inclusion_window_proven": False, "expire_at_enforced": False, "holds": True,
+        "resend": False, "rewritten": False, "live_ready": False, "internal_time_limit": None,
+    }
+    row = memecoin_desk._case(case_id)
+    if row is None:
+        return base | {"reason": "stage", "case_id": case_id}
+    snap = memecoin_desk._snapshot(row)
+    key = "entry_inflight" if isinstance(snap.get("entry_inflight"), dict) else ("inflight" if isinstance(snap.get("inflight"), dict) else None)
+    flight = snap.get(key) if key is not None else None
+    if not isinstance(flight, dict):
+        return base | {"reason": "not_reserved", "case_id": case_id}
+    digest = flight.get("message_sha256")
+    signature = flight.get("signature") if isinstance(flight.get("signature"), str) else None
+    identity = {"case_id": case_id, "message_sha256": digest, "signature": signature, "pool": flight.get("pool"), "intent_id": flight.get("intent_id")}
+    router = flight.get("router")
+    stored_hash = flight.get("blockhash")
+    stored_last = flight.get("last_valid_block_height")
+    expire_at = flight.get("expire_at")
+    proof_missing = (
+        not isinstance(stored_hash, str) or stored_hash == ""
+        or router not in _AGGREGATOR_ROUTERS | _RFQ_ROUTERS
+        or (router in _AGGREGATOR_ROUTERS and (isinstance(stored_last, bool) or not isinstance(stored_last, int) or stored_last <= 0))
+        or (router in _RFQ_ROUTERS and (isinstance(expire_at, bool) or not isinstance(expire_at, int) or expire_at <= 0))
+    )
+    if proof_missing:
+        return base | identity | {"reason": "reservation_proof_missing"}
+    if key == "inflight":
+        intent = memecoin_desk._matching_intent(case_id)
+        if intent is None or intent["pool"] != flight.get("pool") or (flight.get("intent_id") not in (None, intent["id"])):
+            return base | identity | {"reason": "intent_unbound"}
+    validity = read_message_validity(transport, stored_hash, now)
+    if validity.get("ok") is not True:
+        return base | identity | {"reason": validity.get("reason") or "blockhash_validity_missing", "blockhash_valid": validity.get("blockhash_valid")}
+    expired = isinstance(stored_last, int) and not isinstance(stored_last, bool) and validity.get("block_height") > stored_last
+    quote_past = isinstance(expire_at, int) and not isinstance(expire_at, bool) and isinstance(now, (int, float)) and not isinstance(now, bool) and float(now) > float(expire_at)
+    if expired or quote_past:
+        flight["blockhash_expired"] = True
+        flight["resend"] = False
+        snap[key] = flight
+
+        def mark(conn):
+            conn.execute(
+                "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(snap, sort_keys=True), float(now), case_id),
+            )
+            return base | identity | {
+                "reason": "quote_expired" if quote_past and not expired else "blockhash_expired",
+                "reserved_usd": snap.get("reserved_usd"), "blockhash": stored_hash,
+            }
+
+        import db
+        return db.exclusive(mark)
+    inclusion = router in _AGGREGATOR_ROUTERS and validity.get("block_height") <= stored_last
+    return base | identity | {
+        "execution_eligible": True, "reason": None, "blockhash": stored_hash,
+        "last_valid_block_height": stored_last, "last_valid_provenance": flight.get("last_valid_provenance"),
+        "block_height": validity.get("block_height"), "latest_blockhash": validity.get("latest_blockhash"),
+        "latest_blockhash_paired": validity.get("latest_blockhash_paired") is True,
+        "inclusion_window_proven": inclusion, "expire_at_enforced": isinstance(expire_at, int) and not isinstance(expire_at, bool),
+        "blockhash_validity_source": "isBlockhashValid",
     }
 
 
 def recheck_bound(case_id: str, transport, now: float) -> dict:
-    """Read getBlockHeight again. Expiry does not clear a hold or rewrite the message."""
-    import memecoin_desk
-    row = memecoin_desk._case(case_id)
-    if row is None:
-        return {"ok": False, "reason": "stage", "holds": True, "resend": False}
-    snap = memecoin_desk._snapshot(row)
-    flight = snap.get("entry_inflight") if isinstance(snap.get("entry_inflight"), dict) else snap.get("inflight")
-    if not isinstance(flight, dict):
-        return {"ok": False, "reason": "not_reserved", "holds": True, "resend": False}
-    digest = flight.get("message_sha256")
-    window = read_chain_window(transport, now)
-    if window.get("block_height_missing") is True or window.get("reason") in {"genesis", "block_height_malformed", "blockhash_malformed", "blockhash_missing"}:
-        return {"ok": False, "reason": window.get("reason") or "block_height_missing", "holds": True, "resend": False, "message_sha256": digest, "rewritten": False}
-    stored_last = flight.get("last_valid_block_height")
-    stored_hash = flight.get("blockhash")
-    if window.get("blockhash") != stored_hash and window.get("reason") != "blockhash_expired":
-        pass
-    expired = (
-        window.get("reason") == "blockhash_expired"
-        or (isinstance(stored_last, int) and not isinstance(stored_last, bool) and isinstance(window.get("block_height"), int) and window["block_height"] > stored_last)
-        or (isinstance(flight.get("expire_at"), int) and not isinstance(flight.get("expire_at"), bool) and isinstance(now, (int, float)) and not isinstance(now, bool) and float(now) > float(flight["expire_at"]))
-    )
-    ahead = isinstance(flight.get("block_height"), int) and isinstance(window.get("block_height"), int) and flight["block_height"] > window["block_height"] and window.get("reason") != "blockhash_expired"
-    if ahead and not expired:
-        return {"ok": False, "reason": "block_height_ahead", "holds": True, "resend": False, "message_sha256": digest, "rewritten": False}
-    if not expired:
-        return {"ok": True, "reason": None, "holds": True, "resend": False, "message_sha256": digest, "rewritten": False, "block_height": window.get("block_height")}
-    flight["blockhash_expired"] = True
-    flight["resend"] = False
-    key = "entry_inflight" if isinstance(snap.get("entry_inflight"), dict) else "inflight"
-    snap[key] = flight
-
-    def work(conn):
-        import db
-        conn.execute(
-            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
-            (__import__("json").dumps(snap, sort_keys=True), float(now) if isinstance(now, (int, float)) and not isinstance(now, bool) else 0, case_id),
-        )
-        return {"ok": False, "reason": "blockhash_expired", "holds": True, "resend": False, "message_sha256": digest, "rewritten": False, "reserved_usd": snap.get("reserved_usd")}
-
-    import db
-    return db.exclusive(work)
+    """The supervision recheck. It does not replace the reserved message."""
+    return execution_gate(case_id, transport, now)
 
 
 def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthetic: bool = False) -> dict:
@@ -546,16 +605,22 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthe
     }
     if instruction.get("instruction_matches_request") is not True:
         return result
-    window = read_chain_window(transport, now)
     message = order.get("transaction_b64") if isinstance(order, dict) else None
     message_hash = None
+    decode_failed = False
     if isinstance(message, str) and message != "":
         try:
             import solana_tx
             decoded = solana_tx.decode_transaction(__import__("base64").b64decode(message, validate=True))
             message_hash = decoded.blockhash
         except Exception:
-            message_hash = ""
+            decode_failed = True
+    if decode_failed:
+        window = {"ok": False, "reason": "blockhash_malformed", "quote_expiry_proven": False, "price_freshness_proven": False, "inclusion_window_proven": False, "block_height_missing": True}
+    elif isinstance(message_hash, str) and message_hash != "":
+        window = read_message_validity(transport, message_hash, now)
+    else:
+        window = {"ok": False, "reason": "provider_transaction_unpublished", "quote_expiry_proven": False, "price_freshness_proven": False, "inclusion_window_proven": False, "block_height_missing": True}
     bound = _bind_provider_window(window, order if isinstance(order, dict) else {}, message_hash or "", now)
     if bound.get("ok") is not True:
         return result | {
@@ -572,20 +637,29 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthe
         reserved = memecoin_desk.reserve_exit(intent["case_id"], message, intent["amount"], fetched["snapshot"], transport, now)
     else:
         reserved = memecoin_desk.reserve_entry(intent["case_id"], message, fetched["snapshot"], transport, now)
+    gate = execution_gate(intent["case_id"], transport, now) if reserved.get("ok") is True else {"execution_eligible": False, "operation": "unimplemented", "sign": False, "send": False, "simulate": False}
     return result | {
         "reserved": reserved.get("ok") is True,
         "reserve_reason": reserved.get("reason"),
-        "quote_expiry_proven": reserved.get("quote_expiry_proven") is True,
-        "quote_clock_proven": reserved.get("quote_clock_proven") is True,
+        "quote_expiry_proven": False,
+        "price_freshness_proven": False,
+        "inclusion_window_proven": bound.get("inclusion_window_proven") is True and reserved.get("ok") is True,
+        "expire_at_enforced": bound.get("expire_at_enforced") is True and reserved.get("ok") is True,
+        "quote_clock_proven": False,
         "block_height_missing": False,
         "blockhash": bound.get("blockhash"),
         "last_valid_block_height": bound.get("last_valid_block_height"),
+        "last_valid_provenance": bound.get("last_valid_provenance"),
+        "latest_blockhash_paired": bound.get("latest_blockhash_paired") is True,
         "block_height": bound.get("block_height"),
         "provider_quote_expiry_published": bound.get("provider_quote_expiry_published") is True,
         "provider_expiry_field": bound.get("provider_expiry_field"),
-        "quote_expiry_source": bound.get("quote_expiry_source"),
+        "inclusion_source": bound.get("inclusion_source"),
         "message_sha256": reserved.get("message_sha256"),
         "idempotent": reserved.get("idempotent") is True,
+        "execution_eligible": gate.get("execution_eligible") is True,
+        "execution": gate,
+        "operation": "unimplemented",
         "resend": False,
     }
 
@@ -802,8 +876,8 @@ def _supervise_open(transport, now: float) -> list:
             found.append({"mint": row["mint"], "reason": "snapshot", "jupiter_called": False, "supervised": True})
             continue
         if isinstance(snap.get("inflight"), dict):
-            checked = recheck_bound(row["id"], transport, now)
-            found.append({"mint": row["mint"], "reason": "exit_inflight", "jupiter_called": False, "supervised": True, "resend": False, "holds": True, "rewritten": False, "recheck": checked.get("reason"), "message_sha256": snap["inflight"].get("message_sha256")})
+            checked = execution_gate(row["id"], transport, now)
+            found.append({"mint": row["mint"], "reason": "exit_inflight", "jupiter_called": False, "supervised": True, "resend": False, "holds": True, "rewritten": False, "recheck": checked.get("reason"), "execution": checked, "message_sha256": snap["inflight"].get("message_sha256")})
             continue
         balance = memecoin_desk.receipt_remaining(row["id"])
         if balance.get("remaining") == 0:
@@ -838,6 +912,7 @@ def _supervise_open(transport, now: float) -> list:
             "jupiter_called": quote.get("jupiter_called") is True,
             "supervised": True,
             "side": quote.get("side"),
+            "execution": quote.get("execution") if isinstance(quote.get("execution"), dict) else execution_gate(row["id"], transport, now),
         })
     return found
 
@@ -926,7 +1001,7 @@ def public_reader(request: dict) -> dict:
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
     method = request.get("method")
-    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash", "getLatestBlockhash", "getBlockHeight"}:
+    if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash", "getLatestBlockhash", "getBlockHeight", "isBlockhashValid"}:
         if method == "getAccountInfo":
             params = [request.get("mint"), {"encoding": "base64", "commitment": "confirmed"}]
         elif method == "getMultipleAccounts":
@@ -951,6 +1026,11 @@ def public_reader(request: dict) -> dict:
             params = [{"commitment": "confirmed"}]
         elif method == "getBlockHeight":
             params = [{"commitment": "confirmed"}]
+        elif method == "isBlockhashValid":
+            blockhash = request.get("blockhash")
+            if not isinstance(blockhash, str) or blockhash == "":
+                raise RuntimeError("method_refused")
+            params = [blockhash, {"commitment": "confirmed"}]
         else:
             raise RuntimeError("method_refused")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
