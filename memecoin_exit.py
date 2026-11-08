@@ -430,6 +430,71 @@ def rent_ledger(decoded, meta, mint: str) -> dict:
     }
 
 
+def match_failed_refund(recorded: dict, signature: str, pulled: dict) -> dict:
+    """A reverted close can charge a fee. Attribute that fee only when the message is this account's close."""
+    silent = {"attributable": False, "refunded": False, "holds": True, "resend": False, "send": False, "live_ready": False}
+    if not isinstance(pulled, dict):
+        return silent | {"reason": "receipt_unknown"}
+    reason = pulled.get("reason")
+    if reason != "receipt_failed":
+        return silent | {"reason": reason or "receipt_unknown"}
+    transaction = pulled.get("transaction")
+    meta = pulled.get("meta") if isinstance(pulled.get("meta"), dict) else None
+    if not isinstance(transaction, str) or meta is None:
+        return silent | {"reason": "receipt_unknown"}
+    if not isinstance(recorded, dict) or recorded.get("preexisting") is True:
+        return silent | {"reason": "preexisting_account" if isinstance(recorded, dict) and recorded.get("preexisting") is True else "deposit_unobserved"}
+    account = recorded.get("account")
+    rent = recorded.get("rent_lamports")
+    if not isinstance(account, str) or isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0:
+        return silent | {"reason": "deposit_unobserved"}
+    try:
+        landed = solana_tx.first_signature(transaction)
+        decoded = solana_tx.decode_transaction(base64.b64decode(transaction, validate=True))
+    except Exception:
+        return silent | {"reason": "receipt_unsigned"}
+    if landed != signature:
+        return silent | {"reason": "signature_mismatch"}
+    _created, closed = _account_actions(decoded)
+    if closed.get(account) != phantom_transport.REQUIRED_WALLET:
+        return silent | {"reason": "refund_not_to_wallet"}
+    fee = meta.get("fee")
+    if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
+        return silent | {"reason": "network_fee_missing"}
+    deltas = _account_deltas(decoded, meta)
+    ordinary = True
+    if deltas is None:
+        ordinary = False
+    else:
+        for item in deltas:
+            if item["account"] == phantom_transport.REQUIRED_WALLET:
+                if item["delta"] != -fee:
+                    ordinary = False
+            elif item["account"] == account:
+                if item["pre"] != rent or item["post"] != rent:
+                    ordinary = False
+            elif item["delta"] != 0:
+                ordinary = False
+    return {
+        "attributable": True,
+        "ok": False,
+        "ordinary": ordinary,
+        "anomaly": not ordinary,
+        "refunded": False,
+        "holds": True,
+        "resend": False,
+        "reason": "receipt_failed",
+        "account": account,
+        "rent_lamports": rent,
+        "network_fee_lamports": fee,
+        "wallet": phantom_transport.REQUIRED_WALLET,
+        "slot": pulled.get("slot") if isinstance(pulled.get("slot"), int) else 0,
+        "signature": signature,
+        "send": False,
+        "live_ready": False,
+    }
+
+
 def match_refund(recorded: dict, signature: str, pulled: dict) -> dict:
     """A refund is the recorded account reaching zero and that exact lamport count arriving in the wallet."""
     refused = {"ok": False, "holds": True, "resend": False, "refunded": False, "live_ready": False, "send": False}

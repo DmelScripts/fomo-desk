@@ -983,8 +983,16 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
         return _hold(row, "preexisting_account" if isinstance(mint, dict) and mint.get("preexisting") is True else "deposit_unobserved", status="held")
     if mint.get("bot_funded") is not True:
         return _hold(row, "deposit_unobserved", status="held")
+    duplicate = _refund_duplicate(signature)
+    if duplicate is not None:
+        return duplicate
     pulled = desk_loop.read_transaction(signature)
     moment = time.time() if now is None else now
+    if pulled.get("reason") == "receipt_failed":
+        failed = memecoin_exit.match_failed_refund(mint, signature, pulled)
+        if failed.get("attributable") is not True:
+            return _hold(row, failed.get("reason") or "receipt_unknown", status="unknown" if failed.get("reason") in {"receipt_unknown", "receipt_unconfirmed"} else "held")
+        return _record_refund(row, failed, released=False, moment=moment)
     proven = memecoin_exit.match_refund(mint, signature, pulled)
     if proven.get("ok") is not True:
         return _hold(row, proven.get("reason") or "refund_balance", status="unknown" if proven.get("reason") in {"receipt_unknown", "receipt_unconfirmed"} else "held")
@@ -1022,8 +1030,11 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
             "trading_pnl_unchanged": True,
         })
         fresh["live_events"] = events
+        breach = refund_fee is not None and refund_fee > MAX_FEE
+        if breach:
+            _halt_entries(conn, moment)
         conn.execute(
-            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released) VALUES (?, ?, ?, ?, ?, 1)",
             (signature, row["id"], rent, 0 if not isinstance(fee_lamports, int) else fee_lamports, "unpriced" if refund_fee is None else format(refund_fee, "f")),
         )
         conn.execute(
@@ -1034,10 +1045,10 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
             "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
             (json.dumps(fresh, sort_keys=True), moment, row["id"]),
         )
-        _log(conn, row["id"], row["mint"], "risk", "pass", None, "deposit_refund", {"account": account, "rent_lamports": rent, "signature": signature, "wallet": proven["wallet"]}, moment)
+        _log(conn, row["id"], row["mint"], "risk", "pass" if not breach else "kill", None if not breach else "fee_policy_breach", "deposit_refund", {"account": account, "rent_lamports": rent, "signature": signature, "network_fee_lamports": fee_lamports, "wallet": proven["wallet"]}, moment)
         return {
-            "ok": True,
-            "reason": None,
+            "ok": not breach,
+            "reason": "fee_policy_breach" if breach else None,
             "recorded": True,
             "refunded": True,
             "holds": False,
@@ -1052,10 +1063,116 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
             "wallet": proven["wallet"],
             "network_fee_lamports": proven.get("network_fee_lamports"),
             "refund_fee_usd": None if refund_fee is None else format(refund_fee, "f"),
+            "entry_halt": breach,
+            "fee_policy_breach": breach,
             "realized_pnl": fresh.get("realized_pnl"),
             "pnl_live": fresh.get("pnl_live") is True,
             "pnl_source": fresh.get("pnl_source"),
             "entry_funding_proven": (fresh.get("entry_funding") or {}).get("source") == "entry_receipt" if isinstance(fresh.get("entry_funding"), dict) else False,
+            "send": False,
+            "live_ready": False,
+        }
+
+    return db.exclusive(work)
+
+
+def _refund_duplicate(signature: str) -> dict | None:
+    _ensure()
+    try:
+        rows = db.query("SELECT case_id, network_fee_lamports, fee_usd, released FROM memecoin_refunds WHERE signature = ?", (signature,))
+    except Exception:
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    case = _case(row["case_id"])
+    snap = {} if case is None else _snapshot(case)
+    released = row["released"] == 1
+    return {
+        "ok": False,
+        "reason": "deposit_duplicate",
+        "already_recorded": True,
+        "recorded": False,
+        "refunded": released,
+        "holds": not released and snap.get("deposit_refund_proven") is not True,
+        "resend": False,
+        "network_fee_lamports": row["network_fee_lamports"],
+        "refund_fee_usd": row["fee_usd"],
+        "realized_pnl": snap.get("realized_pnl"),
+        "pnl_live": snap.get("pnl_live") is True,
+        "reserved_usd": snap.get("reserved_usd"),
+        "case_id": row["case_id"],
+        "stage": None if case is None else case["stage"],
+        "status": "duplicate",
+        "send": False,
+        "live_ready": False,
+    }
+
+
+def _record_refund(row, proven: dict, *, released: bool, moment: float) -> dict:
+    """Append one close fee. A failed close does not release the deposit or erase trading pnl."""
+    import pyth_sponsored
+    signature = proven["signature"]
+
+    def work(conn):
+        _ensure_conn(conn)
+        current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        fresh = {} if current is None else json.loads(current["snapshot_json"])
+        seen = conn.execute("SELECT signature, fee_usd, released FROM memecoin_refunds WHERE signature = ?", (signature,)).fetchone()
+        if seen is not None:
+            return {
+                "ok": False, "reason": "deposit_duplicate", "already_recorded": True, "recorded": False,
+                "refunded": seen["released"] == 1, "holds": seen["released"] != 1, "resend": False,
+                "refund_fee_usd": seen["fee_usd"], "realized_pnl": fresh.get("realized_pnl"),
+                "pnl_live": fresh.get("pnl_live") is True, "send": False, "live_ready": False, "case_id": row["id"],
+            }
+        trading = fresh.get("realized_pnl")
+        fee_lamports = proven.get("network_fee_lamports")
+        leg = (fresh.get("entry_funding") or {}).get("sol_leg") if isinstance(fresh.get("entry_funding"), dict) else None
+        refund_fee = pyth_sponsored.lamports_usd(fee_lamports, leg) if isinstance(fee_lamports, int) and isinstance(leg, dict) else None
+        breach = refund_fee is not None and refund_fee > MAX_FEE
+        anomaly = proven.get("anomaly") is True
+        if breach or anomaly:
+            _halt_entries(conn, moment)
+        events = list(fresh.get("live_events") or [])
+        events.append({
+            "kind": "deposit_refund_failed" if not released else "deposit_refund",
+            "signature": signature,
+            "rent_lamports": proven.get("rent_lamports"),
+            "network_fee_lamports": fee_lamports,
+            "fee_usd": None if refund_fee is None else format(refund_fee, "f"),
+            "released": released,
+            "trading_pnl_unchanged": True,
+        })
+        fresh["live_events"] = events
+        fresh["realized_pnl"] = trading
+        conn.execute(
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released) VALUES (?, ?, ?, ?, ?, ?)",
+            (signature, row["id"], proven.get("rent_lamports") or 0, fee_lamports if isinstance(fee_lamports, int) else 0, "unpriced" if refund_fee is None else format(refund_fee, "f"), 1 if released else 0),
+        )
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(fresh, sort_keys=True), moment, row["id"]),
+        )
+        _log(conn, row["id"], row["mint"], "risk", "kill", "fee_policy_breach" if breach else "receipt_failed", "deposit_refund", {"signature": signature, "network_fee_lamports": fee_lamports, "released": released}, moment)
+        return {
+            "ok": False,
+            "reason": "fee_policy_breach" if breach else "receipt_failed",
+            "recorded": True,
+            "refunded": False,
+            "holds": True,
+            "resend": False,
+            "ordinary_revert": proven.get("ordinary") is True and not breach,
+            "entry_halt": breach or anomaly,
+            "fee_policy_breach": breach,
+            "network_fee_lamports": fee_lamports,
+            "refund_fee_usd": None if refund_fee is None else format(refund_fee, "f"),
+            "realized_pnl": trading,
+            "pnl_live": fresh.get("pnl_live") is True,
+            "reserved_usd": fresh.get("reserved_usd"),
+            "case_id": row["id"],
+            "stage": None if current is None else current["stage"],
+            "status": "failed",
             "send": False,
             "live_ready": False,
         }
@@ -1856,7 +1973,8 @@ def _ensure_conn(conn) -> None:
             case_id TEXT NOT NULL,
             rent_lamports INTEGER NOT NULL,
             network_fee_lamports INTEGER NOT NULL,
-            fee_usd TEXT NOT NULL
+            fee_usd TEXT NOT NULL,
+            released INTEGER NOT NULL
         )
         """
     )

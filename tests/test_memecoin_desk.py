@@ -1338,6 +1338,187 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(len(reloaded["live_events"]), 1)
         self.assertEqual(db.query("SELECT fee_usd FROM memecoin_refunds WHERE signature = ?", (close_sig,))[0]["fee_usd"], "0.01")
 
+    def test_failed_and_over_cap_closes_record_the_fee_without_erasing_the_trade(self):
+        import base64
+        import json as _json
+        import urllib.request
+        from tests.test_jupiter_route_v2 import PRICE_SLOT, WHEN, _metas, _pool, _prices, _snap, _tx
+        wallet = phantom_transport.REQUIRED_WALLET
+        rent = solana_tx.TOKEN_ACCOUNT_RENT
+        queue = []
+
+        def urlopen(req, timeout=8):
+            payload = _json.loads(req.data.decode())
+            body = {"jsonrpc": "2.0", "result": __import__("solana_inspect").MAINNET_GENESIS if payload["method"] == "getGenesisHash" else queue.pop(0)}
+
+            class _Response:
+                status = 200
+                def read(self):
+                    return _json.dumps(body).encode()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+            return _Response()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+
+        def position(number):
+            case_id = self._analyzed(number)
+            _protect(case_id)
+            mint = memecoin_desk.view(case_id)["mint"]
+            values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+            ata = solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM)
+            route, est = _amm_route(mint, 1_000_000, "buy")
+            owned = accounts.pop(values["dest"])
+            values["dest"] = ata
+            accounts[ata] = owned
+            raw = bytearray(base64.b64decode(_tx(_metas(solana_tx.NATIVE_MINT, mint, values), route, side="buy", fund_mint=mint)))
+            raw[1:65] = bytes([number]) * 64
+            signed = base64.b64encode(bytes(raw)).decode()
+            signature = solana_tx.first_signature(signed)
+            self.assertTrue(memecoin_desk.reserve_entry(case_id, signed, _snap(accounts, WHEN), _prices(), WHEN)["ok"])
+            decoded = solana_tx.decode_transaction(bytes(raw))
+            pre = [0] * len(decoded.static_keys)
+            post = [0] * len(decoded.static_keys)
+            pre[0] = 20_000_000
+            post[0] = 20_000_000 - (1_000_000 + 5000 + rent)
+            pre[decoded.static_keys.index(ata)] = 0
+            post[decoded.static_keys.index(ata)] = rent
+            queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+                "err": None, "fee": 5000, "preBalances": pre, "postBalances": post, "preTokenBalances": [],
+                "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": str(est)}}],
+            }})
+            booked = memecoin_desk.confirm_entry(case_id, signature, WHEN)
+            self.assertTrue(booked["ok"], booked)
+            exit_route, out = _amm_route(mint, est, "exit")
+            values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
+            owned = accounts.pop(values["source"])
+            values["source"] = ata
+            accounts[ata] = owned
+            raw = bytearray(base64.b64decode(_tx(_metas(mint, solana_tx.NATIVE_MINT, values), exit_route, side="exit")))
+            raw[1:65] = bytes([number + 1]) * 64
+            signed = base64.b64encode(bytes(raw)).decode()
+            signature = solana_tx.first_signature(signed)
+            self.assertTrue(memecoin_desk.reserve_exit(case_id, signed, est, _snap(accounts, WHEN), _prices(), WHEN)["ok"])
+            decoded = solana_tx.decode_transaction(bytes(raw))
+            pre = [0] * len(decoded.static_keys)
+            post = [0] * len(decoded.static_keys)
+            pre[0] = 5_000_000
+            post[0] = 5_000_000 + out
+            pre[decoded.static_keys.index(ata)] = rent
+            post[decoded.static_keys.index(ata)] = rent
+            queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+                "err": None, "fee": 5000, "preBalances": pre, "postBalances": post,
+                "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": str(est)}}],
+                "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
+            }})
+            closed = memecoin_desk.confirm_exit(case_id, signature, WHEN)
+            self.assertEqual(closed["remaining_raw"], 0, closed)
+            return case_id, ata, memecoin_desk.view(case_id)["snapshot"]["realized_pnl"]
+
+        def close_tx(ata, mark):
+            raw = bytearray(base64.b64decode(solana_tx.encode_legacy(
+                wallet, [wallet, ata, solana_tx.TOKEN_PROGRAM], 1, [(2, [1, 0, 0], bytes([9]))], solana_tx.b58encode(b"\x44" * 32),
+            )))
+            raw[1:65] = bytes([mark]) * 64
+            signed = base64.b64encode(bytes(raw)).decode()
+            return signed, solana_tx.first_signature(signed)
+
+        first, first_ata, first_pnl = position(150)
+        second, second_ata, second_pnl = position(152)
+        live_before = Decimal(memecoin_desk.loss_totals()["live_loss_usd"])
+        self.assertEqual(db.get_setting("memecoin_entry_halt", ""), "")
+
+        signed, signature = close_tx(first_ata, 30)
+        queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+            "err": {"InstructionError": [0, "Custom"]}, "fee": 5000,
+            "preBalances": [2_000_000, rent, 1], "postBalances": [2_000_000 - 5000, rent, 1],
+        }})
+        failed = memecoin_desk.confirm_deposit_refund(first, signature)
+        self.assertEqual(failed["reason"], "receipt_failed")
+        self.assertTrue(failed["ordinary_revert"])
+        self.assertFalse(failed["entry_halt"])
+        self.assertTrue(failed["holds"])
+        self.assertEqual(failed["realized_pnl"], first_pnl)
+        self.assertEqual(memecoin_desk.view(first)["snapshot"]["reserved_usd"], "0.14")
+        self.assertEqual(memecoin_desk.loss_totals()["live_loss_usd"], format(live_before + Decimal("0.01"), "f"))
+        self.assertEqual(db.get_setting("memecoin_entry_halt", ""), "")
+        again = memecoin_desk.confirm_deposit_refund(first, signature)
+        self.assertEqual(again["reason"], "deposit_duplicate")
+        self.assertEqual(memecoin_desk.loss_totals()["live_loss_usd"], format(live_before + Decimal("0.01"), "f"))
+        queue.append(None)
+        unknown = memecoin_desk.confirm_deposit_refund(first, "unknown-close")
+        self.assertEqual(unknown["reason"], "receipt_unconfirmed")
+        self.assertEqual(len(db.query("SELECT signature FROM memecoin_refunds WHERE case_id = ?", (first,))), 1)
+        other, _other_sig = close_tx(solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM), 31)
+        queue.append({"slot": PRICE_SLOT, "transaction": [other, "base64"], "meta": {
+            "err": {"InstructionError": [0, "Custom"]}, "fee": 5000,
+            "preBalances": [2_000_000, rent, 1], "postBalances": [2_000_000 - 5000, rent, 1],
+        }})
+        mismatched = memecoin_desk.confirm_deposit_refund(first, solana_tx.first_signature(other))
+        self.assertEqual(mismatched["reason"], "refund_not_to_wallet")
+        self.assertEqual(len(db.query("SELECT signature FROM memecoin_refunds")), 1)
+        signed, signature = close_tx(first_ata, 35)
+        queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+            "err": {"InstructionError": [0, "Custom"]}, "fee": 5000,
+            "preBalances": [2_000_000, rent, 1], "postBalances": [2_000_000 - 5000, rent, 6],
+        }})
+        anomaly = memecoin_desk.confirm_deposit_refund(first, signature)
+        self.assertFalse(anomaly["ordinary_revert"])
+        self.assertTrue(anomaly["entry_halt"])
+        self.assertTrue(anomaly["holds"])
+        self.assertEqual(anomaly["realized_pnl"], first_pnl)
+        self.assertEqual(memecoin_desk.view(first)["snapshot"]["reserved_usd"], "0.14")
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+
+        signed, signature = close_tx(second_ata, 32)
+        queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+            "err": None, "fee": 2_000_000,
+            "preBalances": [5_000_000, rent, 1], "postBalances": [5_000_000 + rent - 2_000_000, 0, 1],
+        }})
+        opened = memecoin_desk.confirm_deposit_refund(second, signature)
+        self.assertEqual(opened["reason"], "fee_policy_breach")
+        self.assertTrue(opened["refunded"])
+        self.assertEqual(opened["reserved_usd"], "0.00")
+        self.assertEqual(opened["realized_pnl"], second_pnl)
+        self.assertGreater(Decimal(opened["refund_fee_usd"]), Decimal("0.05"))
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        after_success = memecoin_desk.loss_totals()["live_loss_usd"]
+
+        signed, signature = close_tx(first_ata, 33)
+        queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+            "err": {"InstructionError": [0, "Custom"]}, "fee": 2_000_000,
+            "preBalances": [9_000_000, rent, 1], "postBalances": [9_000_000 - 2_000_000, rent, 1],
+        }})
+        over = memecoin_desk.confirm_deposit_refund(first, signature)
+        self.assertTrue(over["fee_policy_breach"])
+        self.assertFalse(over["refunded"])
+        self.assertEqual(over["realized_pnl"], first_pnl)
+        self.assertEqual(memecoin_desk.view(first)["snapshot"]["reserved_usd"], "0.14")
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        signed, signature = close_tx(first_ata, 34)
+        queue.append({"slot": PRICE_SLOT, "transaction": [signed, "base64"], "meta": {
+            "err": None, "fee": 5000,
+            "preBalances": [4_000_000, rent, 1], "postBalances": [4_000_000 + rent - 5000, 0, 1],
+        }})
+        released = memecoin_desk.confirm_deposit_refund(first, signature)
+        self.assertTrue(released["refunded"])
+        self.assertFalse(released["entry_halt"])
+        self.assertEqual(released["realized_pnl"], first_pnl)
+        self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
+        self.assertEqual(memecoin_desk.view(first)["snapshot"]["reserved_usd"], "0.00")
+        fees = db.query("SELECT fee_usd, released FROM memecoin_refunds WHERE case_id = ? ORDER BY rowid", (first,))
+        self.assertEqual([item["fee_usd"] for item in fees], ["0.01", "0.01", fees[2]["fee_usd"], "0.01"])
+        self.assertEqual([item["released"] for item in fees], [0, 0, 0, 1])
+        self.assertGreater(Decimal(fees[2]["fee_usd"]), Decimal("0.05"))
+        self.assertGreater(Decimal(memecoin_desk.loss_totals()["live_loss_usd"]), Decimal(after_success))
+        reloaded = _json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (first,))[0]["snapshot_json"])
+        self.assertEqual(reloaded["realized_pnl"], first_pnl)
+        self.assertTrue(reloaded["pnl_live"])
+
     def test_changed_preexisting_and_extra_accounts_do_not_book_a_clean_fill(self):
         import base64
         import json as _json
