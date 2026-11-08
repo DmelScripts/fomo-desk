@@ -592,9 +592,9 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     result["slippage_allowance_source"] = "test_fixture" if slippage_allowance_bps == allowance else "clamped_to_owner_ceiling"
     if parsed["slippage_bps"] > allowance:
         return result | {"reason": "slippage_exceeds", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"]}
-    floor = quoted_ok["est_out"] * (10_000 - parsed["slippage_bps"]) // 10_000
+    floor = owner_slippage.minimum_units(quoted_ok["est_out"], owner_slippage.BPS)
     if parsed["min_out"] < floor:
-        return result | {"reason": "min_below_amm", "min_out": parsed["min_out"], "allowance_floor": floor}
+        return result | {"reason": "min_below_amm", "min_out": parsed["min_out"], "allowance_floor": floor, "declared_bps": parsed["slippage_bps"]}
     return result | {
         "ok": True,
         "reason": None,

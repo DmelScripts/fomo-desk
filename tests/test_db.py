@@ -155,7 +155,7 @@ class TestDb(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA synchronous").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 12)
             self.assertTrue((Path(self.tmp.name) / "desk.db").is_file())
         finally:
             conn.close()
@@ -205,9 +205,12 @@ class TestDb(unittest.TestCase):
     def test_set_setting_writes_change_log(self):
         db.init_db()
         db.set_setting("fomo_handle", "realdmel", "owner")
-        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM change_log")[0]["n"], 0)
+        self.assertEqual(
+            db.query("SELECT COUNT(*) AS n FROM change_log WHERE key = ?", ("fomo_handle",))[0]["n"],
+            0,
+        )
         db.set_setting("fomo_handle", "other", "owner")
-        rows = db.query('SELECT key, "old", "new", who FROM change_log')
+        rows = db.query('SELECT key, "old", "new", who FROM change_log WHERE key = ?', ("fomo_handle",))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["key"], "fomo_handle")
         self.assertEqual(rows[0]["old"], "realdmel")

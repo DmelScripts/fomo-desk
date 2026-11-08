@@ -382,6 +382,40 @@ def readiness() -> dict:
         "onchain_pyth_usdc_used": False,
         "onchain_pyth_available": pyth["usable"] is True,
         "blocked_because": _readiness_blocks(pyth),
+        "slippage_policy": _slippage_policy(),
+    }
+
+
+def _slippage_policy() -> dict:
+    """Approved code target beside the row this process actually has. Not a deploy."""
+    import owner_slippage
+    try:
+        body = owner_slippage.configuration()
+    except Exception:
+        return {
+            "code_target_bps": 50,
+            "applied_bps": None,
+            "record_state": "unreadable",
+            "approved": False,
+            "deployed": False,
+            "production": False,
+            "live": False,
+            "live_ready": False,
+            "send": False,
+            "sign": False,
+        }
+    return {
+        "code_target_bps": body["code_target_bps"],
+        "applied_bps": body["applied_bps"],
+        "record_state": body["record_state"],
+        "approved": body["approved"],
+        "startup_action": body["startup_action"],
+        "deployed": False,
+        "production": False,
+        "live": False,
+        "live_ready": False,
+        "send": False,
+        "sign": False,
     }
 
 

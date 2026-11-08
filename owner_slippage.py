@@ -20,6 +20,7 @@ TIMEZONE = "Asia/Saigon"
 SOURCE = "owner_decision_2026-11-08T16:28:00+07:00"
 SCOPE = "per_swap"
 KEY = "memecoin_max_slippage_bps"
+VERSION = 1
 
 
 def target() -> dict:
@@ -35,6 +36,8 @@ def target() -> dict:
         "applies_to": ["entry", "exit"],
         "wider_for_exit": False,
         "wider_for_retry": False,
+        "version": VERSION,
+        "record_state": "approved",
         "deployed": False,
         "production": False,
         "live": False,
@@ -44,28 +47,85 @@ def target() -> dict:
 
 
 def persist() -> dict:
-    """Write the owner record. Arguments cannot change the 50 basis-point ceiling."""
-    db.set_setting(KEY, json.dumps(target(), sort_keys=True), SOURCE)
+    """Re-read the startup record. This does not overwrite a conflict or a revocation."""
+    apply_on_startup()
     return configuration()
 
 
+def apply_on_startup(conn=None) -> dict:
+    """Install the approved record on first boot or upgrade. Leave every other row.
+
+    Called from init_db, which server startup runs. The write happens only
+    while the schema version is still below 12 and the key is empty. An exact
+    row is not rewritten. A revoked, conflicting, or later-deleted row is not
+    put back to approved.
+    """
+    import time
+    own = conn is None
+    if own:
+        conn = db.connect()
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (KEY,)).fetchone()
+        raw = None if row is None else row["value"]
+        decision = _classify(raw, migrated=version >= 12)
+        if decision["action"] == "install":
+            payload = json.dumps(target(), sort_keys=True)
+            now = time.time()
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (KEY, payload, now),
+            )
+            conn.execute(
+                'INSERT INTO change_log (ts, key, "old", "new", who) VALUES (?, ?, ?, ?, ?)',
+                (now, KEY, None, payload, SOURCE),
+            )
+            decision = decision | {"applied": True, "written": True, "state": "already_applied"}
+        else:
+            decision = decision | {"written": False}
+        if own:
+            conn.commit()
+        return decision
+    finally:
+        if own:
+            conn.close()
+
+
 def configuration() -> dict:
-    """Persisted state beside the code target. A mismatch is not approval."""
-    approved = _approved_record()
-    body = target()
-    body.update({
-        "persisted": approved is not None,
-        "approved": approved is not None,
-        "approved_bps": None if approved is None else BPS,
-        "stored_bps": None if approved is None else approved.get("bps"),
-        "owner_slippage_unapproved": approved is None,
+    """Code target beside the row startup actually left in the database."""
+    raw = _raw_setting()
+    decision = _classify(raw, migrated=_migration_done())
+    stored_bps = None
+    if isinstance(decision.get("body"), dict):
+        stored_bps = decision["body"].get("bps")
+    return {
+        "code_target_bps": BPS,
+        "code_target_percent": PERCENT,
+        "statement": STATEMENT,
+        "approved_at": APPROVED_AT,
+        "timezone": TIMEZONE,
+        "source": SOURCE,
+        "scope": SCOPE,
+        "version": VERSION,
+        "applies_to": ["entry", "exit"],
+        "wider_for_exit": False,
+        "wider_for_retry": False,
+        "applied": decision["state"] == "already_applied",
+        "applied_bps": BPS if decision["state"] == "already_applied" else None,
+        "record_state": decision["state"],
+        "startup_action": decision["action"],
+        "stored_bps": stored_bps,
+        "approved_bps": BPS if decision["state"] == "already_applied" else None,
+        "approved": decision["state"] == "already_applied",
+        "persisted": decision["state"] == "already_applied",
+        "owner_slippage_unapproved": decision["state"] != "already_applied",
         "deployed": False,
         "production": False,
         "live": False,
+        "live_ready": False,
         "send": False,
         "sign": False,
-    })
-    return body
+    }
 
 
 def ceiling_bps() -> int | None:
@@ -80,9 +140,8 @@ def ceiling_bps() -> int | None:
 def check_route(slippage_bps, min_out, amm_est_out) -> dict:
     """Reject an instruction above 50 bps or a minimum under that ceiling's floor.
 
-    The ceiling is the code constant. A stored 100, or a caller allowance, is
-    not consulted. Tighter than 50 bps is accepted. The floor uses the
-    instruction's own bps, which cannot exceed 50.
+    The required minimum uses the approved 50 basis points and rounds up.
+    A smaller declared bps, or a test allowance, cannot lower that minimum.
     """
     refused = {
         "ok": False,
@@ -100,9 +159,9 @@ def check_route(slippage_bps, min_out, amm_est_out) -> dict:
         return refused | {"reason": "quote_unbound"}
     if isinstance(min_out, bool) or not isinstance(min_out, int) or min_out <= 0:
         return refused | {"reason": "min_below_amm"}
-    floor = amm_est_out * (10_000 - slippage_bps) // 10_000
+    floor = minimum_units(amm_est_out, BPS)
     if min_out < floor:
-        return refused | {"reason": "min_below_amm", "allowance_floor": floor, "slippage_bps": slippage_bps}
+        return refused | {"reason": "min_below_amm", "allowance_floor": floor, "slippage_bps": slippage_bps, "declared_bps_ignored_for_floor": slippage_bps != BPS}
     return {
         "ok": True,
         "reason": None,
@@ -113,6 +172,19 @@ def check_route(slippage_bps, min_out, amm_est_out) -> dict:
         "sign": False,
         "live_ready": False,
     }
+
+
+def minimum_units(estimate: int, bps: int = BPS) -> int:
+    """Smallest output whose shortfall is at most bps. The division rounds up.
+
+    min_out * 10000 >= estimate * (10000 - bps). For estimate 10001 and 50
+    bps that is 9951, not the truncated 9950. Estimate 1 cannot become 0.
+    """
+    if isinstance(estimate, bool) or isinstance(bps, bool) or not isinstance(estimate, int) or not isinstance(bps, int):
+        raise ValueError("slippage floor is not usable")
+    if estimate <= 0 or not 0 <= bps <= BPS:
+        raise ValueError("slippage floor is not usable")
+    return (estimate * (10_000 - bps) + 9_999) // 10_000
 
 
 def effective_test_allowance(allowance):
@@ -126,18 +198,47 @@ def effective_test_allowance(allowance):
     return allowance
 
 
-def _approved_record() -> dict | None:
-    raw = db.get_setting(KEY, "")
-    if not isinstance(raw, str) or raw == "":
-        return None
+def _migration_done() -> bool:
+    try:
+        conn = db.connect()
+    except Exception:
+        return False
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0] >= 12
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _classify(raw, migrated: bool = False) -> dict:
+    if raw in (None, ""):
+        if migrated:
+            return {"action": "preserve", "state": "absent_after_migration", "applied": False, "reason": "removed", "body": None}
+        return {"action": "install", "state": "first_install", "applied": False, "body": None}
     try:
         body = json.loads(raw)
     except json.JSONDecodeError:
-        return None
-    expected = target()
+        return {"action": "preserve", "state": "conflict", "applied": False, "reason": "unreadable", "body": None}
     if not isinstance(body, dict):
+        return {"action": "preserve", "state": "conflict", "applied": False, "reason": "unreadable", "body": None}
+    if body.get("record_state") == "revoked" or body.get("state") == "revoked":
+        return {"action": "preserve", "state": "revoked", "applied": False, "reason": "revoked", "body": body}
+    if body == target():
+        return {"action": "unchanged", "state": "already_applied", "applied": True, "body": body}
+    return {"action": "preserve", "state": "conflict", "applied": False, "reason": "conflict", "body": body}
+
+
+def _raw_setting():
+    try:
+        return db.get_setting(KEY, "")
+    except Exception:
+        return ""
+
+
+def _approved_record() -> dict | None:
+    raw = db.get_setting(KEY, "")
+    decision = _classify(raw, migrated=_migration_done())
+    if decision["state"] != "already_applied":
         return None
-    for key, value in expected.items():
-        if body.get(key) != value:
-            return None
-    return body
+    return decision["body"]

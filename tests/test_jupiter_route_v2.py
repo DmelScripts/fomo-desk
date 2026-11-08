@@ -333,7 +333,8 @@ class RouteV2Tests(unittest.TestCase):
     def test_a_test_allowance_is_not_owner_policy_and_a_body_is_not_the_price(self):
         values, data = _pool(solana_tx.NATIVE_MINT, TOKEN)
         priced = _decode(_tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 50)), data, allowance=50)
-        self.assertTrue(priced["ok"], priced)
+        self.assertEqual(priced["reason"], "min_below_amm", priced)
+        self.assertGreaterEqual(priced["allowance_floor"], priced["min_out"])
         self.assertFalse(priced["owner_slippage_approved"])
         leg = {"used": True, "fresh": True, "price": 100_000_000, "conf": 0, "expo": -8}
         import memecoin_exit
