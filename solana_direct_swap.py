@@ -1325,7 +1325,7 @@ def _wrap_plan(decoded: solana_tx.Decoded) -> dict:
     return {"swap": swap, "lamports": transfer, "wsol": wsol, "usdc": usdc}
 
 
-def prove_entry_tx(tx_b64: str, stored: dict, accounts: dict | None) -> str | None:
+def prove_entry_tx(tx_b64: str, stored: dict, accounts: dict | None, *, wsol_exists: bool | None = None) -> str | None:
     """The only supported entry is the wrap, one swap, and the close. Extras fail closed."""
     decoded = _decode_tx(tx_b64)
     if decoded is None:
@@ -1362,6 +1362,10 @@ def prove_entry_tx(tx_b64: str, stored: dict, accounts: dict | None) -> str | No
         return privilege
     if accounts is None:
         return "account_proof"
+    # The create/wrap/close form is only supported when the wrapped account is absent.
+    # A reference layout left in the account map is not evidence of absence.
+    if wsol_exists is not False or plan["wsol"] in accounts:
+        return "preexisting_wsol"
     try:
         solana_whirlpool.check_swap_accounts(
             decoded.static_keys, plan["swap"].account_indexes, phantom_transport.REQUIRED_WALLET,
@@ -1435,14 +1439,23 @@ def entry_economics(account_keys, native_pre, native_post, fee, entry_lamports: 
     return {"ok": True, "sol_out": int(entry_lamports), "network_fee": int(fee), "rent_net": 0}
 
 
-def exit_economics(account_keys, native_pre, native_post, fee) -> dict:
-    """SOL that came back is the wallet's native increase plus the chain fee. No wrapped-token row is invented."""
+def exit_economics(account_keys, native_pre, native_post, fee, exit_min: int | None = None) -> dict:
+    """SOL proceeds are the wallet's native increase plus the chain fee.
+
+    A flat or negative wallet does not turn the fee into proceeds. The result
+    has to cover the stored minimum. No wrapped-token row is invented.
+    """
     checked = _native_frame(account_keys, native_pre, native_post, fee)
     if checked.get("ok") is not True:
         return {"ok": False, "reason": "proceeds_missing"}
-    proceeds = native_post[0] - native_pre[0] + int(fee)
-    if proceeds <= 0:
+    native_delta = native_post[0] - native_pre[0]
+    if native_delta <= 0:
         return {"ok": False, "reason": "proceeds_missing"}
+    proceeds = native_delta + int(fee)
+    if proceeds <= int(fee):
+        return {"ok": False, "reason": "proceeds_missing"}
+    if isinstance(exit_min, bool) or not isinstance(exit_min, int) or exit_min <= 0 or proceeds < exit_min:
+        return {"ok": False, "reason": "proceeds_below_min"}
     return {"ok": True, "sol_proceeds": proceeds, "network_fee": int(fee), "rent_net": 0}
 
 
@@ -1467,6 +1480,29 @@ def _native_frame(account_keys, native_pre, native_post, fee) -> dict:
     if native_pre[index] != 0 or native_post[index] != 0:
         return {"ok": False, "reason": "rent_unproven"}
     return {"ok": True}
+
+
+def receipt_exit_fields(decoded) -> dict | None:
+    """Direction, amount, minimum, and close from the message. A missing token row is not filled in."""
+    if decoded is None or decoded.version != "legacy" or decoded.lookups:
+        return None
+    if [_kind(decoded, item) for item in decoded.instructions] != ["create", "swap", "close"]:
+        return None
+    _create, swap, close = decoded.instructions
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    if not _close_wsol(decoded, close, wsol):
+        return None
+    parsed = decode_swap_data(swap.data)
+    if parsed is None:
+        return None
+    return {
+        "a_to_b": parsed["a_to_b"] is True,
+        "amount_specified_is_input": parsed["amount_specified_is_input"] is True,
+        "amount": parsed["amount"],
+        "min_out": parsed["other_amount_threshold"],
+        "closes_wsol": True,
+    }
 
 
 def _decode_tx(tx_b64: str):

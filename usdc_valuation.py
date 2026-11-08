@@ -32,13 +32,115 @@ MAX_AGE_S = 30
 _QUOTE = None
 
 
+_HARNESS = None
+HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest"
+CREDENTIAL_ENV = "PYTH_API_KEY"
+# A test may install a callable that returns the documented JSON. This module does not call Hermes.
+PRICE_TRANSPORT = None
+
+
 def current(now: float | None = None) -> dict:
-    """The configured quote, or a disabled result. This does not fetch."""
+    """The configured quote, or a disabled result. This does not fetch.
+
+    A harness is a test double. set_quote remains an injection and is not a live read.
+    """
+    moment = time.time() if now is None else now
     if not enabled():
         return _unused("usd_source_unapproved")
+    if isinstance(_HARNESS, dict):
+        body = assess(_HARNESS, moment)
+        body["origin"] = "test_harness"
+        body["live_provider"] = False
+        body["authenticated_live"] = False
+        body["fetched"] = False
+        return body
     if not isinstance(_QUOTE, dict):
         return _unused("valuation_missing")
-    return assess(_QUOTE, time.time() if now is None else now)
+    body = assess(_QUOTE, moment)
+    body["authenticated_live"] = False
+    return body
+
+
+def install_harness(quote: dict | None) -> None:
+    """Test double for the diagnostic service. This is not an authenticated price read."""
+    global _HARNESS
+    _HARNESS = quote
+
+
+def authenticated_read(now: float | None = None) -> dict:
+    """Documented Hermes latest-price contract. No network call is made.
+
+    A missing credential fails closed. A parsed fixture is not a live provider.
+    """
+    import os
+    moment = time.time() if now is None else now
+    refused = {
+        "ok": False,
+        "usable": False,
+        "approved": False,
+        "authenticated_live": False,
+        "live_provider": False,
+        "fetched": False,
+        "origin": "hermes",
+        "accepted_band": None,
+        "credential_env": CREDENTIAL_ENV,
+        "url": HERMES_LATEST_URL,
+    }
+    if not enabled():
+        return refused | {"reason": "usd_source_unapproved"}
+    credential = os.environ.get(CREDENTIAL_ENV)
+    if not isinstance(credential, str) or not credential.strip():
+        return refused | {"reason": "credentials_missing"}
+    if PRICE_TRANSPORT is None:
+        return refused | {"reason": "live_price_call_disabled"}
+    try:
+        payload = PRICE_TRANSPORT(HERMES_LATEST_URL, FEED_ID)
+    except Exception:
+        return refused | {"reason": "price_transport"}
+    parsed = parse_hermes_latest(payload)
+    if parsed is None:
+        return refused | {"reason": "valuation_fields"}
+    body = assess(parsed, moment)
+    body["ok"] = body.get("usable") is True
+    body["authenticated_live"] = False
+    body["live_provider"] = False
+    body["fetched"] = False
+    body["origin"] = "hermes_fixture"
+    return body
+
+
+def parse_hermes_latest(payload: dict) -> dict | None:
+    """The documented `parsed[].price` object. Binary proof bytes are not treated as a price."""
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("parsed")
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    price = row.get("price")
+    if not isinstance(price, dict):
+        return None
+    feed = str(row.get("id") or "").removeprefix("0x")
+    parsed = {
+        "feed_id": feed,
+        "price": _hermes_int(price.get("price")),
+        "conf": _hermes_int(price.get("conf")),
+        "expo": _hermes_int(price.get("expo")),
+        "publish_time": _hermes_int(price.get("publish_time")),
+    }
+    if any(value is None for value in parsed.values()):
+        return None
+    return parsed
+
+
+def _hermes_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None
 
 
 def assess(quote: dict, now: float) -> dict:
@@ -167,7 +269,8 @@ def snapshot(quote: dict) -> dict:
         "usable": quote.get("usable") is True,
         "live_provider": False,
         "fetched": False,
-        "origin": "injected_quote",
+        "origin": quote.get("origin") or "injected_quote",
+        "authenticated_live": quote.get("authenticated_live") is True,
         "accepted_band": None,
         "reason": quote.get("reason"),
         "upper": quote.get("upper"),

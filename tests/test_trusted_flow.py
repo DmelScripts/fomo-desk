@@ -179,7 +179,8 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertIsNone(db.query("SELECT realized_pnl FROM phantom_reservations WHERE intent_id = 'flow'")[0]["realized_pnl"])
         close = FakeTransport()
         close.statuses = missing_pre.statuses
-        exit_pre_native, exit_post_native = _natives(exit_decoded, 1_000_000_000, -80_000_000, stored["network_fee_lamports"])
+        exit_proceeds = after["exit_token_min_out"]
+        exit_pre_native, exit_post_native = _natives(exit_decoded, 1_000_000_000, -exit_proceeds, stored["network_fee_lamports"])
         close.transaction = {
             "slot": bundle["context_slot"],
             "meta": {
@@ -197,7 +198,7 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertEqual(booked["reserved_usd"], "0.00")
         expected = usdc_valuation.round_trip_pnl(
             after["actual_sol_out_lamports"], after["actual_network_fee_lamports"],
-            80_000_000, stored["network_fee_lamports"], after["pool_micro_per_sol"],
+            exit_proceeds, stored["network_fee_lamports"], after["pool_micro_per_sol"],
             after["exit_pool_micro_per_sol"], after["entry_valuation"], after["exit_valuation"],
         )
         self.assertEqual(booked["realized_pnl"], expected["realized_pnl"])

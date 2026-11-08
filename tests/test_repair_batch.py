@@ -150,11 +150,66 @@ class RepairBatchTests(unittest.TestCase):
         solana_read_rpc.enable_reads()
         solana_read_rpc.TRANSPORT = FakeTransport()
         self.assertEqual(
-            solana_direct_swap.prove_entry_tx(_reencode(entry, base, keys=vault_keys), stored, execution_transport._spawn_accounts()["accounts"]),
+            solana_direct_swap.prove_entry_tx(
+                _reencode(entry, base, keys=vault_keys), stored, execution_transport._spawn_accounts()["accounts"], wsol_exists=False,
+            ),
             "whirlpool_vault_unbound",
         )
         privileged = _reencode(entry, base, readonly_unsigned=readonly_unsigned - 1)
         self.assertEqual(solana_direct_swap.prove_entry_tx(privileged, stored, None), "privileges")
+
+    def test_an_existing_wsol_balance_refuses_before_the_runner(self):
+        built, entry, _exit, _rpc = execution_transport._assemble_read(466547240, reader())
+        stored = {"entry_lamports": built["entry_lamports"], "entry_token_min_out": built["quote_token_min_out"]}
+        self._plant("exist", entry, stored)
+        solana_read_rpc.enable_reads()
+        solana_read_rpc.TRANSPORT = FakeTransport(wsol_amount=50_000)
+        calls = []
+        refused = execution_transport.send_after_identity(
+            "exist", entry, lambda *args: calls.append(args) or (0, "{}"), binary="phantom",
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(refused["reason"], "preexisting_wsol")
+        self.assertEqual(db.query("SELECT status FROM phantom_reservations WHERE intent_id = 'exist'")[0]["status"], "sim_open")
+
+    def test_a_flat_wallet_does_not_turn_the_fee_into_exit_proceeds(self):
+        planted = self._confirmed_exit()
+        decoded = solana_tx.decode_transaction(base64.b64decode(planted["encoded"]))
+        flat_pre = [0] * len(decoded.static_keys)
+        flat_post = [0] * len(decoded.static_keys)
+        flat_pre[0] = flat_post[0] = 1_000_000_000
+        minimum = json.loads(db.query("SELECT result_json FROM phantom_reservations WHERE intent_id = 'exit'")[0]["result_json"])["exit_token_min_out"]
+        economics = solana_direct_swap.exit_economics(decoded.static_keys, flat_pre, flat_post, 5000, exit_min=minimum)
+        self.assertFalse(economics["ok"])
+        self.assertEqual(economics["reason"], "proceeds_missing")
+        short_pre = list(flat_pre)
+        short_post = list(flat_post)
+        short_post[0] = short_pre[0] + 1_000
+        short = solana_direct_swap.exit_economics(decoded.static_keys, short_pre, short_post, 5000, exit_min=minimum)
+        self.assertEqual(short["reason"], "proceeds_below_min")
+        transport = FakeTransport()
+        transport.statuses = {"context": {"slot": planted["slot"]}, "value": [{
+            "slot": planted["slot"], "err": None, "confirmationStatus": "finalized", "blockHeight": 21,
+        }]}
+        transport.transaction = {
+            "slot": planted["slot"],
+            "meta": {
+                "err": None, "fee": 5000,
+                "preBalances": flat_pre, "postBalances": flat_post,
+                "preTokenBalances": planted["pre_tokens"],
+                "postTokenBalances": planted["post_tokens"],
+            },
+            "transaction": [planted["encoded"], "base64"],
+        }
+        solana_read_rpc.enable_reads()
+        solana_read_rpc.TRANSPORT = transport
+        booked = execution_transport.book_exit_close("exit", planted["signature"], 21)
+        self.assertFalse(booked["booked"], booked)
+        self.assertEqual(booked["reason"], "proceeds_missing")
+        row = db.query("SELECT status, reserved_usd, realized_pnl FROM phantom_reservations WHERE intent_id = 'exit'")[0]
+        self.assertEqual(row["status"], "confirmed")
+        self.assertEqual(row["reserved_usd"], "8.14")
+        self.assertIsNone(row["realized_pnl"])
 
     def test_missing_exit_proceeds_and_a_nine_million_fee_stay_held(self):
         planted = self._confirmed_exit()
@@ -290,7 +345,7 @@ class RepairBatchTests(unittest.TestCase):
         index = decoded.static_keys.index(usdc)
         pre_usdc = built["wallet_usdc_raw"]
         fee = built["network_fee_lamports"]
-        proceeds = 80_000_000
+        proceeds = quote["token_min_out"]
         native_pre = [0] * len(decoded.static_keys)
         native_post = [0] * len(decoded.static_keys)
         native_pre[0] = 1_000_000_000

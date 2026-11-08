@@ -245,7 +245,9 @@ def _send_blocked(intent_id: str, raw: bytes) -> str | None:
         bundle = _spawn_accounts()
         if bundle is None:
             return "account_proof"
-        swap_reason = solana_direct_swap.prove_entry_tx(encoded, stored, bundle.get("accounts"))
+        swap_reason = solana_direct_swap.prove_entry_tx(
+            encoded, stored, bundle.get("accounts"), wsol_exists=bundle.get("wsol_exists") is True,
+        )
     if swap_reason:
         return swap_reason
     review = _read(_REVIEW + intent_id)
@@ -467,7 +469,7 @@ def prepare_readonly(slot: int | None = None, rpc=None) -> dict:
     return _public_read(prepared, reader)
 
 
-def reserve_from_reader(intent_id: str, rpc) -> dict:
+def reserve_from_reader(intent_id: str, rpc, keep_tx: bool = False) -> dict:
     """Simulate before any hold. A clean simulation is not a USD approval."""
     import solana_read_rpc
     refused = {"ok": False, "sign": False, "send": False, "resubmit": False, "live_ready": False, "broadcastable": False, "runtime_ready": False, "created": False}
@@ -506,6 +508,8 @@ def reserve_from_reader(intent_id: str, rpc) -> dict:
         saved["runtime_ready"] = False
         saved["sign"] = False
         saved["live_ready"] = False
+        if keep_tx and saved.get("created") and isinstance(entry_tx, str):
+            saved["_server_tx"] = entry_tx
         return saved
     finally:
         del entry_tx, exit_tx
@@ -795,7 +799,7 @@ def reserve_direct(intent_id: str, fetched: dict | None = None, prepared: dict |
             return refused | {"reason": "stop_new_entries", "status": "rejected", "loss_usd": format(loss, "f")}
         held = Decimal("0")
         open_rows = conn.execute(
-            "SELECT reserved_usd FROM phantom_reservations WHERE status IN ('reserved', 'quoted', 'sim_open', 'submit_unknown', 'confirmed', 'exit_planned')"
+            "SELECT reserved_usd FROM phantom_reservations WHERE status IN ('reserved', 'quoted', 'sim_open', 'submit_unknown', 'confirmed', 'exit_planned', 'exit_unknown')"
         ).fetchall()
         for open_row in open_rows:
             held += Decimal(open_row["reserved_usd"] or "0")
@@ -914,7 +918,7 @@ def assess_direct_exit(stored: dict, mark_micro: int, now: float) -> dict:
     }
 
 
-def plan_acquired_exit(intent_id: str, rpc, mark_micro: int | None = None, identity=None) -> dict:
+def plan_acquired_exit(intent_id: str, rpc, mark_micro: int | None = None, identity=None, now: float | None = None) -> dict:
     """Fresh read, then an exit for the confirmed delta only. This does not sign.
 
     The loss stop does not block this. A hold from the exit rules does.
@@ -932,7 +936,7 @@ def plan_acquired_exit(intent_id: str, rpc, mark_micro: int | None = None, ident
         stored = {}
     if not isinstance(stored, dict):
         return refused | {"reason": "unconfirmed"}
-    signal = assess_direct_exit(stored, mark_micro if mark_micro is not None else 0, time.time())
+    signal = assess_direct_exit(stored, mark_micro if mark_micro is not None else 0, time.time() if now is None else now)
     stored["peak_price_micro"] = signal.get("peak_price_micro", stored.get("peak_price_micro"))
     stored["trail_armed"] = signal.get("trail_armed") is True
     if signal["action"] not in {"stop", "trail", "timeout"}:
@@ -1033,7 +1037,7 @@ def book_exit_close(intent_id: str, signature: str, block_height: int) -> dict:
 
     def work(conn):
         row = conn.execute("SELECT * FROM phantom_reservations WHERE intent_id = ?", (intent_id,)).fetchone()
-        if row is None or row["status"] != "confirmed":
+        if row is None or row["status"] not in {"confirmed", "exit_unknown"}:
             return refused | {"reason": "unconfirmed", "reserved_usd": None if row is None else row["reserved_usd"]}
         try:
             stored = json.loads(row["result_json"] or "{}")
@@ -1055,8 +1059,15 @@ def book_exit_close(intent_id: str, signature: str, block_height: int) -> dict:
             return refused | {"reason": "pre_missing", "reserved_usd": row["reserved_usd"]}
         if sold != -acquired:
             return refused | {"reason": "delta_mismatch", "reserved_usd": row["reserved_usd"]}
+        observed = proof.get("exit_swap")
+        minimum = stored.get("exit_token_min_out")
+        if not isinstance(observed, dict) or observed.get("a_to_b") is not False or observed.get("amount_specified_is_input") is not True or observed.get("closes_wsol") is not True:
+            return refused | {"reason": "exit_semantics", "reserved_usd": row["reserved_usd"]}
+        if observed.get("amount") != acquired or observed.get("min_out") != minimum:
+            return refused | {"reason": "exit_semantics", "reserved_usd": row["reserved_usd"]}
         economics = solana_direct_swap.exit_economics(
             proof.get("account_keys"), proof.get("native_pre"), proof.get("native_post"), proof.get("network_fee_lamports"),
+            exit_min=minimum if isinstance(minimum, int) and not isinstance(minimum, bool) else None,
         )
         if economics.get("ok") is not True:
             return refused | {"reason": economics.get("reason") or "proceeds_missing", "reserved_usd": row["reserved_usd"]}
@@ -1086,7 +1097,7 @@ def book_exit_close(intent_id: str, signature: str, block_height: int) -> dict:
         stored["rent_net_lamports"] = 0
         now = time.time()
         conn.execute(
-            "UPDATE phantom_reservations SET status = 'sim_closed', reserved_usd = '0.00', realized_pnl = ?, result_json = ?, updated_at = ? WHERE intent_id = ? AND status = 'confirmed'",
+            "UPDATE phantom_reservations SET status = 'sim_closed', reserved_usd = '0.00', realized_pnl = ?, result_json = ?, updated_at = ? WHERE intent_id = ? AND status IN ('confirmed', 'exit_unknown')",
             (signed, json.dumps(stored, separators=(",", ":"), sort_keys=True), now, intent_id),
         )
         return {

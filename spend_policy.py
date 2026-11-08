@@ -129,6 +129,13 @@ def usd_source() -> dict:
         "feed_id": quote.get("feed_id"),
         "upper": quote.get("upper"),
         "lower": quote.get("lower"),
+        "origin": quote.get("origin"),
+        "live_provider": quote.get("live_provider") is True,
+        "authenticated_live": quote.get("authenticated_live") is True,
+        "publish_time": quote.get("publish_time"),
+        "price": quote.get("price"),
+        "conf": quote.get("conf"),
+        "expo": quote.get("expo"),
     }
 
 

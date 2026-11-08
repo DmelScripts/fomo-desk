@@ -305,6 +305,7 @@ def _bind_receipt(signature: str, status, transaction) -> dict | None:
         "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
         "block_height": row.get("blockHeight") if isinstance(row.get("blockHeight"), int) else None,
         "blockhash": decoded.blockhash,
+        "exit_swap": solana_direct_swap.receipt_exit_fields(decoded),
     }
 
 
