@@ -2913,8 +2913,10 @@ def record_landed_quantity(case_id: str, signature: str, transport, now: float) 
     """Quantity from the landed token metadata and the current mint and token account.
 
     The current account read proves the mint decimals and the account identity now.
-    It is not the balance at the landed slot. A missing historical pre or post balance
-    is not zero. A failed transaction is not a fill.
+    It is not the balance at the landed slot. minContextSlot does not select the
+    account as it existed at that slot. A missing historical pre or post balance
+    is not zero. A failed transaction is not a fill. The historical body has to be
+    the same signature, message, success, fee, and slot as the stored evidence.
     """
     import db
     import memecoin_desk
@@ -2939,11 +2941,11 @@ def record_landed_quantity(case_id: str, signature: str, transport, now: float) 
     encoded = result.get("transaction") if isinstance(result, dict) else None
     if not isinstance(meta, dict) or not isinstance(encoded, list) or not encoded:
         return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_missing", "holds": True, "resend": False}
-    try:
-        import base64
-        decoded = solana_tx.decode_transaction(base64.b64decode(encoded[0], validate=True))
-    except Exception:
-        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_missing", "holds": True, "resend": False}
+    bound = _evidence_body(signature, case_id, result)
+    if bound is None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_identity", "holds": True, "resend": False}
+    decoded = bound["decoded"]
+    meta = bound["meta"]
     import memecoin_exit
     route = memecoin_exit._route(decoded)
     case = db.query("SELECT mint FROM memecoin_cases WHERE id = ?", (case_id,))
@@ -3052,14 +3054,93 @@ def record_landed_quantity(case_id: str, signature: str, transport, now: float) 
     }
 
 
+def _evidence_body(signature: str, case_id: str, result):
+    """The historical transaction body is the stored evidence, or it is not usable.
+
+    Signature, message bytes, success, fee, and slot all have to be that row.
+    A later response cannot borrow an earlier message hash.
+    """
+    import base64
+    import hashlib
+    import db
+    import phantom_transport
+    import solana_tx
+    if not isinstance(result, dict):
+        return None
+    meta = result.get("meta")
+    encoded = result.get("transaction")
+    slot = result.get("slot")
+    if not isinstance(meta, dict) or not isinstance(encoded, list) or not encoded or not isinstance(encoded[0], str):
+        return None
+    err = _typed_chain_err(meta.get("err"))
+    fee = _typed_chain_fee(meta.get("fee"))
+    if err != "null" or fee is None or isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return None
+    try:
+        raw_tx = encoded[0]
+        if solana_tx.first_signature(raw_tx) != signature:
+            return None
+        message = solana_tx.message_bytes(raw_tx)
+        digest = hashlib.sha256(message).hexdigest()
+        decoded = solana_tx.decode_transaction(base64.b64decode(raw_tx, validate=True))
+    except Exception:
+        return None
+    if not _classic_layout(decoded) or decoded.fee_payer != phantom_transport.REQUIRED_WALLET:
+        return None
+    rows = db.query(
+        "SELECT * FROM memecoin_landed_evidence WHERE signature = ? AND message_sha256 = ?",
+        (signature, digest),
+    )
+    if len(rows) != 1:
+        return None
+    proof = rows[0]
+    if proof["case_id"] != case_id or proof["meta_err"] != "null" or proof["layout_supported"] != 1:
+        return None
+    if proof["network_fee_lamports"] != fee or proof["slot"] != slot or proof["wallet"] != decoded.fee_payer:
+        return None
+    reserved = db.query(
+        "SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?",
+        (digest, case_id),
+    )
+    if len(reserved) != 1:
+        return None
+    try:
+        if solana_tx.message_bytes(reserved[0]["message_b64"]) != message:
+            return None
+    except Exception:
+        return None
+    return {"decoded": decoded, "meta": meta, "digest": digest, "fee": fee, "slot": slot, "evidence": proof}
+
+
+def _quantity_matches_body(observed, decoded, meta, slot: int) -> bool:
+    """Stored pre/post metadata has to be this body's token row, not an earlier one."""
+    account = observed["account"]
+    if observed["landed_slot"] != slot or account not in decoded.static_keys:
+        return False
+    index = decoded.static_keys.index(account)
+    pre, _pre_reason = _historical_token_row(meta.get("preTokenBalances"), index)
+    post, _post_reason = _historical_token_row(meta.get("postTokenBalances"), index)
+    if pre is None or post is None:
+        return False
+    return (
+        _u64_canon(pre["amount"]) == observed["pre_amount"]
+        and _u64_canon(post["amount"]) == observed["post_amount"]
+        and pre["mint"] == post["mint"] == observed["mint"]
+        and pre["owner"] == post["owner"] == observed["wallet"]
+        and pre["decimals"] == post["decimals"] == observed["decimals"]
+    )
+
+
 def _flow_gap(base: dict, reason: str) -> dict:
     """A missing swap leg stays incomplete. It is not a receipt and not a cost."""
     return base | {
         "flow_recorded": False, "flow_proven": False, "flow_reason": reason,
         "receipt_booked": False, "composition_complete": False, "price_proven": False,
         "dex_fee_separated": False, "dex_fee_lamports": None, "network_fee_added_to_input": False,
+        "dex_fee_embedded_in_input": True, "one_shot_fee_used": False, "combined_fee_cap_proven": False,
         "wrap_principal_netted": False, "rent_netted": False, "payer_delta_used": False,
-        "pool_bytes_at_landed_slot": False, "hold_released": False, "reservation_consumed": False,
+        "pool_bytes_at_landed_slot": False, "account_read_is_historical": False,
+        "hold_released": False, "reservation_consumed": False,
         "cost_basis_proven": False, "refund_proven": False, "fill_proven": False,
         "holds": True, "resend": False, "execution_eligible": False,
     }
@@ -3171,7 +3252,11 @@ def _swap_transfers(meta, decoded, swap_index):
             program = decoded.static_keys[program_index]
             if program == solana_tx.TOKEN_2022:
                 return None, "token_2022_unsupported"
+            if program == solana_tx.SYSTEM_PROGRAM:
+                return None, "inner_economic_unsupported"
             if program != solana_tx.TOKEN_PROGRAM:
+                if outer == swap_index and program != __import__("solana_whirlpool").PROGRAM_ID:
+                    return None, "inner_economic_unsupported"
                 continue
             if outer != swap_index:
                 return None, "inner_transfer_outside_swap"
@@ -3187,14 +3272,17 @@ def _swap_transfers(meta, decoded, swap_index):
 
 
 def record_landed_flow(case_id: str, signature: str, transport, now: float) -> dict:
-    """Join the swap's historical token transfers to the landed quantity and network fee.
+    """Join one historical transaction body to the landed quantity and network fee.
 
-    The transfers are the executed source outflow and destination inflow inside the
-    swap instruction. The payer's lamport delta, the wrap transfer, and the wSOL
-    close are not that flow. Pool account bytes are not in the transaction, so the
-    vault accounts are the route positions only. No receipt is booked.
+    The body that supplies the transfers has to be the stored signature, message,
+    success, fee, and slot. Its token pre/post metadata has to be the stored
+    quantity. The gross source transfer is the native input and already includes
+    the pool fee; that fee is not decomposed and is not invented from the one-shot
+    formula. A system transfer inside the swap is another debit, so the flow stays
+    unproven. The payer delta, the outer wrap, and the wSOL close are not the
+    input or the proceeds. Pool bytes are not in the transaction. A later vault
+    token balance would not by itself prove the pool vault. No receipt is booked.
     """
-    import base64
     import db
     import solana_tx
     import sqlite3
@@ -3207,24 +3295,19 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
         return _flow_gap(quantity, "flow_transport")
     body = landed.get("body") if isinstance(landed, dict) else None
     result = body.get("result") if isinstance(body, dict) else None
-    meta = result.get("meta") if isinstance(result, dict) else None
-    encoded = result.get("transaction") if isinstance(result, dict) else None
-    if not isinstance(meta, dict) or not isinstance(encoded, list) or not encoded:
-        return _flow_gap(quantity, "inner_transfers_missing")
-    try:
-        decoded = solana_tx.decode_transaction(base64.b64decode(encoded[0], validate=True))
-    except Exception:
-        return _flow_gap(quantity, "route_unbound")
-    if not _classic_layout(decoded) or result.get("slot") != quantity.get("slot") or _typed_chain_fee(meta.get("fee")) != quantity.get("network_fee_lamports"):
+    bound = _evidence_body(signature, case_id, result)
+    if bound is None:
         return _flow_gap(quantity, "flow_identity")
+    decoded = bound["decoded"]
+    meta = bound["meta"]
     import phantom_transport
     wallet = phantom_transport.REQUIRED_WALLET
     stored = db.query(
         "SELECT * FROM memecoin_landed_quantity WHERE signature = ? AND message_sha256 = ?",
-        (signature, quantity["message_sha256"]),
+        (signature, bound["digest"]),
     )
-    if len(stored) != 1:
-        return _flow_gap(quantity, "quantity_required")
+    if len(stored) != 1 or not _quantity_matches_body(stored[0], decoded, meta, bound["slot"]):
+        return _flow_gap(quantity, "flow_identity")
     observed = stored[0]
     legs = _swap_legs(decoded)
     if legs is None or legs["user"] != wallet:
@@ -3261,9 +3344,10 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
     if prior:
         row = prior[0]
         same = (
-            row["message_sha256"] == quantity["message_sha256"] and row["case_id"] == case_id
+            row["message_sha256"] == bound["digest"] and row["case_id"] == case_id
             and row["input_raw"] == input_text and row["output_raw"] == output_text
-            and row["proceeds_raw"] == proceeds and row["network_fee_lamports"] == quantity["network_fee_lamports"]
+            and row["proceeds_raw"] == proceeds and row["network_fee_lamports"] == bound["fee"]
+            and row["landed_slot"] == bound["slot"]
         )
         return _flow_gap(quantity, None if same else "flow_conflict") | {
             "flow_recorded": same, "flow_proven": same, "idempotent": same,
@@ -3271,7 +3355,7 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
             "proceeds_raw": proceeds if same else None,
             "dex_fee_embedded_in_input": True,
         }
-    fee = quantity["network_fee_lamports"]
+    fee = bound["fee"]
 
     def work(conn):
         conn.execute(
@@ -3282,9 +3366,9 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                signature, quantity["message_sha256"], case_id, observed["side"], direction,
+                signature, bound["digest"], case_id, observed["side"], direction,
                 legs["source_mint"], legs["destination_mint"], input_text, output_text, proceeds,
-                fee, quantity["slot"], float(now),
+                fee, bound["slot"], float(now),
             ),
         )
 
@@ -3293,6 +3377,13 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
     except sqlite3.IntegrityError as exc:
         if "landed_flow" not in str(exc):
             raise
+        raced = db.query("SELECT * FROM memecoin_landed_flow WHERE signature = ?", (signature,))
+        if raced and raced[0]["message_sha256"] == bound["digest"] and raced[0]["input_raw"] == input_text and raced[0]["output_raw"] == output_text and raced[0]["proceeds_raw"] == proceeds:
+            return _flow_gap(quantity, None) | {
+                "flow_recorded": True, "flow_proven": True, "idempotent": True,
+                "input_raw": input_text, "output_raw": output_text, "proceeds_raw": proceeds,
+                "network_fee_lamports": fee, "dex_fee_embedded_in_input": True,
+            }
         return _flow_gap(quantity, "flow_conflict")
     return _flow_gap(quantity, None) | {
         "flow_recorded": True, "flow_proven": True, "idempotent": False, "flow_reason": None,
@@ -3319,7 +3410,7 @@ def read_transaction(signature: str) -> dict:
 
 
 def _confirmed(request: dict) -> dict:
-    """Confirmed read. minContextSlot is the server tip, not a block height."""
+    """Confirmed read. minContextSlot is the server tip, not a historical account slot."""
     config = {"commitment": "confirmed"}
     slot = request.get("minContextSlot")
     if isinstance(slot, int) and not isinstance(slot, bool) and slot > 0:
