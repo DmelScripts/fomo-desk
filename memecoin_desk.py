@@ -2849,6 +2849,20 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_preflight_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            blockhash TEXT NOT NULL,
+            context_slot INTEGER NOT NULL,
+            err_clear INTEGER NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
     conn.execute("DROP INDEX IF EXISTS memecoin_reservations_case_side")
     conn.execute(
         """
@@ -3462,6 +3476,53 @@ def _replace_reservation_triggers(conn) -> None:
         END
         """
     )
+    _install_preflight_audit(conn)
+
+
+def _install_preflight_audit(conn) -> None:
+    """An attempt is bound to the reservation that was simulated. It cannot be retargeted."""
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_insert")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_preflight_attempts_insert
+        BEFORE INSERT ON memecoin_preflight_attempts
+        FOR EACH ROW
+        WHEN NOT EXISTS (
+            SELECT 1 FROM memecoin_reservations
+            WHERE message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id
+              AND side = NEW.side
+              AND blockhash = NEW.blockhash
+        )
+        OR NEW.context_slot IS NULL OR NEW.context_slot <= 0
+        OR NEW.err_clear NOT IN (0, 1)
+        BEGIN
+            SELECT RAISE(ABORT, 'preflight_unbound');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_update")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_preflight_attempts_update
+        BEFORE UPDATE ON memecoin_preflight_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'preflight_unbound');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_delete")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_preflight_attempts_delete
+        BEFORE DELETE ON memecoin_preflight_attempts
+        BEGIN
+            SELECT RAISE(ABORT, 'preflight_unbound');
+        END
+        """
+    )
+
+
 def _install_lineage_triggers(conn) -> None:
     """Replace predecessor trigger definitions and record the revision in one transaction."""
     _replace_lineage_triggers(conn)

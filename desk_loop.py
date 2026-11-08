@@ -596,6 +596,160 @@ def recheck_bound(case_id: str, message_sha256: str, transport, now: float) -> d
     return execution_gate(case_id, message_sha256, transport, now)
 
 
+def _preflight_report(**extra) -> dict:
+    base = {
+        "attempted": False, "simulate": False, "sign": False, "send": False,
+        "simulation_clear": False, "preflight_ready": False, "gate_complete": False,
+        "price_freshness_proven": False, "slippage_proven_by_simulation": False,
+        "fee_usd_proven": False, "fee_lamports_match": False, "rent_bound_proven": False,
+        "sig_verify": False, "replace_recent_blockhash": False, "message_rewritten": False,
+        "holds": True, "resend": False, "operation": "unimplemented", "reason": None,
+    }
+    return base | extra
+
+
+def _account_lamports(response, tip: int):
+    import solana_tx
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return None
+    context = result.get("context") if isinstance(result.get("context"), dict) else None
+    slot = None if context is None else context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < tip or slot > tip + __import__("jupiter_route_v2").SLOT_LAG_MAX:
+        return None
+    value = result.get("value")
+    if not isinstance(value, dict) or value.get("owner") != solana_tx.SYSTEM_PROGRAM:
+        return None
+    lamports = value.get("lamports")
+    if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0:
+        return None
+    return lamports
+
+
+def _simulation_result(response, tip: int) -> dict:
+    import jupiter_route_v2
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return {"ok": False, "reason": "simulation_malformed"}
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return {"ok": False, "reason": "simulation_context_missing"}
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return {"ok": False, "reason": "simulation_context_malformed"}
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        return {"ok": False, "reason": "simulation_context_stale" if slot < tip else "simulation_context_future"}
+    value = result.get("value")
+    if not isinstance(value, dict) or "err" not in value:
+        return {"ok": False, "reason": "simulation_malformed"}
+    units = value.get("unitsConsumed")
+    if isinstance(units, bool) or not isinstance(units, int) or units < 0:
+        return {"ok": False, "reason": "simulation_malformed"}
+    if value.get("err") is not None:
+        return {"ok": False, "reason": "simulation_failed", "slot": slot, "err_clear": False}
+    return {"ok": True, "reason": None, "slot": slot, "accounts": value.get("accounts"), "units": units, "err_clear": True}
+
+
+def preflight_reserved(case_id: str, message_sha256: str, transport, now: float) -> dict:
+    """Unsigned simulateTransaction of the stored message. The bytes are not replaced.
+
+    sigVerify is false because the message is unsigned. That is not signature
+    validation. replaceRecentBlockhash is false. A stored attempt is not reused.
+    """
+    import base64
+    import hashlib
+    import db
+    import jupiter_route_v2
+    import memecoin_desk
+    import solana_tx
+    gate = execution_gate(case_id, message_sha256, transport, now)
+    if gate.get("execution_eligible") is not True:
+        return _preflight_report(attempted=False, reason=gate.get("reason"), holds=gate.get("holds", True), resend=False, case_id=case_id, message_sha256=message_sha256)
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    proof = rows[0]
+    encoded = proof["message_b64"]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        decoded = solana_tx.decode_transaction(raw)
+        again = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
+    except Exception:
+        return _preflight_report(reason="reservation_proof_malformed", case_id=case_id, message_sha256=message_sha256)
+    if again != message_sha256 or decoded.blockhash != proof["blockhash"] or decoded.fee_payer == "":
+        return _preflight_report(reason="reservation_proof_mismatch", case_id=case_id, message_sha256=message_sha256)
+    tip_response = transport({"method": "getSlot"})
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return _preflight_report(reason="simulation_context_missing", case_id=case_id, message_sha256=message_sha256)
+    payer = decoded.fee_payer
+    pre = _account_lamports(transport({"method": "getAccountInfo", "account": payer, "purpose": "fee_payer"}), tip)
+    compute = [bytes(item.data) for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
+    priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
+    network = priced.get("network_lamports") if priced.get("ok") is True else None
+    response = transport({
+        "method": "simulateTransaction",
+        "transaction": encoded,
+        "commitment": "confirmed",
+        "encoding": "base64",
+        "sigVerify": False,
+        "replaceRecentBlockhash": False,
+        "minContextSlot": tip,
+        "accounts": [payer],
+    })
+    parsed = _simulation_result(response, tip)
+    if parsed.get("slot"):
+        try:
+            db.execute(
+                "INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (message_sha256, case_id, proof["side"], proof["blockhash"], parsed["slot"], 1 if parsed.get("err_clear") else 0, now),
+            )
+        except Exception:
+            return _preflight_report(attempted=True, simulate=True, reason="preflight_unbound", case_id=case_id, message_sha256=message_sha256, blockhash=proof["blockhash"])
+    if parsed.get("ok") is not True:
+        return _preflight_report(attempted=True, simulate=True, reason=parsed.get("reason"), case_id=case_id, message_sha256=message_sha256, blockhash=proof["blockhash"], context_slot=parsed.get("slot"))
+    post = None
+    accounts = parsed.get("accounts")
+    if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict):
+        lamports = accounts[0].get("lamports")
+        if not isinstance(lamports, bool) and isinstance(lamports, int) and lamports >= 0:
+            post = lamports
+    fee_match = False
+    rent_ok = False
+    if pre is not None and post is not None and isinstance(network, int):
+        delta = pre - post
+        if delta == network:
+            fee_match = True
+            rent_ok = True
+        elif delta == network + solana_tx.TOKEN_ACCOUNT_RENT:
+            fee_match = True
+            rent_ok = True
+    clear = True
+    # The lamport delta can match the network fee and one token-account rent.
+    # It does not price that fee in USD, prove 50 bps, or prove the $8 ticket.
+    fee_usd_proven = False
+    slippage_proven = False
+    ticket_limit_proven = False
+    ready = clear and fee_match and rent_ok and fee_usd_proven and slippage_proven and ticket_limit_proven
+    if not fee_match or not rent_ok:
+        reason = "fee_unproven"
+    elif not fee_usd_proven:
+        reason = "fee_usd_unproven"
+    elif not slippage_proven:
+        reason = "slippage_unproven"
+    else:
+        reason = "ticket_limit_unproven"
+    return _preflight_report(
+        attempted=True, simulate=True, simulation_clear=clear, preflight_ready=ready,
+        reason=reason, fee_lamports_match=fee_match, rent_bound_proven=rent_ok,
+        fee_usd_proven=fee_usd_proven, slippage_proven_by_simulation=slippage_proven,
+        case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
+        context_slot=parsed["slot"], lookups_resolved=False, execution_guarantee=False,
+        signature_validated=False,
+    )
+
+
 def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthetic: bool = False) -> dict:
     """Read-only pool review. Authorization and the owner record are required first.
 
@@ -999,10 +1153,18 @@ def _supervise_reservations(transport, now: float) -> list:
                 "simulate": False, "operation": "unimplemented", "message_sha256": proof["message_sha256"],
                 "price_freshness_proven": False, "gate_complete": False,
             }
+        if decision.get("reason") == "reservation_unknown" or decision.get("execution_eligible") is not True:
+            preflight = _preflight_report(attempted=False, reason=decision.get("reason"), holds=True, resend=False)
+        else:
+            try:
+                preflight = preflight_reserved(proof["case_id"], proof["message_sha256"], transport, now)
+            except Exception:
+                preflight = _preflight_report(attempted=True, reason="simulation_transport", holds=True, resend=False)
         case = memecoin_desk._case(proof["case_id"])
         found.append({
             "case_id": proof["case_id"], "mint": None if case is None else case["mint"], "side": proof["side"],
             "jupiter_called": False, "requoted": False, "supervised": True, "execution": decision,
+            "preflight": preflight,
             "message_sha256": proof["message_sha256"],
         })
     try:
@@ -1199,6 +1361,8 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
+    if request.get("method") == "simulateTransaction":
+        raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):
         if request.get("method") != "POST":

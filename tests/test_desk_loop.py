@@ -348,9 +348,14 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "POST", "url": "https://data.stalkchain.com/api/v1/account", "json": {"token": MINT}},
             {"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT, "extra": 1}},
             {"method": "POST", "url": "https://api.jup.ag/swap/v2/execute", "json": {"token": MINT}},
+            {"method": "simulateTransaction", "transaction": "abc"},
         ):
-            with self.assertRaises(RuntimeError):
+            posted = len(posts)
+            with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
+            if bad.get("method") == "simulateTransaction":
+                self.assertEqual(str(refused.exception), "method_refused")
+                self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
         generated = solana_tx.b58encode(b"\x11" * 32)
         self.assertTrue(stalkchain_adapter.canonical_mint(observed))
@@ -1915,6 +1920,29 @@ conn.close()
                 return {"status": 200, "body": {"result": result}}
             if method == "getSlot":
                 return {"status": 200, "body": {"result": 2_000_028}}
+            if method == "simulateTransaction":
+                mode = chain.get("preflight_mode")
+                if not mode:
+                    raise AssertionError(method)
+                chain["sim_calls"] = chain.get("sim_calls", 0) + 1
+                chain["last_sim"] = {key: request.get(key) for key in ("transaction", "sigVerify", "replaceRecentBlockhash", "encoding", "commitment", "minContextSlot", "accounts")}
+                if mode == "context_missing":
+                    return {"status": 200, "body": {"result": {"value": {"err": None, "unitsConsumed": 1}}}}
+                if mode == "context_malformed":
+                    return {"status": 200, "body": {"result": {"context": {"slot": "soon"}, "value": {"err": None, "unitsConsumed": 1}}}}
+                if mode == "stale":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 1}, "value": {"err": None, "unitsConsumed": 1, "accounts": [None]}}}}
+                if mode == "malformed":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"unitsConsumed": 1}}}}
+                if mode == "err":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": {"InstructionError": [0, {"Custom": 1}]}, "unitsConsumed": 1, "accounts": [None]}}}}
+                decoded_sim = solana_tx.decode_transaction(base64.b64decode(request["transaction"]))
+                compute = [bytes(item.data) for item in decoded_sim.instructions if decoded_sim.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
+                fee = jupiter_route_v2.network_fee(compute, decoded_sim.required_signatures)["network_lamports"]
+                post = 50_000_000 - fee
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": None, "unitsConsumed": 1000, "accounts": [{"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}]}}}}
+            if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}}}}
             if method == "getMinimumBalanceForRentExemption":
                 return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
             if method == "getAccountInfo":
@@ -2020,6 +2048,90 @@ conn.close()
         self.assertFalse(quote["send"])
         self.assertFalse(quote["sign"])
         self.assertFalse(quote["execution"]["simulate"])
+        chain["preflight_mode"] = "clear"
+        chain["sim_calls"] = 0
+        preview = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        entry_preflight = next(item["preflight"] for item in preview["discovery"]["reservations"] if item.get("case_id") == case_id and item.get("side") == "entry")
+        self.assertTrue(entry_preflight["simulation_clear"], entry_preflight)
+        self.assertFalse(entry_preflight["preflight_ready"], entry_preflight)
+        self.assertEqual(entry_preflight["reason"], "fee_usd_unproven")
+        self.assertTrue(entry_preflight["fee_lamports_match"])
+        self.assertFalse(entry_preflight["fee_usd_proven"])
+        self.assertFalse(entry_preflight["slippage_proven_by_simulation"])
+        self.assertFalse(entry_preflight["price_freshness_proven"])
+        self.assertFalse(entry_preflight["gate_complete"])
+        self.assertFalse(entry_preflight["sign"])
+        self.assertFalse(entry_preflight["send"])
+        self.assertEqual(entry_preflight["operation"], "unimplemented")
+        self.assertFalse(entry_preflight["replace_recent_blockhash"])
+        self.assertFalse(entry_preflight["sig_verify"])
+        self.assertEqual(chain["last_sim"]["transaction"], db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])
+        self.assertFalse(chain["last_sim"]["replaceRecentBlockhash"])
+        self.assertFalse(chain["last_sim"]["sigVerify"])
+        self.assertEqual(chain["sim_calls"], 1)
+        again = desk_loop.preflight_reserved(case_id, db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], transport, WHEN + 1)
+        self.assertEqual(chain["sim_calls"], 2, again)
+        self.assertTrue(again["simulation_clear"], again)
+        entry_hash = db.query("SELECT message_sha256, blockhash FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_preflight_attempts WHERE message_sha256 = ?", (entry_hash["message_sha256"],))[0]["n"], 2)
+        attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
+        self.assertEqual(attempt["case_id"], case_id)
+        self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_preflight_attempts SET case_id = 'other-case' WHERE id = ?", (attempt["id"],))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM memecoin_preflight_attempts WHERE id = ?", (attempt["id"],))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (?, ?, 'entry', 'different-hash', 1, 1, ?)",
+                (entry_hash["message_sha256"], case_id, WHEN),
+            )
+        rfq_tx = message("buy", 2_000, chain["blockhash"])[0]
+        rfq_hash = __import__("hashlib").sha256(solana_tx.message_bytes(rfq_tx)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('rfq-case', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x63" * 32), json.dumps({"reserved_usd": "1.00"}), WHEN, WHEN),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, expire_at, ledger, ledger_provenance, created_at) VALUES (?, 'rfq-case', 'entry', ?, 'jupiterz', ?, ?, 'live', 'server', ?)",
+            (rfq_hash, rfq_tx, chain["blockhash"], int(WHEN) + 30, WHEN),
+        )
+        rfq_calls = chain["sim_calls"]
+        rfq_fresh = desk_loop.preflight_reserved("rfq-case", rfq_hash, transport, WHEN)
+        self.assertFalse(rfq_fresh["preflight_ready"], rfq_fresh)
+        self.assertEqual(rfq_fresh["reason"], "fee_usd_unproven")
+        self.assertEqual(rfq_fresh["case_id"], "rfq-case")
+        self.assertFalse(rfq_fresh["gate_complete"])
+        self.assertFalse(rfq_fresh["price_freshness_proven"])
+        self.assertGreater(chain["sim_calls"], rfq_calls)
+        rfq_after = chain["sim_calls"]
+        rfq_late = desk_loop.preflight_reserved("rfq-case", rfq_hash, transport, WHEN + 31)
+        self.assertEqual(rfq_late["reason"], "quote_expired")
+        self.assertFalse(rfq_late["attempted"])
+        self.assertFalse(rfq_late["resend"])
+        self.assertEqual(chain["sim_calls"], rfq_after)
+        held_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
+        chain["preflight_mode"] = "err"
+        failed_sim = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        failed_row = next(item["preflight"] for item in failed_sim["discovery"]["reservations"] if item.get("case_id") == case_id and item.get("side") == "entry")
+        self.assertEqual(failed_row["reason"], "simulation_failed")
+        self.assertFalse(failed_row["preflight_ready"])
+        self.assertFalse(failed_row["resend"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], held_usd)
+        chain["preflight_mode"] = "context_missing"
+        self.assertEqual(desk_loop.preflight_reserved(case_id, db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], transport, WHEN)["reason"], "simulation_context_missing")
+        chain["preflight_mode"] = "context_malformed"
+        self.assertEqual(desk_loop.preflight_reserved(case_id, db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], transport, WHEN)["reason"], "simulation_context_malformed")
+        chain["preflight_mode"] = "malformed"
+        self.assertEqual(desk_loop.preflight_reserved(case_id, db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], transport, WHEN)["reason"], "simulation_malformed")
+        chain["preflight_mode"] = "stale"
+        self.assertEqual(desk_loop.preflight_reserved(case_id, db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], transport, WHEN)["reason"], "simulation_context_stale")
+        chain["preflight_mode"] = None
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (?, 'other-case', 'entry', 'hash', 1, 1, ?)",
+                (db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"], WHEN),
+            )
         flight = memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]
         self.assertEqual(flight["blockhash"], saved_hash)
         self.assertNotEqual(flight["blockhash"], chain["latest_blockhash"])
@@ -2453,6 +2565,18 @@ conn.close()
         self.assertEqual(expired["message_sha256"], digest)
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        chain["preflight_mode"] = "clear"
+        calls_before = chain.get("sim_calls", 0)
+        expired_preflight = desk_loop.preflight_reserved(case_id, digest, transport, WHEN + 40)
+        self.assertEqual(expired_preflight["reason"], "blockhash_expired")
+        self.assertFalse(expired_preflight["attempted"])
+        self.assertFalse(expired_preflight["resend"])
+        self.assertEqual(chain.get("sim_calls", 0), calls_before)
+        changed = desk_loop.preflight_reserved(case_id, "f" * 64, transport, WHEN + 40)
+        self.assertEqual(changed["reason"], "message_mismatch")
+        self.assertFalse(changed["attempted"])
+        self.assertEqual(chain.get("sim_calls", 0), calls_before)
+        chain["preflight_mode"] = None
         db.init_db()
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
         db.execute(
@@ -2509,6 +2633,9 @@ conn.close()
         self.assertEqual(unknown_row["execution"]["reason"], "reservation_unknown")
         self.assertFalse(unknown_row["execution"]["execution_eligible"])
         self.assertFalse(unknown_row["execution"]["resend"])
+        self.assertFalse(unknown_row["preflight"]["attempted"])
+        self.assertFalse(unknown_row["preflight"]["resend"])
+        self.assertFalse(unknown_row["preflight"]["simulate"])
         unknown_calls = []
 
         def unknown_transport(request):
@@ -2587,6 +2714,22 @@ conn.close()
         self.assertEqual(stored["blockhash"], chain["blockhash"])
         self.assertEqual(db.query("SELECT side FROM memecoin_reservations WHERE message_sha256 = ?", (digest,))[0]["side"], "entry")
         self.assertNotEqual(digest, stored["message_sha256"])
+        chain["preflight_mode"] = "clear"
+        chain["sim_calls"] = 0
+        exit_round = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        exit_preflight = next(item["preflight"] for item in exit_round["discovery"]["reservations"] if item.get("message_sha256") == stored["message_sha256"])
+        self.assertEqual(exit_preflight["side"], "exit")
+        self.assertTrue(exit_preflight["simulation_clear"], exit_preflight)
+        self.assertTrue(exit_preflight["fee_lamports_match"], exit_preflight)
+        self.assertFalse(exit_preflight["preflight_ready"], exit_preflight)
+        self.assertEqual(exit_preflight["reason"], "fee_usd_unproven")
+        self.assertFalse(exit_preflight["gate_complete"])
+        self.assertFalse(exit_preflight["price_freshness_proven"])
+        self.assertFalse(exit_preflight["sign"])
+        self.assertFalse(exit_preflight["send"])
+        self.assertEqual(chain["last_sim"]["transaction"], db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])
+        self.assertFalse(chain["last_sim"]["replaceRecentBlockhash"])
+        chain["preflight_mode"] = None
         spent = []
 
         def counting(request):
