@@ -1258,6 +1258,74 @@ def agents_token_buy(request: Request, body: dict | None = None) -> JSONResponse
     return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
 
 
+_MEMECOIN_SCOUT = {"mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1"}
+
+
+def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:
+    from phantom_runner import _reject_tree
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != allowed or "stage" in body or "passed" in body:
+        raise HTTPException(status_code=400, detail="unexpected field")
+    return body
+
+
+@router.post("/api/memecoin/scout")
+def memecoin_scout(request: Request, body: dict | None = None) -> JSONResponse:
+    """DexScreener snapshot only. A passed flag is not a field."""
+    require_app_token(request)
+    pair = _memecoin_body(body, _MEMECOIN_SCOUT)
+    import memecoin_desk
+    result = memecoin_desk.scout(pair)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/memecoin/filter")
+def memecoin_filter(request: Request, body: dict | None = None) -> JSONResponse:
+    require_app_token(request)
+    parsed = _memecoin_body(body, {"case_id", "onchain"})
+    if not isinstance(parsed["case_id"], str) or not isinstance(parsed["onchain"], dict):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import memecoin_desk
+    result = memecoin_desk.filter_case(parsed["case_id"], parsed["onchain"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/memecoin/analyst")
+def memecoin_analyst(request: Request, body: dict | None = None) -> JSONResponse:
+    require_app_token(request)
+    parsed = _memecoin_body(body, {"case_id", "components"})
+    if not isinstance(parsed["case_id"], str) or not isinstance(parsed["components"], dict):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import memecoin_desk
+    result = memecoin_desk.analyze(parsed["case_id"], parsed["components"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/memecoin/protect")
+def memecoin_protect(request: Request, body: dict | None = None) -> JSONResponse:
+    """Persist the stop and trail. This route does not accept a transaction."""
+    require_app_token(request)
+    parsed = _memecoin_body(body, {"case_id"})
+    if not isinstance(parsed["case_id"], str):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import memecoin_desk
+    result = memecoin_desk.protect(parsed["case_id"])
+    return JSONResponse(result, status_code=200 if result.get("ok") else 409, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/memecoin/{case_id}")
+def memecoin_view(request: Request, case_id: str) -> JSONResponse:
+    require_app_token(request)
+    import memecoin_desk
+    result = memecoin_desk.view(case_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="not found")
+    result["log"] = memecoin_desk.log_for(case_id)
+    result["live_ready"] = False
+    result["send"] = False
+    return JSONResponse(result, status_code=200, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/push")
 async def push(request: Request) -> dict:
     """Save one phone. The body is a JSON object even if the browser labeled it text."""
