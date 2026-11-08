@@ -1941,17 +1941,40 @@ conn.close()
                 fee = jupiter_route_v2.network_fee(compute, decoded_sim.required_signatures)["network_lamports"]
                 post = 50_000_000 - fee
                 account = {"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}
+                data_overrides = {
+                    "bad_alphabet": ["!!!!", "base64"],
+                    "bad_padding": ["YQ", "base64"],
+                    "bad_type": [True, "base64"],
+                    "bad_encoding": ["", True],
+                    "nonempty_system": ["AA==", "base64"],
+                }
                 if mode == "fee_only":
                     account = {"lamports": post}
                 elif mode == "rent_constant":
                     account["lamports"] = post - solana_tx.TOKEN_ACCOUNT_RENT
                 elif mode == "malformed_owner":
-                    account = {"lamports": post, "owner": True, "data": ["", "base64"]}
+                    account = {"lamports": post, "owner": True, "data": ["", "base64"], "executable": False, "rentEpoch": 0}
                 elif mode == "malformed_data":
-                    account = {"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": "raw"}
+                    account = {"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": "raw", "executable": False, "rentEpoch": 0}
+                elif mode == "executable_system":
+                    account["executable"] = True
+                elif mode in data_overrides:
+                    account["data"] = data_overrides[mode]
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": None, "unitsConsumed": 1000, "accounts": [account]}}}}
             if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
-                payer = {"lamports": 50_000_000} if chain.get("fee_payer_shape") == "lamports_only" else {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}
+                shape = chain.get("fee_payer_shape")
+                payer_data = {
+                    "bad_alphabet": ["!!!!", "base64"],
+                    "bad_padding": ["YQ=", "base64"],
+                    "bad_type": ["", "base64"],
+                    "nonempty_system": ["AQ==", "base64"],
+                }
+                if shape == "lamports_only":
+                    payer = {"lamports": 50_000_000}
+                elif shape == "bad_type":
+                    payer = {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": True, "executable": False, "rentEpoch": 0}
+                else:
+                    payer = {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": payer_data.get(shape, ["", "base64"]), "executable": False, "rentEpoch": 0}
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": payer}}}
             if method == "getMinimumBalanceForRentExemption":
                 return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
@@ -2171,6 +2194,42 @@ conn.close()
         self.assertFalse(bare_payer["network_fee_arithmetic_match"])
         self.assertFalse(bare_payer["fee_lamports_match"])
         self.assertFalse(bare_payer["rent_bound_proven"])
+
+        def assert_account_closed(found, label):
+            self.assertEqual(found["reason"], "simulation_account_malformed", label)
+            self.assertTrue(found["simulation_clear"], label)
+            self.assertFalse(found["account_validated"], label)
+            self.assertIsNone(found["observed_lamport_delta"], label)
+            self.assertFalse(found["network_fee_arithmetic_match"], label)
+            self.assertFalse(found["rent_constant_arithmetic_match"], label)
+            self.assertFalse(found["fee_lamports_match"], label)
+            self.assertFalse(found["fee_composition_proven"], label)
+            self.assertFalse(found["rent_bound_proven"], label)
+            self.assertTrue(found["rent_unproven"], label)
+            self.assertFalse(found["fee_usd_proven"], label)
+            self.assertFalse(found["slippage_proven_by_simulation"], label)
+            self.assertFalse(found["ticket_limit_proven"], label)
+            self.assertFalse(found["preflight_ready"], label)
+            self.assertFalse(found["gate_complete"], label)
+
+        for mode in ("bad_alphabet", "bad_padding", "bad_type", "bad_encoding", "nonempty_system", "executable_system"):
+            chain["preflight_mode"] = mode
+            assert_account_closed(desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN), mode)
+        chain["preflight_mode"] = "clear"
+        for shape in ("bad_alphabet", "bad_padding", "bad_type", "nonempty_system"):
+            chain["fee_payer_shape"] = shape
+            assert_account_closed(desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN), "pre-" + shape)
+        chain["fee_payer_shape"] = None
+        empty_system = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        self.assertTrue(empty_system["account_validated"], empty_system)
+        self.assertTrue(empty_system["network_fee_arithmetic_match"], empty_system)
+        self.assertEqual(empty_system["reason"], "fee_composition_unproven")
+        self.assertFalse(empty_system["fee_lamports_match"])
+        self.assertFalse(empty_system["fee_composition_proven"])
+        self.assertFalse(empty_system["rent_bound_proven"])
+        self.assertTrue(empty_system["rent_unproven"])
+        self.assertFalse(empty_system["preflight_ready"])
+        self.assertFalse(empty_system["gate_complete"])
         held_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
         chain["preflight_mode"] = "err"
         failed_sim = desk_loop.run_supervised(transport, WHEN, rounds=1)

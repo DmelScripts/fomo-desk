@@ -611,10 +611,27 @@ def _preflight_report(**extra) -> dict:
     return base | extra
 
 
-def _system_account_lamports(value):
-    """Lamports from a system account that carries owner and base64 data.
+def _decoded_account_data(data):
+    """Decode an RPC account data pair. The encoding tag is not the payload."""
+    import base64
+    if isinstance(data, (str, bytes)) or not isinstance(data, (list, tuple)) or len(data) != 2:
+        return None
+    payload, encoding = data
+    if isinstance(payload, bool) or not isinstance(payload, str) or encoding != "base64":
+        return None
+    try:
+        return base64.b64decode(payload, validate=True)
+    except Exception:
+        return None
 
-    A bare lamport number is not an account. It cannot support a fee or rent claim.
+
+def _system_account_lamports(value):
+    """Lamports for a plain system-owned wallet, after the data actually decodes.
+
+    RPC data is [payload, "base64"]. The payload has to use the standard
+    alphabet and padding. A normal fee-payer wallet has empty data. Non-empty
+    data belongs to another system layout, such as a nonce, and is not read as
+    this wallet. The lamport number is not fee composition or rent proof.
     """
     import solana_tx
     if not isinstance(value, dict):
@@ -622,8 +639,9 @@ def _system_account_lamports(value):
     owner = value.get("owner")
     if not isinstance(owner, str) or owner != solana_tx.SYSTEM_PROGRAM:
         return None
-    data = value.get("data")
-    if not isinstance(data, (list, tuple)) or len(data) != 2 or not isinstance(data[0], str) or data[1] != "base64":
+    if value.get("executable") is not False:
+        return None
+    if _decoded_account_data(value.get("data")) != b"":
         return None
     lamports = value.get("lamports")
     if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0:
