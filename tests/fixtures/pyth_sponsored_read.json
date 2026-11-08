@@ -1,0 +1,12 @@
+{
+  "source_url": "https://docs.pyth.network/pro/sponsored-feeds",
+  "derivation_source": "https://github.com/pyth-network/pyth-crosschain/blob/main/target_chains/solana/sdk/js/pyth_solana_receiver/src/PythSolanaReceiver.ts",
+  "contract_source": "https://docs.pyth.network/pro/contract-addresses",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "method": "getMultipleAccounts",
+  "commitment": "confirmed",
+  "slot": 466835746,
+  "api_version": "4.4.0",
+  "fetched_at": 1794123888.4376464,
+  "hermes_called": false
+}

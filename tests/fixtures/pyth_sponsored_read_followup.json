@@ -1,0 +1,30 @@
+{
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "method": "getMultipleAccounts",
+  "commitment": "confirmed",
+  "slot": 466836816,
+  "usdc": {
+    "valid": true,
+    "fresh": false,
+    "reason": "valuation_stale",
+    "price": 99979833,
+    "conf": 9423,
+    "expo": -8,
+    "publish_time": 1794124077,
+    "posted_slot": 466836649,
+    "age_s": 40.837
+  },
+  "sol": {
+    "valid": true,
+    "fresh": true,
+    "price": 8915545440,
+    "conf": 8915545,
+    "expo": -8,
+    "publish_time": 1794124110,
+    "posted_slot": 466836792,
+    "age_s": 7.837
+  },
+  "live": false,
+  "hermes_called": false,
+  "note": "Second read through pyth_sponsored.public_fetch. USDC was older than 30 seconds. The window was not widened."
+}

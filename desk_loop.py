@@ -98,11 +98,19 @@ def readiness() -> dict:
         "keyless_catalog_is_price": False,
         "keyless_catalog_reason": catalog["reason"],
         "onchain_pyth": pyth["reason"],
-        "onchain_pyth_available": False,
+        "onchain_pyth_configured": pyth["configured"],
+        "onchain_pyth_valid": pyth["valid"],
+        "onchain_pyth_fresh": pyth["fresh"],
+        "onchain_pyth_live": False,
+        "onchain_pyth_age_s": pyth["age_s"],
+        "onchain_pyth_account": pyth["account"],
+        "onchain_pyth_publish_time": pyth["publish_time"],
+        "onchain_pyth_available": pyth["fresh"] is True,
         "blocked_because": [
             "stalkchain_response_fields_for_lp_rug_growth_are_unpublished",
-            pyth["reason"],
-            "hermes_price_requires_key",
+            "owner_slippage_unapproved",
+            pyth["reason"] or "pyth_sponsored_not_fresh",
+            "hermes_not_called",
         ],
     }
 

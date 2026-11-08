@@ -26,6 +26,7 @@ import time
 from decimal import Decimal
 
 import phantom_transport
+import pyth_sponsored
 import solana_jupiter
 import solana_tx
 import solana_whirlpool
@@ -332,7 +333,7 @@ def _wrap_shape(decoded: solana_tx.Decoded, *, side: str, mint: str) -> dict:
     return {"swap": swap, "compute": compute, "transfer": transfer, "wsol": wsol}
 
 
-def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote: dict | None, *, side: str, mint: str) -> dict:
+def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote: dict | None, *, side: str, mint: str, sponsored_usdc: tuple[str, bytes] | None = None, now: float | None = None) -> dict:
     """Read the wrap and the swap from the message. A side blob is not the fee."""
     import base64
     refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "message_bound": False}
@@ -370,12 +371,13 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
     result = decode(
         accounts, bytes(swap.data), side=side, mint=mint, account_data=account_data,
         compute=shape["compute"], canonical_pool=canonical_pool, quote=quote, message_bound=True,
+        sponsored_usdc=sponsored_usdc, now=now,
     )
     result["wrap_verified"] = result.get("ok") is True
     return result
 
 
-def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], canonical_pool: bytes, quote: dict | None, message_bound: bool = False) -> dict:
+def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], canonical_pool: bytes, quote: dict | None, message_bound: bool = False, sponsored_usdc: tuple[str, bytes] | None = None, now: float | None = None) -> dict:
     """One Whirlpool route_v2. SOL/USDC is recognized and is not a memecoin fill."""
     parsed = parse(data)
     result = {
@@ -447,7 +449,16 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     if priced.get("ok") is not True:
         return result | {"reason": priced.get("reason"), "min_out": parsed["min_out"], "min_out_proven": True}
     sol_micro = sol_micro_from_pool(canonical_pool) if isinstance(canonical_pool, (bytes, bytearray)) else None
-    assessed = usdc_valuation.assess(quote, time.time()) if isinstance(quote, dict) else {"usable": False, "reason": "valuation_missing"}
+    moment = time.time() if now is None else now
+    onchain_live = False
+    if sponsored_usdc is not None:
+        owner, raw = sponsored_usdc
+        onchain = pyth_sponsored.parse_account(raw, owner=owner, address=pyth_sponsored.USDC_ACCOUNT, feed_id=pyth_sponsored.USDC_FEED, now=moment)
+        if onchain.get("usable") is not True:
+            return result | {"reason": onchain.get("reason"), "usd_live": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
+        quote = onchain
+        onchain_live = True
+    assessed = usdc_valuation.assess(quote, moment) if isinstance(quote, dict) else {"usable": False, "reason": "valuation_missing"}
     if sol_micro is None or assessed.get("usable") is not True:
         return result | {"reason": assessed.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
     mint_a, _vault_a, mint_b, _vault_b = solana_whirlpool.pool_fields(account_data[pool][1])
@@ -464,7 +475,8 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         return result | {"reason": quote.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
     result["combined_fee_usd"] = format(ceiling, "f")
     result["combined_fee_usd_proven"] = True
-    result["usd_live"] = quote.get("authenticated_live") is True and quote.get("origin") == "hermes"
+    result["usd_live"] = onchain_live and assessed.get("usable") is True
+    result["usd_origin"] = "pyth_sponsored" if onchain_live else "caller"
     if ceiling > Decimal("0.05"):
         return result | {"reason": "fee_cap", "min_out": parsed["min_out"]}
     exposure = usdc_valuation.usd_ceiling(lamports_to_micro_usdc(parsed["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT * 2, sol_micro), assessed)
@@ -482,14 +494,16 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"], "amm_est_out": quoted_ok.get("est_out")}
     result["amm_est_out"] = quoted_ok.get("est_out")
     result["amm_min_out"] = quoted_ok.get("min_out")
-    if parsed["slippage_bps"] != 0 or not result["usd_live"]:
-        return result | {
-            "reason": "slippage_unapproved" if result["usd_live"] else "usd_not_live",
-            "min_out": parsed["min_out"],
-            "slippage_bps": parsed["slippage_bps"],
-            "buy_proven": False,
-            "exit_proven": False,
-        }
+    if not result["usd_live"]:
+        return result | {"reason": "usd_not_live", "min_out": parsed["min_out"], "buy_proven": False, "exit_proven": False}
+    return result | {
+        "reason": "slippage_unapproved",
+        "min_out": parsed["min_out"],
+        "slippage_bps": parsed["slippage_bps"],
+        "buy_proven": False,
+        "exit_proven": False,
+        "ok": False,
+    }
 
 
 def _fixed_accounts(accounts: list[dict]) -> dict:

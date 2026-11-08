@@ -306,3 +306,29 @@ class RouteV2Tests(unittest.TestCase):
             _tx(readonly, _route(999_899, 0)), data, canonical, _quote(), side="buy", mint=TOKEN,
         )
         self.assertEqual(denied["reason"], "privilege")
+
+    def test_a_sponsored_usdc_account_is_the_only_live_usd_and_slippage_stays_closed(self):
+        import pyth_sponsored
+        raw = Path("tests/fixtures/pyth_usdc_usd_price_update_v2.bin").read_bytes()
+        when = json.loads(Path("tests/fixtures/pyth_sponsored_read.json").read_text())["fetched_at"]
+        values, data = _pool(solana_tx.NATIVE_MINT, TOKEN)
+        canonical = _canonical()
+        priced = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            data, canonical, {"usable": True, "upper": "0.01", "origin": "hermes", "authenticated_live": True},
+            side="buy", mint=TOKEN,
+            sponsored_usdc=(pyth_sponsored.RECEIVER_PROGRAM_ID, raw),
+            now=when,
+        )
+        self.assertTrue(priced["usd_live"], priced)
+        self.assertEqual(priced["usd_origin"], "pyth_sponsored")
+        self.assertEqual(priced["reason"], "slippage_unapproved")
+        self.assertFalse(priced["ok"])
+        self.assertFalse(priced["buy_proven"])
+        labeled = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, TOKEN, values), _route(999_899, 0)),
+            data, canonical, {"usable": True, "upper": "0.01", "origin": "hermes", "authenticated_live": True, "feed_id": usdc_valuation.FEED_ID, "price": 100_000_000, "conf": 0, "expo": -8, "publish_time": int(when)},
+            side="buy", mint=TOKEN, now=when,
+        )
+        self.assertFalse(labeled["usd_live"], labeled)
+        self.assertEqual(labeled["reason"], "usd_not_live")
