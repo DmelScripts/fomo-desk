@@ -1412,6 +1412,7 @@ conn.close()
     def test_the_server_loop_binds_quote_expiry_to_the_reserved_message(self):
         import base64
         import json
+        import sqlite3
         import threading
         from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _tx
         import db
@@ -1511,6 +1512,8 @@ conn.close()
             if request.get("kind") == "http":
                 url = request.get("url") or ""
                 if url.endswith("/token-boosts/latest/v1"):
+                    if chain.get("boosts_fail"):
+                        raise RuntimeError("boosts down")
                     return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": mint}]}
                 if "/token-pairs/" in url:
                     return {"status": 200, "body": [{
@@ -1554,13 +1557,16 @@ conn.close()
             if method == "getGenesisHash":
                 return {"status": 200, "body": {"result": chain["genesis"]}}
             if method == "getLatestBlockhash":
-                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": {"blockhash": chain["latest_blockhash"], "lastValidBlockHeight": chain["latest_last"]}}}}
+                return {"status": 200, "body": {"result": {"context": {"slot": chain.get("latest_slot", 2_000_028)}, "value": {"blockhash": chain["latest_blockhash"], "lastValidBlockHeight": chain["latest_last"]}}}}
             if method == "isBlockhashValid":
+                if chain.get("validity_context") == "missing":
+                    return {"status": 200, "body": {"result": {"value": True}}}
+                slot = chain.get("validity_slot", 2_000_028)
                 if chain["valid"] == "missing":
                     return {"status": 200, "body": {"result": {}}}
                 if chain["valid"] == "malformed":
-                    return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": "yes"}}}
-                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": request.get("blockhash") == chain["blockhash"] and chain["valid"] is True}}}
+                    return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": "yes"}}}
+                return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": request.get("blockhash") == chain["blockhash"] and chain["valid"] is True}}}
             if method == "getBlockHeight":
                 result = "soon" if chain["malformed"] else chain["height"]
                 return {"status": 200, "body": {"result": result}}
@@ -1630,6 +1636,26 @@ conn.close()
         self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "route_expiry_missing")
         chain["router"] = "metis"
         chain["publish_expiry"] = True
+        for label, slot in (("missing", None), ("soon", "soon"), ("boolean", True), ("negative", -5), ("stale", 2_000_000), ("future", 2_000_028 + 1_000)):
+            chain["validity_context"] = "missing" if label == "missing" else "ok"
+            chain["validity_slot"] = slot
+            reason = {"missing": "context_missing", "soon": "context_malformed", "boolean": "context_malformed", "negative": "context_malformed", "stale": "context_stale", "future": "context_future"}[label]
+            self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], reason, label)
+        chain["validity_context"] = "ok"
+        chain["validity_slot"] = 2_000_028
+        rfq = desk_loop._bind_provider_window(
+            {"ok": True, "block_height": 999_000, "blockhash_valid": True, "latest_blockhash": chain["latest_blockhash"], "latest_blockhash_paired": False},
+            {"router": "jupiterz", "expire_at": int(WHEN) + 100, "transaction_b64": "quoted", "provider_expiry_malformed": False, "provider_expiry_field": "expireAt"},
+            chain["blockhash"], WHEN,
+        )
+        self.assertTrue(rfq["bind_ok"], rfq)
+        self.assertTrue(rfq["blockhash_still_valid"])
+        self.assertTrue(rfq["expire_at_enforced"])
+        self.assertFalse(rfq["height_proof"])
+        self.assertFalse(rfq["inclusion_window_proven"])
+        self.assertFalse(rfq["price_freshness_proven"])
+        self.assertFalse(rfq["quote_expiry_proven"])
+        self.assertFalse(rfq["gate_complete"])
         chain["expire_at"] = int(WHEN) - 10
         self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "quote_expired")
         chain["expire_at"] = None
@@ -1639,6 +1665,8 @@ conn.close()
         self.assertFalse(quote["quote_expiry_proven"], quote)
         self.assertFalse(quote["price_freshness_proven"])
         self.assertTrue(quote["inclusion_window_proven"], quote)
+        self.assertTrue(quote["height_proof"])
+        self.assertFalse(quote["gate_complete"])
         self.assertTrue(quote["reserved"], quote)
         self.assertTrue(quote["execution_eligible"], quote)
         self.assertEqual(quote["operation"], "unimplemented")
@@ -1659,30 +1687,39 @@ conn.close()
         self.assertIsNone(flight.get("resend"))
         reserved_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
         digest = flight["message_sha256"]
-        stripped = memecoin_desk.view(case_id)["snapshot"]
-        stripped["entry_inflight"].pop("last_valid_block_height")
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(stripped), case_id))
-        legacy = desk_loop.execution_gate(case_id, transport, WHEN)
-        self.assertFalse(legacy["execution_eligible"])
-        self.assertEqual(legacy["reason"], "reservation_proof_missing")
-        self.assertEqual(legacy["operation"], "unimplemented")
-        self.assertFalse(legacy["rewritten"])
-        self.assertEqual(legacy["message_sha256"], digest)
-        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
-        stripped["entry_inflight"]["last_valid_block_height"] = 1_000_000
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(stripped), case_id))
+        original_snap = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]
+        forged = json.loads(original_snap)
+        forged["entry_inflight"]["blockhash"] = solana_tx.b58encode(b"\x49" * 32)
+        forged["entry_inflight"]["message_sha256"] = "f" * 64
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(forged), case_id))
+        real = desk_loop.execution_gate(case_id, digest, transport, WHEN)
+        self.assertTrue(real["execution_eligible"], real)
+        self.assertEqual(real["blockhash"], saved_hash)
+        self.assertFalse(real["gate_complete"])
+        self.assertFalse(real["price_freshness_proven"])
+        mismatched = desk_loop.execution_gate(case_id, "f" * 64, transport, WHEN)
+        self.assertEqual(mismatched["reason"], "message_mismatch")
+        crossed = desk_loop.execution_gate("other-case", digest, transport, WHEN)
+        self.assertEqual(crossed["reason"], "message_mismatch")
+        durable = db.query("SELECT message_sha256, blockhash, side FROM memecoin_reservations WHERE case_id = ?", (case_id,))[0]
+        self.assertEqual(durable["message_sha256"], digest)
+        self.assertEqual(durable["blockhash"], saved_hash)
+        self.assertEqual(durable["side"], "entry")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_reservations SET blockhash = ? WHERE message_sha256 = ?", (chain["latest_blockhash"], digest))
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (original_snap, case_id))
         chain["height"] = 999_100
         again = desk_loop._screen_quote(transport, WHEN + 5, mint, evidence)
         self.assertEqual(again["reason"], "intent_inflight", again)
         self.assertFalse(again.get("reserved") is True)
-        held = desk_loop.recheck_bound(case_id, transport, WHEN + 5)
+        held = desk_loop.recheck_bound(case_id, digest, transport, WHEN + 5)
         self.assertTrue(held["holds"], held)
         self.assertFalse(held["resend"])
         self.assertFalse(held["rewritten"])
         self.assertEqual(held["message_sha256"], digest)
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
         chain["height"] = 1_000_050
-        expired = desk_loop.recheck_bound(case_id, transport, WHEN + 40)
+        expired = desk_loop.recheck_bound(case_id, digest, transport, WHEN + 40)
         self.assertEqual(expired["reason"], "blockhash_expired")
         self.assertTrue(expired["holds"])
         self.assertFalse(expired["resend"])
@@ -1692,6 +1729,30 @@ conn.close()
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
         db.init_db()
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('legacy-snap', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x62" * 32), json.dumps({"entry_inflight": {"message_sha256": "a" * 64, "blockhash": "legacy"}, "reserved_usd": "1.00"}), WHEN, WHEN),
+        )
+        chain["boosts_fail"] = True
+        restarted = desk_loop.run_supervised(transport, WHEN + 45, rounds=1)
+        chain["boosts_fail"] = False
+        self.assertIsNotNone(restarted.get("discovery"), restarted)
+        listed = [item for item in restarted["discovery"]["reservations"] if item.get("case_id") == case_id]
+        self.assertEqual(len(listed), 1, restarted["discovery"]["reservations"])
+        self.assertEqual(listed[0]["message_sha256"], digest)
+        self.assertEqual(listed[0]["side"], "entry")
+        self.assertFalse(listed[0]["requoted"])
+        self.assertFalse(listed[0]["jupiter_called"])
+        self.assertFalse(listed[0]["execution"]["execution_eligible"])
+        self.assertEqual(listed[0]["execution"]["reason"], "blockhash_expired")
+        self.assertFalse(listed[0]["execution"]["resend"])
+        self.assertEqual(db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ?", (case_id,))[0]["message_sha256"], digest)
+        legacy = next(item for item in restarted["discovery"]["reservations"] if item.get("case_id") == "legacy-snap")
+        self.assertEqual(legacy["execution"]["reason"], "reservation_proof_missing")
+        self.assertFalse(legacy["execution"]["execution_eligible"])
+        self.assertFalse(legacy["requoted"])
+        self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'legacy-snap'")[0]["snapshot_json"])["reserved_usd"], "1.00")
+        self.assertEqual(json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'legacy-snap'")[0]["snapshot_json"])["entry_inflight"]["message_sha256"], "a" * 64)
         import urllib.request
         def urlopen(req, timeout=8):
             payload = json.loads(req.data.decode())
@@ -1730,6 +1791,7 @@ conn.close()
         for thread in threads:
             thread.join()
         self.assertEqual(len(results), 4, results)
+        self.assertEqual(len(db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))), 1)
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
         snap = memecoin_desk.view(case_id)["snapshot"]
         snap.pop("entry_inflight", None)
@@ -1774,5 +1836,8 @@ conn.close()
         self.assertEqual(stored["qty"], 1_000)
         self.assertEqual(stored["pool"], pool)
         self.assertEqual(stored["blockhash"], chain["blockhash"])
+        self.assertEqual(desk_loop.execution_gate(case_id, digest, transport, WHEN)["side"], "entry")
+        self.assertEqual(desk_loop.execution_gate(case_id, stored["message_sha256"], transport, WHEN)["side"], "exit")
+        self.assertNotEqual(digest, stored["message_sha256"])
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
         self.assertFalse(desk_loop.scheduler_status()["armed"])

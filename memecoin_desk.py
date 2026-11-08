@@ -738,6 +738,11 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         if current is None or current["stage"] != "protected":
             return {"ok": False, "reason": "stage", "case_id": row["id"], "send": False, "live_ready": False}
         fresh = json.loads(current["snapshot_json"])
+        stored = conn.execute("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (row["id"],)).fetchone()
+        if stored is not None:
+            if stored["message_sha256"] == digest:
+                return _reservation_view(row["id"], reservation, idempotent=True)
+            return {"ok": False, "reason": "entry_inflight", "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False, "live_ready": False}
         existing = fresh.get("entry_inflight")
         if isinstance(existing, dict):
             if existing.get("message_sha256") == digest:
@@ -752,6 +757,7 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         if not _room_for(conn, row["id"], incoming + fee_part):
             return {"ok": False, "reason": "allocation", "case_id": row["id"], "send": False, "live_ready": False}
         fresh["entry_inflight"] = reservation
+        _store_reservation(conn, case_id=row["id"], side="entry", message_b64=message_b64, digest=digest, chain=chain, pool=pool_key, intent_id=None, ledger=_ledger_of(row), moment=moment)
         conn.execute("UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?", (json.dumps(fresh, sort_keys=True), moment, row["id"]))
         _log(conn, row["id"], row["mint"], "executor", "pass", None, "entry_reserve", {"message_sha256": digest, "effectual_entry": False}, moment)
         return _reservation_view(row["id"], reservation, idempotent=False)
@@ -1036,6 +1042,11 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             if fresh.get("inflight"):
                 return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
             return {"ok": False, "reason": "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing"), "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False}
+        stored = conn.execute("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'exit'", (row["id"],)).fetchone()
+        if stored is not None:
+            if stored["message_sha256"] == digest:
+                return {"ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest, "idempotent": True, "resend": False, "rewritten": False, "send": False, "quote_expiry_proven": False, "inclusion_window_proven": isinstance(chain, dict) and chain.get("inclusion_window_proven") is True}
+            return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
         if fresh.get("inflight"):
             return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
         remaining = fresh.get("remaining_raw")
@@ -1089,6 +1100,7 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
                 "UPDATE memecoin_risk_intents SET message_sha256 = ? WHERE id = ? AND message_sha256 IS NULL",
                 (digest, intent["id"]),
             )
+        _store_reservation(conn, case_id=row["id"], side="exit", message_b64=message_b64, digest=digest, chain=chain, pool=pool_key, intent_id=None if intent is None else intent["id"], ledger=_ledger_of(row), moment=moment)
         conn.execute(
             "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
             (json.dumps(fresh, sort_keys=True), moment, row["id"]),
@@ -2744,6 +2756,28 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_reservations (
+            message_sha256 TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            message_b64 TEXT NOT NULL,
+            router TEXT NOT NULL,
+            blockhash TEXT NOT NULL,
+            last_valid_block_height INTEGER,
+            last_valid_provenance TEXT,
+            expire_at INTEGER,
+            pool TEXT,
+            intent_id TEXT,
+            request_id TEXT,
+            ledger TEXT NOT NULL,
+            ledger_provenance TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS memecoin_reservations_case_side ON memecoin_reservations(case_id, side)")
     _install_lineage_triggers(conn)
     _classify_ledgers(conn)
 
@@ -2796,9 +2830,62 @@ def _replace_lineage_triggers(conn) -> None:
     )
 
 
+def _store_reservation(conn, *, case_id: str, side: str, message_b64: str, digest: str, chain, pool, intent_id, ledger: str, moment: float) -> None:
+    """Write the proof once. The snapshot copy is not this record."""
+    if not isinstance(chain, dict) or chain.get("bind_ok") is not True:
+        return
+    conn.execute(
+        """
+        INSERT INTO memecoin_reservations (
+            message_sha256, case_id, side, message_b64, router, blockhash,
+            last_valid_block_height, last_valid_provenance, expire_at, pool, intent_id, request_id,
+            ledger, ledger_provenance, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'server', ?)
+        """,
+        (
+            digest, case_id, side, message_b64, chain.get("router"), chain.get("blockhash"),
+            chain.get("last_valid_block_height"), chain.get("last_valid_provenance"), chain.get("expire_at"),
+            pool, intent_id, chain.get("request_id"), ledger, moment,
+        ),
+    )
+
+
+def _replace_reservation_triggers(conn) -> None:
+    """The reservation proof is insert-only. A later edit cannot extend it."""
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_proof")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservations_proof
+        BEFORE INSERT ON memecoin_reservations
+        FOR EACH ROW
+        WHEN NEW.ledger NOT IN ('live', 'paper')
+          OR NEW.ledger_provenance != 'server'
+          OR NEW.side NOT IN ('entry', 'exit')
+          OR NEW.router NOT IN ('metis', 'dflow', 'okx', 'jupiterz')
+          OR NEW.message_sha256 IS NULL OR NEW.message_b64 IS NULL OR NEW.blockhash IS NULL OR NEW.case_id IS NULL
+          OR (NEW.router IN ('metis', 'dflow', 'okx') AND (NEW.last_valid_block_height IS NULL OR NEW.last_valid_block_height <= 0))
+          OR (NEW.router = 'jupiterz' AND (NEW.expire_at IS NULL OR NEW.expire_at <= 0))
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_proof');
+        END
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS memecoin_reservations_immutable")
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_reservations_immutable
+        BEFORE UPDATE ON memecoin_reservations
+        BEGIN
+            SELECT RAISE(ABORT, 'reservation_immutable');
+        END
+        """
+    )
+
+
 def _install_lineage_triggers(conn) -> None:
     """Replace predecessor trigger definitions and record the revision in one transaction."""
     _replace_lineage_triggers(conn)
+    _replace_reservation_triggers(conn)
     conn.execute(
         "INSERT INTO settings (key, value, updated_at) VALUES ('memecoin_lineage_trigger', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         (_LINEAGE_TRIGGER_REVISION, time.time()),
