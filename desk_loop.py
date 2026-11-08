@@ -841,7 +841,7 @@ def _fee_for_message(transport, message: bytes, tip: int) -> dict:
     value = result.get("value")
     if value is None:
         return blank | {"fee_for_message_reason": "fee_for_message_unavailable"}
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= 2**64:
         return blank | {"fee_for_message_reason": "fee_for_message_malformed"}
     return {
         "fee_for_message_observed": True, "fee_for_message_lamports": value,

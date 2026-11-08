@@ -1928,6 +1928,8 @@ conn.close()
                 echoed = request.get("message")
                 if mode == "null":
                     value = None
+                elif mode == "value":
+                    value = chain.get("fee_value")
                 elif mode == "malformed":
                     return {"status": 200, "body": {"result": {"context": {"slot": "soon"}, "value": "5000"}, "message": echoed}}
                 elif mode == "stale":
@@ -2166,7 +2168,32 @@ conn.close()
             self.assertEqual(quoted_fee["fee_for_message_reason"], reason, mode)
             self.assertFalse(quoted_fee["combined_fee_usd_proven"], mode)
             self.assertFalse(quoted_fee["preflight_ready"], mode)
+            self.assertNotIn("fee_for_message", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
+        for label, amount in (("zero", 0), ("max", 2**64 - 1)):
+            chain["fee_mode"] = "value"
+            chain["fee_value"] = amount
+            quoted_fee = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
+            self.assertTrue(quoted_fee["fee_for_message_observed"], label)
+            self.assertEqual(quoted_fee["fee_for_message_lamports"], amount)
+            self.assertFalse(quoted_fee["charged_fee_proven"], label)
+            self.assertFalse(quoted_fee["preflight_ready"], label)
+            self.assertFalse(quoted_fee["gate_complete"], label)
+            self.assertFalse(quoted_fee["fee_usd_proven"], label)
+            self.assertFalse(quoted_fee["combined_fee_usd_proven"], label)
+            self.assertFalse(quoted_fee["rent_bound_proven"], label)
+            self.assertFalse(quoted_fee["ticket_limit_proven"], label)
+            self.assertNotIn("fee_for_message", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
+        for label, amount in (("overflow", 2**64), ("huge", 2**64 + 5), ("negative", -1), ("bool", True), ("noninteger", "5000")):
+            chain["fee_mode"] = "value"
+            chain["fee_value"] = amount
+            quoted_fee = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
+            self.assertFalse(quoted_fee["fee_for_message_observed"], label)
+            self.assertIsNone(quoted_fee["fee_for_message_lamports"], label)
+            self.assertEqual(quoted_fee["fee_for_message_reason"], "fee_for_message_malformed", label)
+            self.assertFalse(quoted_fee["charged_fee_proven"], label)
+            self.assertFalse(quoted_fee["preflight_ready"], label)
         chain["fee_mode"] = "clear"
+        chain.pop("fee_value", None)
         attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
         self.assertEqual(attempt["case_id"], case_id)
         self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
@@ -3045,6 +3072,29 @@ conn.close()
         self.assertEqual(exit_preflight["fee_for_message_lamports"], 5000)
         self.assertFalse(exit_preflight["charged_fee_proven"])
         self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])).decode("ascii"))
+        for label, amount in (("zero", 0), ("max", 2**64 - 1)):
+            chain["fee_mode"] = "value"
+            chain["fee_value"] = amount
+            exit_fee = desk_loop.preflight_reserved(case_id, stored["message_sha256"], transport, WHEN)
+            self.assertTrue(exit_fee["fee_for_message_observed"], label)
+            self.assertEqual(exit_fee["fee_for_message_lamports"], amount)
+            self.assertFalse(exit_fee["charged_fee_proven"], label)
+            self.assertFalse(exit_fee["preflight_ready"], label)
+            self.assertFalse(exit_fee["gate_complete"], label)
+            self.assertFalse(exit_fee["fee_usd_proven"], label)
+            self.assertNotIn("fee_for_message", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
+        for label, amount in (("overflow", 2**64), ("huge", 10**30), ("negative", -1), ("bool", True), ("noninteger", 1.5)):
+            chain["fee_mode"] = "value"
+            chain["fee_value"] = amount
+            exit_fee = desk_loop.preflight_reserved(case_id, stored["message_sha256"], transport, WHEN)
+            self.assertFalse(exit_fee["fee_for_message_observed"], label)
+            self.assertIsNone(exit_fee["fee_for_message_lamports"], label)
+            self.assertEqual(exit_fee["fee_for_message_reason"], "fee_for_message_malformed", label)
+            self.assertFalse(exit_fee["charged_fee_proven"], label)
+            self.assertFalse(exit_fee["preflight_ready"], label)
+        chain["fee_mode"] = "clear"
+        chain.pop("fee_value", None)
+        self.assertEqual(db.query("SELECT network_fee_lamports FROM memecoin_entry_receipts WHERE signature = 'entry-bound'")[0]["network_fee_lamports"], 1)
         self.assertFalse(exit_preflight["slippage_proven_by_simulation"])
         self.assertFalse(exit_preflight["program_rounding_proven"])
         self.assertFalse(exit_preflight["dex_fee_proven"])
