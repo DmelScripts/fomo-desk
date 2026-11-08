@@ -539,6 +539,8 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     embedded = decoded.blockhash
     if again != proof["message_sha256"] or again != message_sha256 or embedded != proof["blockhash"] or proof["side"] not in {"entry", "exit"} or proof["case_id"] != case_id:
         return base | identity | {"reason": "reservation_proof_mismatch", "blockhash": embedded}
+    if decoded.required_signatures != 1:
+        return base | identity | {"reason": "extra_signer", "holds": True, "resend": False}
     agreement = db.exclusive(lambda conn: memecoin_desk._identity_agreement(conn, proof))
     if agreement != "match":
         return base | identity | {
@@ -609,6 +611,8 @@ def _preflight_report(**extra) -> dict:
         "requested_micro_lamports_per_cu": None, "requested_priority_lamports": None,
         "requested_priority_formula": None, "priority_fee_observed": False,
         "priority_uses_consumed_units": False, "base_fee_proven": False,
+        "fee_for_message_observed": False, "fee_for_message_lamports": None,
+        "fee_for_message_reason": None, "charged_fee_proven": False,
         "instruction_slippage_within_cap": False, "instruction_slippage_bps": None,
         "quoted_out_amount": None, "candidate_min_out": None, "api_sample_min_out": None,
         "min_out_bound_proven": False, "program_rounding_proven": False,
@@ -727,6 +731,8 @@ def _exact_message_economics(decoded) -> dict:
     }
     if getattr(decoded, "lookups", None):
         return blank | {"lookup_unresolved": True, "economic_reason": "lookup_unresolved"}
+    if getattr(decoded, "required_signatures", None) != 1:
+        return blank | {"economic_reason": "extra_signer"}
     routes = []
     limits = []
     prices = []
@@ -796,6 +802,53 @@ def _exact_message_economics(decoded) -> dict:
     }
 
 
+def _fee_for_message(transport, message: bytes, tip: int) -> dict:
+    """Unsigned getFeeForMessage for this message. The value is not meta.fee."""
+    import base64
+    import jupiter_route_v2
+    blank = {
+        "fee_for_message_observed": False, "fee_for_message_lamports": None,
+        "charged_fee_proven": False, "fee_for_message_reason": "fee_for_message_unobserved",
+    }
+    encoded = base64.b64encode(message).decode("ascii")
+    try:
+        response = transport({
+            "method": "getFeeForMessage",
+            "message": encoded,
+            "commitment": "confirmed",
+            "minContextSlot": tip,
+        })
+    except Exception:
+        return blank | {"fee_for_message_reason": "fee_transport"}
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return blank | {"fee_for_message_reason": "fee_for_message_malformed"}
+    echoed = result.get("message", body.get("message"))
+    if echoed is not None and echoed != encoded:
+        return blank | {"fee_for_message_reason": "fee_for_message_message_mismatch"}
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return blank | {"fee_for_message_reason": "fee_for_message_context_missing"}
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return blank | {"fee_for_message_reason": "fee_for_message_context_malformed"}
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        reason = "fee_for_message_context_stale" if slot < tip else "fee_for_message_context_future"
+        return blank | {"fee_for_message_reason": reason}
+    if "value" not in result:
+        return blank | {"fee_for_message_reason": "fee_for_message_malformed"}
+    value = result.get("value")
+    if value is None:
+        return blank | {"fee_for_message_reason": "fee_for_message_unavailable"}
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return blank | {"fee_for_message_reason": "fee_for_message_malformed"}
+    return {
+        "fee_for_message_observed": True, "fee_for_message_lamports": value,
+        "charged_fee_proven": False, "fee_for_message_reason": None,
+    }
+
+
 def preflight_reserved(case_id: str, message_sha256: str, transport, now: float) -> dict:
     """Unsigned simulateTransaction of the stored message. The bytes are not replaced.
 
@@ -828,6 +881,10 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     tip = tip_body.get("result") if isinstance(tip_body, dict) else None
     if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
         return _preflight_report(reason="simulation_context_missing", case_id=case_id, message_sha256=message_sha256)
+    fee_quote = _fee_for_message(transport, solana_tx.message_bytes(encoded), tip) if decoded.required_signatures == 1 else {
+        "fee_for_message_observed": False, "fee_for_message_lamports": None,
+        "charged_fee_proven": False, "fee_for_message_reason": "extra_signer",
+    }
     payer = decoded.fee_payer
     pre = _account_lamports(transport({"method": "getAccountInfo", "account": payer, "purpose": "fee_payer"}), tip)
     compute = [bytes(item.data) for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
@@ -885,6 +942,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
         fee_lamports_match=False, fee_composition_proven=False, rent_unproven=True, fee_usd_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
         context_slot=parsed["slot"], lookups_resolved=False, signature_validated=False,
+        **fee_quote,
         **economics,
     )
 
@@ -1500,7 +1558,7 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") == "simulateTransaction":
+    if request.get("method") in {"simulateTransaction", "getFeeForMessage"}:
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

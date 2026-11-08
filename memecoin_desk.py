@@ -1039,6 +1039,8 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
         decoded = solana_tx.decode_transaction(__import__("base64").b64decode(message_b64, validate=True))
     except Exception:
         return _note(row, "risk", "message")
+    if decoded.required_signatures != 1 or decoded.static_keys[0] != phantom_transport.REQUIRED_WALLET:
+        return _note(row, "risk", "extra_signer" if decoded.required_signatures != 1 else "wallet")
     route = memecoin_exit._route(decoded)
     if route is None or route["source_mint"] != row["mint"] or route["in_amount"] != qty:
         return _note(row, "risk", "exit_mint")

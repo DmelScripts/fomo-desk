@@ -349,11 +349,12 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT, "extra": 1}},
             {"method": "POST", "url": "https://api.jup.ag/swap/v2/execute", "json": {"token": MINT}},
             {"method": "simulateTransaction", "transaction": "abc"},
+            {"method": "getFeeForMessage", "message": "abc"},
         ):
             posted = len(posts)
             with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
-            if bad.get("method") == "simulateTransaction":
+            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"}:
                 self.assertEqual(str(refused.exception), "method_refused")
                 self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
@@ -1921,6 +1922,23 @@ conn.close()
                 return {"status": 200, "body": {"result": result}}
             if method == "getSlot":
                 return {"status": 200, "body": {"result": 2_000_028}}
+            if method == "getFeeForMessage":
+                chain.setdefault("fee_messages", []).append(request.get("message"))
+                mode = chain.get("fee_mode") or "clear"
+                echoed = request.get("message")
+                if mode == "null":
+                    value = None
+                elif mode == "malformed":
+                    return {"status": 200, "body": {"result": {"context": {"slot": "soon"}, "value": "5000"}, "message": echoed}}
+                elif mode == "stale":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 1}, "value": 5000}, "message": echoed}}
+                elif mode == "mismatch":
+                    return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": 5000}, "message": "other-message"}}
+                elif mode == "missing":
+                    return {"status": 200, "body": {"result": {"value": 5000}}}
+                else:
+                    value = 5000
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": value}, "message": echoed}}
             if method == "simulateTransaction":
                 mode = chain.get("preflight_mode")
                 if not mode:
@@ -2104,6 +2122,11 @@ conn.close()
         self.assertIsNone(entry_preflight["instruction_slippage_bps"])
         self.assertFalse(entry_preflight["network_fee_instruction_proven"])
         self.assertFalse(entry_preflight["base_fee_proven"])
+        self.assertTrue(entry_preflight["fee_for_message_observed"], entry_preflight)
+        self.assertEqual(entry_preflight["fee_for_message_lamports"], 5000)
+        self.assertFalse(entry_preflight["charged_fee_proven"])
+        self.assertNotEqual(chain["fee_messages"][-1], db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])
+        self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])).decode("ascii"))
         self.assertFalse(entry_preflight["min_out_bound_proven"])
         self.assertFalse(entry_preflight["program_rounding_proven"])
         self.assertFalse(entry_preflight["dex_fee_proven"])
@@ -2128,6 +2151,22 @@ conn.close()
         self.assertTrue(again["simulation_clear"], again)
         entry_hash = db.query("SELECT message_sha256, blockhash FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_preflight_attempts WHERE message_sha256 = ?", (entry_hash["message_sha256"],))[0]["n"], 2)
+        for mode, reason in (
+            ("null", "fee_for_message_unavailable"),
+            ("malformed", "fee_for_message_context_malformed"),
+            ("stale", "fee_for_message_context_stale"),
+            ("mismatch", "fee_for_message_message_mismatch"),
+            ("missing", "fee_for_message_context_missing"),
+        ):
+            chain["fee_mode"] = mode
+            quoted_fee = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
+            self.assertFalse(quoted_fee["fee_for_message_observed"], mode)
+            self.assertIsNone(quoted_fee["fee_for_message_lamports"], mode)
+            self.assertFalse(quoted_fee["charged_fee_proven"], mode)
+            self.assertEqual(quoted_fee["fee_for_message_reason"], reason, mode)
+            self.assertFalse(quoted_fee["combined_fee_usd_proven"], mode)
+            self.assertFalse(quoted_fee["preflight_ready"], mode)
+        chain["fee_mode"] = "clear"
         attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
         self.assertEqual(attempt["case_id"], case_id)
         self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
@@ -2946,6 +2985,24 @@ conn.close()
         chain["publish_expiry"] = True
         chain["expire_at"] = None
         chain["malformed"] = False
+        import phantom_transport
+        payer = phantom_transport.REQUIRED_WALLET
+        two_signers = solana_tx.encode_legacy(
+            payer,
+            [payer, solana_tx.b58encode(b"\x22" * 32), solana_tx.COMPUTE_BUDGET],
+            1,
+            [(2, [], bytes([2]) + (200_000).to_bytes(4, "little"))],
+            chain["blockhash"],
+            required=2,
+        )
+        refused_exit = memecoin_desk.reserve_exit(case_id, two_signers, 1_000, jupiter_route_v2.Snapshot({}, 1, 1, WHEN), transport, WHEN)
+        self.assertEqual(refused_exit["reason"], "extra_signer", refused_exit)
+        self.assertFalse(refused_exit.get("live_ready"))
+        self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("inflight"))
+        two_econ = desk_loop._exact_message_economics(solana_tx.decode_transaction(__import__("base64").b64decode(two_signers)))
+        self.assertEqual(two_econ["economic_reason"], "extra_signer")
+        self.assertFalse(two_econ["instruction_slippage_within_cap"])
+        self.assertFalse(two_econ["network_fee_instruction_proven"])
         exited = desk_loop.run_supervised(transport, WHEN, rounds=1)
         self.assertTrue(exited.get("discovery"), exited)
         position = next(item for item in exited["discovery"]["positions"] if item.get("mint") == mint)
@@ -2984,6 +3041,10 @@ conn.close()
         self.assertEqual(exit_preflight["economic_reason"], "instruction_unsupported")
         self.assertFalse(exit_preflight["network_fee_instruction_proven"])
         self.assertFalse(exit_preflight["base_fee_proven"])
+        self.assertTrue(exit_preflight["fee_for_message_observed"], exit_preflight)
+        self.assertEqual(exit_preflight["fee_for_message_lamports"], 5000)
+        self.assertFalse(exit_preflight["charged_fee_proven"])
+        self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])).decode("ascii"))
         self.assertFalse(exit_preflight["slippage_proven_by_simulation"])
         self.assertFalse(exit_preflight["program_rounding_proven"])
         self.assertFalse(exit_preflight["dex_fee_proven"])

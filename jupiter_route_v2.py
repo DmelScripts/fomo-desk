@@ -410,7 +410,7 @@ def network_fee(instructions: list[bytes], signatures: int = 1) -> dict:
     price = prices[0]
     if limit <= 0 or limit > 1_400_000:
         return refused | {"reason": "compute_unit_limit_missing"}
-    if isinstance(signatures, bool) or not isinstance(signatures, int) or signatures < 1:
+    if isinstance(signatures, bool) or not isinstance(signatures, int) or signatures != 1:
         return refused | {"reason": "extra_signer"}
     requested = (price * limit + 999_999) // 1_000_000
     return {
