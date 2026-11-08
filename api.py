@@ -1269,6 +1269,31 @@ def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:
     return body
 
 
+@router.post("/api/memecoin/sol-usd")
+def memecoin_sol_usd(request: Request, body: dict | None = None) -> JSONResponse:
+    """This process reads the sponsored SOL/USD account. The body is not a price."""
+    require_app_token(request)
+    import pyth_sponsored
+    result = pyth_sponsored.public_fetch(time.time())
+    shown = {
+        "ok": result.get("ok") is True,
+        "fresh": result.get("fresh") is True,
+        "usable": result.get("fresh") is True,
+        "live": False,
+        "send": False,
+        "reason": result.get("reason"),
+        "slot": result.get("slot"),
+        "publish_time": result.get("publish_time"),
+        "observed_at": result.get("observed_at"),
+        "sol_used": True,
+        "usdc_used": False,
+        "request_body_used": False,
+        "hermes_called": False,
+        "deployed": False,
+    }
+    return JSONResponse(shown, status_code=200, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/memecoin/readiness")
 def memecoin_readiness(request: Request) -> JSONResponse:
     """This process only. Presence booleans, never a secret. Not a deployed production probe."""

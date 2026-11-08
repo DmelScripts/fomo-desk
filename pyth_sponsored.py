@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 
 import solana_tx
 import usdc_valuation
@@ -155,31 +156,83 @@ def parse_account(data: bytes, *, owner: str, address: str, feed_id: str, now: f
     }
 
 
-def status() -> dict:
-    """Pinned accounts, and the last read in this process. LIVE stays off."""
+def lamports_usd(lamports: int, leg: dict) -> Decimal | None:
+    """SOL/USD ceiling for a lamport amount. The pool price is not this rate."""
+    if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0 or not isinstance(leg, dict):
+        return None
+    if leg.get("fresh") is not True or leg.get("used") is not True:
+        return None
+    price = leg.get("price")
+    conf = leg.get("conf")
+    expo = leg.get("expo")
+    if isinstance(price, bool) or isinstance(conf, bool) or isinstance(expo, bool):
+        return None
+    if not isinstance(price, int) or not isinstance(conf, int) or not isinstance(expo, int):
+        return None
+    if conf < 0 or expo < -12 or expo > 0:
+        return None
+    ceiling = (Decimal(price) + Decimal(conf)) * (Decimal(10) ** expo)
+    if ceiling <= 0:
+        return None
+    return (Decimal(lamports) / Decimal(1_000_000_000) * ceiling).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
+
+def status(now: float | None = None) -> dict:
+    """Recompute age from the observation clock. A stored fresh flag does not stay fresh."""
+    moment = time.time() if now is None else now
     last = _LAST if isinstance(_LAST, dict) else {}
     fetched = last.get("fetched") is True
+    observed = last.get("observed_at")
+    published = last.get("publish_time")
+    observation_age = None if not isinstance(observed, (int, float)) else float(moment) - float(observed)
+    price_age = None if not isinstance(published, int) else float(moment) - published
+    fresh = (
+        fetched
+        and last.get("valid") is True
+        and last.get("hard_reason") is None
+        and isinstance(price_age, float)
+        and -5 <= price_age <= usdc_valuation.MAX_AGE_S
+    )
+    usable = fresh and isinstance(observation_age, float) and 0 <= observation_age <= usdc_valuation.MAX_AGE_S
+    stale_observation = isinstance(observation_age, float) and observation_age > usdc_valuation.MAX_AGE_S
+    if not fetched:
+        reason = "not_read"
+    elif last.get("hard_reason"):
+        reason = last["hard_reason"]
+    elif observed is None:
+        reason = last.get("reason") or "rpc_status"
+    elif not fresh:
+        reason = "valuation_stale"
+    else:
+        reason = None
     return {
-        "available": last.get("fresh") is True,
+        "available": usable,
         "configured": True,
         "valid": last.get("valid") is True,
-        "fresh": last.get("fresh") is True,
+        "fresh": fresh,
+        "usable": usable,
+        "stale_observation": stale_observation,
         "live": False,
-        "reason": last.get("reason") or ("not_read" if not fetched else None),
-        "usable": last.get("fresh") is True,
+        "reason": reason,
         "live_provider": False,
         "fetched": fetched,
-        "account": USDC_ACCOUNT,
+        "valuation": "sol_usd",
+        "usdc_used": False,
+        "account": SOL_ACCOUNT,
         "sol_account": SOL_ACCOUNT,
+        "usdc_account": USDC_ACCOUNT,
         "program_id": RECEIVER_PROGRAM_ID,
         "push_oracle_program_id": PUSH_ORACLE_PROGRAM_ID,
-        "feed_id": USDC_FEED,
+        "feed_id": SOL_FEED,
         "sol_feed_id": SOL_FEED,
-        "publish_time": last.get("publish_time"),
-        "age_s": last.get("age_s"),
+        "usdc_feed_id": USDC_FEED,
+        "publish_time": published,
+        "observed_at": observed,
+        "age_s": price_age,
+        "observation_age_s": observation_age,
         "slot": last.get("slot"),
         "freshness_window_s": usdc_valuation.MAX_AGE_S,
-        "sponsored_heartbeat": "60 seconds / 0.5 percent on SOL/USD and USDC/USD; not widened",
+        "sponsored_heartbeat": "60 seconds / 0.5 percent on SOL/USD; not widened",
         "hermes_called": False,
         "pusher": False,
         "rpc": RPC,
@@ -225,26 +278,51 @@ def read_accounts(transport, now: float) -> dict:
             parsed.append(_refused("account_encoding", address=address))
             continue
         parsed.append(parse_account(raw, owner=item.get("owner"), address=address, feed_id=feed, now=now))
-    sol, usdc = parsed
+    slot = context.get("slot") if isinstance(context, dict) else None
+    sol = _bind_posted_slot(parsed[0], slot)
+    usdc = _bind_posted_slot(parsed[1], slot)
+    sol["used"] = True
+    usdc["used"] = False
+    fresh = sol.get("fresh") is True and sol.get("reason") is None
     result = {
-        "ok": usdc.get("fresh") is True and sol.get("valid") is True,
+        "ok": fresh,
         "configured": True,
-        "valid": usdc.get("valid") is True,
-        "fresh": usdc.get("fresh") is True,
+        "valid": sol.get("valid") is True,
+        "fresh": fresh,
         "live": False,
         "fetched": True,
         "hermes_called": False,
         "pusher": False,
-        "reason": usdc.get("reason"),
-        "slot": context.get("slot") if isinstance(context, dict) else None,
-        "publish_time": usdc.get("publish_time"),
-        "age_s": usdc.get("age_s"),
-        "usdc": {key: usdc.get(key) for key in ("valid", "fresh", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
-        "sol": {key: sol.get(key) for key in ("valid", "fresh", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
+        "sol_used": True,
+        "usdc_used": False,
+        "reason": None if fresh else sol.get("reason"),
+        "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
+        "publish_time": sol.get("publish_time"),
+        "observed_at": float(now),
+        "age_s": None if sol.get("publish_time") is None else float(now) - sol["publish_time"],
+        "usdc": {key: usdc.get(key) for key in ("valid", "fresh", "used", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
+        "sol": {key: sol.get(key) for key in ("valid", "fresh", "used", "reason", "price", "conf", "expo", "publish_time", "posted_slot", "age_s", "upper")},
         "rpc": RPC,
     }
-    _LAST = result
+    _LAST = {
+        "fetched": True,
+        "observed_at": float(now),
+        "publish_time": sol.get("publish_time") if fresh or sol.get("valid") else None,
+        "valid": sol.get("valid") is True and sol.get("reason") != "posted_slot_future",
+        "hard_reason": sol.get("reason") if sol.get("reason") in {"posted_slot_future", "slot_unproven"} else None,
+        "slot": result["slot"],
+    }
     return result
+
+
+def _bind_posted_slot(leg: dict, slot) -> dict:
+    """A posted slot ahead of the confirmed context is not that read. A slot behind it can be."""
+    if isinstance(slot, bool) or not isinstance(slot, int):
+        return leg | {"fresh": False, "usable": False, "ok": False, "reason": "slot_unproven"}
+    posted = leg.get("posted_slot")
+    if isinstance(posted, int) and not isinstance(posted, bool) and posted > slot:
+        return leg | {"fresh": False, "usable": False, "ok": False, "reason": "posted_slot_future"}
+    return leg
 
 
 def public_fetch(now: float) -> dict:

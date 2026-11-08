@@ -336,6 +336,37 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
     return _advance(row, "filled", "executor", snap["fill"], snap)
 
 
+def record_exit_receipt(case_id: str, receipt: dict) -> dict:
+    """Store one exit fee from a receipt. A missing fee is not recorded as zero."""
+    row = _case(case_id)
+    if row is None or row["stage"] != "filled":
+        return _kill(case_id, None, "risk", "stage", None)
+    snap = _snapshot(row)
+    if snap.get("exit_fee_usd") is not None:
+        return _note(row, "risk", "exit_fee_already_recorded")
+    fee = _money(receipt.get("fee_usd")) if isinstance(receipt, dict) else None
+    if fee is None or fee <= 0:
+        return _note(row, "risk", "exit_fee_missing")
+    if fee > MAX_FEE:
+        return _note(row, "risk", "fee_cap")
+    snap["exit_fee_usd"] = format(fee, "f")
+    snap["exit_fee_source"] = "exit_receipt"
+    moment = time.time()
+
+    def work(conn):
+        current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None or current["stage"] != "filled":
+            return {"ok": False, "reason": "stage", "case_id": row["id"]}
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled'",
+            (json.dumps(snap, sort_keys=True), moment, row["id"]),
+        )
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_receipt", {"exit_fee_usd": snap["exit_fee_usd"]}, moment)
+        return {"ok": True, "reason": None, "case_id": row["id"], "stage": "filled", "exit_fee_usd": snap["exit_fee_usd"]}
+
+    return db.exclusive(work)
+
+
 def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: float | None = None) -> dict:
     """Apply the persisted stop and trail. A new loss total does not block this."""
     moment = time.time() if now is None else now
@@ -378,11 +409,12 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         "trail_breakeven_guaranteed": False,
         "loss_stop_blocks_exit": False,
     }
-    if action != "hold":
+    exit_fee = _money(snap.get("exit_fee_usd")) if action != "hold" else None
+    fee_ready = action == "hold" or (exit_fee is not None and exit_fee > 0)
+    if fee_ready and action != "hold":
         notional = _money(snap.get("notional_usd")) or TICKET
         proceeds = (notional * price / entry)
         entry_fee = _money(snap["fill"]["fee_usd"])
-        exit_fee = _money(snap["exit_fee_usd"]) if snap.get("exit_fee_usd") else Decimal("0")
         realized = proceeds - notional - entry_fee - exit_fee
         snap["exit"] = {
             "proceeds_usd": format(proceeds, "f"),
@@ -390,7 +422,7 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
             "exit_fee_usd": format(exit_fee, "f"),
             "realized_pnl": format(realized, "f"),
             "fee_counted_once": True,
-            "exit_fee_is_separate": snap.get("exit_fee_usd") is not None,
+            "exit_fee_is_separate": True,
         }
         snap["realized_pnl"] = format(realized, "f")
         snap["reserved_usd"] = "0.00"
@@ -404,6 +436,9 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         if _halted_conn(conn):
             _log(conn, row["id"], row["mint"], "risk", "kill", "kill_switch", None, {"reason": "kill_switch"}, moment)
             return {"ok": False, "reason": "kill_switch", "case_id": row["id"], "stage": "filled", "mint": row["mint"]}
+        if not fee_ready:
+            _log(conn, row["id"], row["mint"], "risk", "kill", "exit_fee_missing", None, {"reason": "exit_fee_missing"}, moment)
+            return {"ok": False, "reason": "exit_fee_missing", "case_id": row["id"], "stage": "filled", "mint": row["mint"]}
         conn.execute(
             "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled'",
             (target, json.dumps(snap, sort_keys=True), moment, row["id"]),

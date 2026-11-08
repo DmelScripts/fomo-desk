@@ -69,6 +69,11 @@ class TestLinks(unittest.TestCase):
         self.assertIn("r=savipww", profile_url(HANDLE))
 
     def test_button_uses_the_exact_string_and_plain_text_keeps_it(self):
+        from tests.support import temp_desk_env
+        import db
+        _tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
         url = coin_url(MINT, "solana")
         notifier = Notifier(mode="PAPER")
         notifier.push("Buy EX", "sized", url, [{"label": "Buy on FOMO", "url": url}])

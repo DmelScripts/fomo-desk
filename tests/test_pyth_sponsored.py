@@ -91,9 +91,58 @@ class SponsoredPythTests(unittest.TestCase):
         self.assertEqual(read["sol"]["price"], 8_909_321_745)
         self.assertFalse(read["live"])
         self.assertFalse(read["hermes_called"])
-        view = pyth_sponsored.status()
+        view = pyth_sponsored.status(WHEN)
         self.assertTrue(view["configured"])
         self.assertTrue(view["valid"])
         self.assertTrue(view["fresh"])
+        self.assertTrue(view["usable"])
+        self.assertFalse(view["stale_observation"])
         self.assertFalse(view["live"])
-        self.assertEqual(view["age_s"], read["age_s"])
+        self.assertEqual(view["valuation"], "sol_usd")
+        self.assertFalse(view["usdc_used"])
+        later = pyth_sponsored.status(WHEN + 40)
+        self.assertFalse(later["fresh"])
+        self.assertFalse(later["usable"])
+        self.assertGreater(later["age_s"], 30)
+        self.assertNotEqual(later["age_s"], view["age_s"])
+
+    def test_a_future_posted_slot_is_rejected_and_a_slot_behind_is_not(self):
+        import base64
+        def transport(slot):
+            def inner(request):
+                return {"status": 200, "body": {"result": {
+                    "context": {"slot": slot},
+                    "value": [
+                        {"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": [base64.b64encode(SOL).decode(), "base64"]},
+                        {"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": [base64.b64encode(USDC).decode(), "base64"]},
+                    ],
+                }}}
+            return inner
+        behind = pyth_sponsored.read_accounts(transport(466835746), WHEN)
+        self.assertTrue(behind["fresh"], behind)
+        self.assertEqual(behind["sol"]["posted_slot"], 466835718)
+        self.assertLess(behind["sol"]["posted_slot"], behind["slot"])
+        future = pyth_sponsored.read_accounts(transport(1), WHEN)
+        self.assertFalse(future["ok"])
+        self.assertEqual(future["reason"], "posted_slot_future")
+        self.assertFalse(future["fresh"])
+
+    def test_a_stale_sol_price_is_not_saved_by_a_fresh_usdc_leg(self):
+        import base64
+        sol_publish = 1794123880
+        usdc = bytearray(USDC)
+        usdc[93:101] = int(sol_publish + 120).to_bytes(8, "little", signed=True)
+        def transport(request):
+            return {"status": 200, "body": {"result": {
+                "context": {"slot": 466835746},
+                "value": [
+                    {"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": [base64.b64encode(SOL).decode(), "base64"]},
+                    {"owner": pyth_sponsored.RECEIVER_PROGRAM_ID, "data": [base64.b64encode(bytes(usdc)).decode(), "base64"]},
+                ],
+            }}}
+        read = pyth_sponsored.read_accounts(transport, sol_publish + 120)
+        self.assertFalse(read["sol"]["fresh"])
+        self.assertTrue(read["usdc"]["fresh"])
+        self.assertFalse(read["usdc"]["used"])
+        self.assertFalse(read["ok"])
+        self.assertEqual(read["reason"], "valuation_stale")

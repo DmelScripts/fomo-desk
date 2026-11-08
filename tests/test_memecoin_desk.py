@@ -237,6 +237,11 @@ class MemecoinDeskTests(unittest.TestCase):
         armed = memecoin_desk.mark(case_id, "1.12", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(armed["action"], "hold")
         self.assertTrue(memecoin_desk.view(case_id)["snapshot"]["trail_armed"])
+        missing_fee = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
+        self.assertEqual(missing_fee["reason"], "exit_fee_missing")
+        self.assertEqual(memecoin_desk.view(case_id)["stage"], "filled")
+        recorded = memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})
+        self.assertTrue(recorded["ok"], recorded)
         exited = memecoin_desk.mark(case_id, "0.9856", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(exited["action"], "trail")
         closed = memecoin_desk.view(case_id)["snapshot"]
@@ -253,10 +258,12 @@ class MemecoinDeskTests(unittest.TestCase):
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         for number in (40, 41, 42):
             case_id = self._filled(number)
+            self.assertTrue(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["ok"])
             stopped = memecoin_desk.mark(case_id, "0.01", source="fixture_price", fetched_at=NOW, now=NOW)
             self.assertEqual(stopped["action"], "stop")
         blocked = self._analyzed(43)
         self.assertEqual(_protect(blocked)["reason"], "stop_new_entries")
+        self.assertTrue(memecoin_desk.record_exit_receipt(live, {"fee_usd": "0.04"})["ok"])
         stopped = memecoin_desk.mark(live, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(stopped["action"], "stop")
         self.assertTrue(memecoin_desk.view(live)["snapshot"]["exit"]["fee_counted_once"])
@@ -304,15 +311,18 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def test_exit_pnl_counts_the_recorded_entry_fee_once(self):
         case_id = self._filled(91)
+        missing = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
+        self.assertEqual(missing["reason"], "exit_fee_missing")
+        self.assertTrue(memecoin_desk.record_exit_receipt(case_id, {"fee_usd": "0.04"})["ok"])
         closed = memecoin_desk.mark(case_id, "0.94", source="fixture_price", fetched_at=NOW, now=NOW)
         self.assertEqual(closed["action"], "stop")
         body = memecoin_desk.view(case_id)["snapshot"]
         booked = body["exit"]
         notional = Decimal(body["notional_usd"])
         proceeds = notional * Decimal("0.94")
-        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05"))
-        self.assertEqual(booked["exit_fee_usd"], "0")
-        self.assertFalse(booked["exit_fee_is_separate"])
+        self.assertEqual(Decimal(booked["realized_pnl"]), proceeds - notional - Decimal("0.05") - Decimal("0.04"))
+        self.assertEqual(booked["exit_fee_usd"], "0.04")
+        self.assertEqual(booked["entry_fee_usd"], "0.05")
         self.assertTrue(booked["fee_counted_once"])
 
     def test_a_restart_keeps_the_fill_and_does_not_send_again(self):
@@ -393,3 +403,20 @@ class MemecoinDeskTests(unittest.TestCase):
         body = client.get("/api/memecoin/" + ran.json()["case_id"], headers=AUTH).json()
         self.assertFalse(body["live_ready"])
         self.assertFalse(body["send"])
+        import pyth_sponsored
+        fetched = []
+
+        def prices(now):
+            fetched.append(now)
+            return {"ok": False, "fresh": False, "reason": "valuation_stale", "slot": 5, "publish_time": 1, "observed_at": now, "hermes_called": False}
+
+        previous_fetch = pyth_sponsored.public_fetch
+        pyth_sponsored.public_fetch = prices
+        self.addCleanup(lambda: setattr(pyth_sponsored, "public_fetch", previous_fetch))
+        forged = client.post("/api/memecoin/sol-usd", headers=AUTH, json={"owner": "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ", "data": "AAAA", "upper": "0.01", "now": 1})
+        self.assertEqual(forged.status_code, 200, forged.text)
+        self.assertEqual(len(fetched), 1)
+        self.assertFalse(forged.json()["request_body_used"])
+        self.assertFalse(forged.json()["live"])
+        self.assertEqual(forged.json()["reason"], "valuation_stale")
+        self.assertNotIn("0.01", forged.text)

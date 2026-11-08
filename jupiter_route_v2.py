@@ -32,6 +32,8 @@ import solana_tx
 import solana_whirlpool
 import usdc_valuation
 
+SLOT_LAG_MAX = 150
+
 EVENT = "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"
 DISC = bytes([187, 100, 250, 204, 49, 196, 175, 20])
 WHIRLPOOL = 17
@@ -229,6 +231,75 @@ def sol_micro_from_pool(pool_data: bytes) -> int | None:
         return None
 
 
+class Snapshot:
+    """Accounts from one getMultipleAccounts and a later getSlot. A dict is not a snapshot."""
+
+    def __init__(self, accounts: dict, slot: int, tip_slot: int, fetched_at: float):
+        self.accounts = accounts
+        self.slot = slot
+        self.tip_slot = tip_slot
+        self.fetched_at = fetched_at
+
+
+def read_snapshot(transport, keys: list[str], now: float) -> dict:
+    """Bind pool, tick, and wallet bytes to the slot the server just read."""
+    refused = {"ok": False, "snapshot": None}
+    if transport is None or not isinstance(keys, list) or not keys:
+        return refused | {"reason": "snapshot_unbound"}
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return refused | {"reason": "snapshot_clock"}
+    try:
+        batch = transport({"method": "getMultipleAccounts", "accounts": list(keys)})
+        tip = transport({"method": "getSlot"})
+    except Exception:
+        return refused | {"reason": "snapshot_transport"}
+    if not isinstance(batch, dict) or batch.get("status") != 200 or not isinstance(tip, dict) or tip.get("status") != 200:
+        return refused | {"reason": "snapshot_status"}
+    body = batch.get("body") if isinstance(batch.get("body"), dict) else None
+    result = body.get("result") if isinstance(body, dict) and isinstance(body.get("result"), dict) else None
+    tip_body = tip.get("body") if isinstance(tip.get("body"), dict) else None
+    if result is None or tip_body is None:
+        return refused | {"reason": "snapshot_shape"}
+    context = result.get("context") if isinstance(result.get("context"), dict) else {}
+    slot = context.get("slot")
+    tip_slot = tip_body.get("result")
+    if isinstance(slot, bool) or not isinstance(slot, int) or isinstance(tip_slot, bool) or not isinstance(tip_slot, int):
+        return refused | {"reason": "slot_unproven"}
+    lag = tip_slot - slot
+    if lag == 0:
+        return refused | {"reason": "slot_echo", "slot": slot, "tip_slot": tip_slot}
+    if lag < 0 or lag > SLOT_LAG_MAX:
+        return refused | {"reason": "slot_lag", "slot": slot, "tip_slot": tip_slot}
+    value = result.get("value")
+    if not isinstance(value, list) or len(value) != len(keys):
+        return refused | {"reason": "snapshot_shape"}
+    import base64
+    accounts = {}
+    for key, item in zip(keys, value):
+        if not isinstance(item, dict) or not isinstance(item.get("data"), list) or not isinstance(item.get("owner"), str):
+            return refused | {"reason": "account_missing", "account": key}
+        try:
+            raw = base64.b64decode(item["data"][0], validate=True)
+        except Exception:
+            return refused | {"reason": "account_encoding", "account": key}
+        accounts[key] = (item["owner"], raw)
+    return {"ok": True, "reason": None, "snapshot": Snapshot(accounts, slot, tip_slot, float(now))}
+
+
+def _snapshot_clock(snapshot: Snapshot, now: float) -> str | None:
+    lag = snapshot.tip_slot - snapshot.slot
+    if lag == 0:
+        return "slot_echo"
+    if lag < 0 or lag > SLOT_LAG_MAX:
+        return "slot_lag"
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return "snapshot_clock"
+    age = float(now) - snapshot.fetched_at
+    if age < -5 or age > usdc_valuation.MAX_AGE_S:
+        return "snapshot_stale"
+    return None
+
+
 def _hop_privileges(accounts: list[dict], remaining: list[int]) -> str | None:
     """Writable and signer bits for the hop. The inner swap is not a second instruction."""
     if len(remaining) != 12:
@@ -263,8 +334,6 @@ def _amm_bound(parsed: dict, state: dict, a_to_b: bool, tick_accounts: list[byte
         return {"ok": False, "reason": "amm_quote_zero"}
     if parsed["quoted_out_amount"] > quoted["token_est_out"]:
         return {"ok": False, "reason": "quoted_above_amm", "est_out": quoted["token_est_out"]}
-    if parsed["min_out"] < quoted["token_est_out"]:
-        return {"ok": False, "reason": "min_below_amm", "est_out": quoted["token_est_out"]}
     return {"ok": True, "est_out": quoted["token_est_out"], "min_out": quoted["token_min_out"]}
 
 
@@ -333,10 +402,19 @@ def _wrap_shape(decoded: solana_tx.Decoded, *, side: str, mint: str) -> dict:
     return {"swap": swap, "compute": compute, "transfer": transfer, "wsol": wsol}
 
 
-def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote: dict | None, *, side: str, mint: str, sponsored_usdc: tuple[str, bytes] | None = None, now: float | None = None) -> dict:
-    """Read the wrap and the swap from the message. A side blob is not the fee."""
+def decode_message(tx_b64: str, snapshot, *, side: str, mint: str, now: float | None = None, slippage_allowance_bps: int | None = None, price_transport=None) -> dict:
+    """Read the wrap and the swap from a slot-bound snapshot. A price dict is not the rate."""
     import base64
-    refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "message_bound": False}
+    refused = {
+        "ok": False, "send": False, "sign": False, "live_ready": False, "message_bound": False,
+        "owner_slippage_approved": False, "buy_proven": False, "exit_proven": False,
+    }
+    if not isinstance(snapshot, Snapshot):
+        return refused | {"reason": "snapshot_unbound"}
+    moment = time.time() if now is None else now
+    clock = _snapshot_clock(snapshot, moment)
+    if clock is not None:
+        return refused | {"reason": clock, "slot": snapshot.slot, "tip_slot": snapshot.tip_slot}
     try:
         decoded = solana_tx.decode_transaction(base64.b64decode(tx_b64, validate=True))
     except Exception:
@@ -356,7 +434,7 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
         return refused | {"reason": "wrap_unbound", "message_bound": True}
     if side == "exit" and decoded.static_keys[swap.account_indexes[2]] != shape["wsol"]:
         return refused | {"reason": "wrap_unbound", "message_bound": True}
-    held = _wsol_amount(account_data.get(shape["wsol"]))
+    held = _wsol_amount(snapshot.accounts.get(shape["wsol"]))
     if held is None:
         return refused | {"reason": "wsol_balance_unproven", "message_bound": True}
     if held > 0:
@@ -369,15 +447,20 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
             return refused | {"reason": "accounts", "message_bound": True}
         accounts.append({"pubkey": decoded.static_keys[index], "isSigner": signer, "isWritable": writable})
     result = decode(
-        accounts, bytes(swap.data), side=side, mint=mint, account_data=account_data,
-        compute=shape["compute"], canonical_pool=canonical_pool, quote=quote, message_bound=True,
-        sponsored_usdc=sponsored_usdc, now=now,
+        accounts, bytes(swap.data), side=side, mint=mint, account_data=snapshot.accounts,
+        compute=shape["compute"], message_bound=True,
+        now=moment, slippage_allowance_bps=slippage_allowance_bps, price_transport=price_transport,
     )
+    if not isinstance(result, dict):
+        return refused | {"reason": "decode_return", "message_bound": True}
     result["wrap_verified"] = result.get("ok") is True
+    result["slot"] = snapshot.slot
+    result["tip_slot"] = snapshot.tip_slot
+    result["owner_slippage_approved"] = False
     return result
 
 
-def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], canonical_pool: bytes, quote: dict | None, message_bound: bool = False, sponsored_usdc: tuple[str, bytes] | None = None, now: float | None = None) -> dict:
+def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], message_bound: bool = False, now: float | None = None, slippage_allowance_bps: int | None = None, price_transport=None) -> dict:
     """One Whirlpool route_v2. SOL/USDC is recognized and is not a memecoin fill."""
     parsed = parse(data)
     result = {
@@ -448,41 +531,32 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     result["network_lamports"] = priced.get("network_lamports")
     if priced.get("ok") is not True:
         return result | {"reason": priced.get("reason"), "min_out": parsed["min_out"], "min_out_proven": True}
-    sol_micro = sol_micro_from_pool(canonical_pool) if isinstance(canonical_pool, (bytes, bytearray)) else None
     moment = time.time() if now is None else now
-    onchain_live = False
-    if sponsored_usdc is not None:
-        owner, raw = sponsored_usdc
-        onchain = pyth_sponsored.parse_account(raw, owner=owner, address=pyth_sponsored.USDC_ACCOUNT, feed_id=pyth_sponsored.USDC_FEED, now=moment)
-        if onchain.get("usable") is not True:
-            return result | {"reason": onchain.get("reason"), "usd_live": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
-        quote = onchain
-        onchain_live = True
-    assessed = usdc_valuation.assess(quote, moment) if isinstance(quote, dict) else {"usable": False, "reason": "valuation_missing"}
-    if sol_micro is None or assessed.get("usable") is not True:
-        return result | {"reason": assessed.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
-    mint_a, _vault_a, mint_b, _vault_b = solana_whirlpool.pool_fields(account_data[pool][1])
-    if bound["source_mint"] == solana_tx.NATIVE_MINT:
-        dex_lamports = fee
-    else:
-        dex_lamports = token_raw_to_lamports(fee, state["sqrt_price"], mint_a == bound["source_mint"])
-    if dex_lamports is None:
-        return result | {"reason": "dex_fee_dimension", "min_out": parsed["min_out"], "min_out_proven": True}
-    micro = lamports_to_micro_usdc(dex_lamports + priced["network_lamports"], sol_micro)
-    result["dex_fee_lamports"] = dex_lamports
-    ceiling = usdc_valuation.usd_ceiling(micro, assessed)
-    if ceiling is None or micro is None:
-        return result | {"reason": quote.get("reason") or "usd_unpriced", "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
+    prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
+    sol = prices.get("sol") if isinstance(prices, dict) else None
+    if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
+        return result | {"reason": prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "pool_priced_sol": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
+    if side != "buy":
+        return result | {"reason": "token_fee_unpriced", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "exposure_cap_applies": False, "token_raw_counted_as_lamports": False, "dex_fee_unit": "token_raw", "min_out": parsed["min_out"]}
+    spend_fee = fee + priced["network_lamports"]
+    ceiling = pyth_sponsored.lamports_usd(spend_fee, sol)
+    result["dex_fee_lamports"] = fee
+    if ceiling is None:
+        return result | {"reason": "usd_unpriced", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "min_out": parsed["min_out"]}
     result["combined_fee_usd"] = format(ceiling, "f")
     result["combined_fee_usd_proven"] = True
-    result["usd_live"] = onchain_live and assessed.get("usable") is True
-    result["usd_origin"] = "pyth_sponsored" if onchain_live else "caller"
+    result["usd_live"] = True
+    result["usd_origin"] = "sol_usd"
+    result["pool_priced_sol"] = False
     if ceiling > Decimal("0.05"):
         return result | {"reason": "fee_cap", "min_out": parsed["min_out"]}
-    exposure = usdc_valuation.usd_ceiling(lamports_to_micro_usdc(parsed["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT * 2, sol_micro), assessed)
+    rent = solana_tx.TOKEN_ACCOUNT_RENT * 2
+    exposure = pyth_sponsored.lamports_usd(parsed["in_amount"] + rent, sol)
+    result["exposure_unit"] = "lamports"
+    result["exposure_cap_applies"] = True
     result["exposure_usd"] = None if exposure is None else format(exposure, "f")
     if exposure is None or exposure > Decimal("8.00"):
-        return result | {"reason": "exposure_cap", "min_out": parsed["min_out"]}
+        return result | {"reason": "exposure_cap" if exposure is not None else "exposure_unpriced", "min_out": parsed["min_out"]}
     tick_bytes = []
     for index in remaining[8:11]:
         record = account_data.get(keys[index])
@@ -494,15 +568,30 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         return result | {"reason": quoted_ok.get("reason"), "min_out": parsed["min_out"], "amm_est_out": quoted_ok.get("est_out")}
     result["amm_est_out"] = quoted_ok.get("est_out")
     result["amm_min_out"] = quoted_ok.get("min_out")
-    if not result["usd_live"]:
-        return result | {"reason": "usd_not_live", "min_out": parsed["min_out"], "buy_proven": False, "exit_proven": False}
+    allowance = slippage_allowance_bps
+    result["owner_slippage_approved"] = False
+    if allowance is None:
+        return result | {"reason": "slippage_unapproved", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"], "buy_proven": False, "exit_proven": False}
+    if isinstance(allowance, bool) or not isinstance(allowance, int) or not 0 <= allowance <= 10_000:
+        return result | {"reason": "slippage_allowance_unbound", "min_out": parsed["min_out"]}
+    result["slippage_allowance_bps"] = allowance
+    result["slippage_allowance_source"] = "test_fixture"
+    if parsed["slippage_bps"] > allowance:
+        return result | {"reason": "slippage_exceeds", "min_out": parsed["min_out"], "slippage_bps": parsed["slippage_bps"]}
+    floor = quoted_ok["est_out"] * (10_000 - allowance) // 10_000
+    if parsed["min_out"] < floor:
+        return result | {"reason": "min_below_amm", "min_out": parsed["min_out"], "allowance_floor": floor}
     return result | {
-        "reason": "slippage_unapproved",
+        "ok": True,
+        "reason": None,
+        "buy_proven": side == "buy",
+        "exit_proven": side == "exit",
         "min_out": parsed["min_out"],
         "slippage_bps": parsed["slippage_bps"],
-        "buy_proven": False,
-        "exit_proven": False,
-        "ok": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "owner_slippage_approved": False,
     }
 
 
