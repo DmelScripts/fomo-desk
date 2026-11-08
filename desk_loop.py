@@ -542,7 +542,7 @@ def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
     refused = {"ok": False, "reason": "intent_unbound"}
     try:
         rows = db.query(
-            "SELECT id, stage, snapshot_json FROM memecoin_cases WHERE mint = ? AND stage NOT IN ('rejected', 'exited')",
+            "SELECT id, stage, snapshot_json, ledger, ledger_provenance FROM memecoin_cases WHERE mint = ? AND stage NOT IN ('rejected', 'exited')",
             (mint,),
         )
     except Exception:
@@ -561,6 +561,9 @@ def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
     if synthetic and not allow_synthetic:
         return refused | {"reason": "synthetic_not_live"}
     if stage in {"filled", "partial", "exit_intent"}:
+        mode = memecoin_desk.execution_mode(rows[0])
+        if mode != "live":
+            return refused | {"reason": "paper_not_live" if mode == "paper" else "exit_unproven"}
         if isinstance(snap.get("inflight"), dict):
             return refused | {"reason": "exit_inflight"}
         if stage == "filled":
@@ -588,10 +591,11 @@ def _open_positions() -> list:
             """
             SELECT id, mint, stage, snapshot_json, ledger FROM memecoin_cases
             WHERE stage IN ('filled', 'partial', 'exit_intent')
-              AND ledger = 'live'
+              AND ledger = 'live' AND ledger_provenance = 'server'
               AND EXISTS (
                 SELECT 1 FROM memecoin_entry_receipts
                 WHERE case_id = memecoin_cases.id AND failed = 0 AND qty > 0
+                  AND ledger = 'live' AND ledger_provenance = 'server'
               )
             """
         )

@@ -505,15 +505,15 @@ class DeskLoopTests(unittest.TestCase):
         held["pool"] = values["pool"]
         held["entry_funding"] = {"source": "entry_receipt", "proven": True, "signature": "receipt-supervised-exit"}
         db.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, pool) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live', ?)",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance, pool) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live', 'server', ?)",
             ("receipt-supervised-exit", swap_mint, "supervised", slot["context"], exit_qty, 1, 5000, 1, "0.01", values["pool"]),
         )
         db.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger) VALUES (?, ?, ?, ?, ?, ?, 'live')",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, 'live', 'server')",
             ("exit-row-400k", swap_mint, "supervised-exit", slot["context"], "0.01", 400_000),
         )
         db.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger) VALUES (?, ?, ?, ?, ?, ?, 'live')",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, 'live', 'server')",
             ("exit-row-other", "other-case", "other", slot["context"], "0.01", 400_000),
         )
         db.execute(
@@ -572,11 +572,11 @@ class DeskLoopTests(unittest.TestCase):
         import db
         import json
         db.execute(
-            "UPDATE memecoin_cases SET stage = 'filled', ledger = 'live', snapshot_json = ? WHERE id = ?",
+            "UPDATE memecoin_cases SET stage = 'filled', ledger = 'live', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
             (json.dumps(snap, sort_keys=True), opened["case_id"]),
         )
         db.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live')",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live', 'server')",
             ("entry-open", opened["case_id"], "open", 1, 100, 1, 1, 1, "0.01"),
         )
         price = {"usd": "1.00"}
@@ -639,15 +639,15 @@ class DeskLoopTests(unittest.TestCase):
         }, now=NOW)
         case_id = opened["case_id"]
         db.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live')",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'live', 'server')",
             ("entry-qty", case_id, "qty", 1, 999_899, 1, 1, 1, "0.01"),
         )
         db.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger) VALUES (?, ?, ?, ?, ?, ?, 'live')",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, 'live', 'server')",
             ("sold-400", case_id, "sold", 2, "0.01", 400_000),
         )
         db.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger) VALUES (?, ?, ?, ?, ?, ?, 'live')",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, 'live', 'server')",
             ("sold-else", "another-case", "else", 2, "0.01", 400_000),
         )
         snap = memecoin_desk.view(case_id)["snapshot"]
@@ -655,7 +655,7 @@ class DeskLoopTests(unittest.TestCase):
         snap["live_receipts"] = []
         snap["exit_intent"] = {"source": "server_pool_pyth", "live": True, "action": "stop"}
         db.execute(
-            "UPDATE memecoin_cases SET stage = 'exit_intent', snapshot_json = ? WHERE id = ?",
+            "UPDATE memecoin_cases SET stage = 'exit_intent', ledger = 'live', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
             (json.dumps(snap, sort_keys=True), case_id),
         )
         self.assertEqual(memecoin_desk.receipt_remaining(case_id)["remaining"], 599_899)
@@ -669,10 +669,10 @@ class DeskLoopTests(unittest.TestCase):
         db.execute(
             """
             INSERT INTO memecoin_risk_intents (
-                id, case_id, ledger, entry_signature, action, pool, slot, mark_price_usd,
+                id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd,
                 entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals,
                 evidence_json, created_at
-            ) VALUES ('intent-qty', ?, 'live', 'entry-qty', 'stop', ?, 1, '0.90', '1', '0.94', 999899, 1, 6, '{}', ?)
+            ) VALUES ('intent-qty', ?, 'live', 'server', 'entry-qty', 'stop', ?, 1, '0.90', '1', '0.94', 999899, 1, 6, '{}', ?)
             """,
             (case_id, pool, NOW),
         )
@@ -828,11 +828,11 @@ class DeskLoopTests(unittest.TestCase):
         forged["entry_funding"] = {"source": "entry_receipt", "proven": True, "signature": "sig-synthetic", "tokens_out": 10}
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(forged, sort_keys=True), case_id))
         db.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'synthetic')",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'synthetic', 'server')",
             ("sig-synthetic", case_id, "forged", 1, 10, 1, 1, 1, "0.01"),
         )
         db.execute(
-            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger) VALUES ('refund-synthetic', ?, 1, 1, '5.00', 1, 'synthetic')",
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger, ledger_provenance) VALUES ('refund-synthetic', ?, 1, 1, '5.00', 1, 'synthetic', 'server')",
             (case_id,),
         )
         self.assertEqual(memecoin_desk.loss_totals()["live_loss_usd"], "0.00")
@@ -841,7 +841,7 @@ class DeskLoopTests(unittest.TestCase):
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
-        db.execute("UPDATE memecoin_cases SET stage = 'protected', ledger = 'live' WHERE id = ?", (live["case_id"],))
+        db.execute("UPDATE memecoin_cases SET stage = 'protected', ledger = 'live', ledger_provenance = 'server' WHERE id = ?", (live["case_id"],))
         replay = memecoin_desk.confirm_entry(live["case_id"], "sig-synthetic", NOW)
         self.assertEqual(replay["reason"], "cross_ledger_replay")
         self.assertEqual(memecoin_desk.view(live["case_id"])["stage"], "protected")
@@ -996,12 +996,16 @@ class DeskLoopTests(unittest.TestCase):
             db.execute(
                 "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed) VALUES ('omit', 'odd', 'omit', 1, 1, 1, 1, 1, '0.01', 0)"
             )
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES ('no-prov', 'odd', 'no-prov', 1, 1, 1, 1, 1, '0.01', 0, 'live')"
+            )
         winners = []
 
         def insert(signature):
             try:
                 db.execute(
-                    "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, 'odd', 'race', 1, 1, 1, 1, 1, '0.01', 0, 'live')",
+                    "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, 'odd', 'race', 1, 1, 1, 1, 1, '0.01', 0, 'live', 'server')",
                     (signature,),
                 )
                 winners.append(signature)
@@ -1015,6 +1019,10 @@ class DeskLoopTests(unittest.TestCase):
             thread.join()
         self.assertEqual(winners.count("same-sig"), 1)
         self.assertEqual(len(db.query("SELECT signature FROM memecoin_entry_receipts WHERE signature = 'same-sig'")), 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'caller' WHERE signature = 'same-sig'")
+        self.assertEqual(db.query("SELECT ledger_provenance, cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'same-sig'")[0]["cost_basis_lamports"], 1)
+        self.assertEqual(db.query("SELECT ledger_provenance FROM memecoin_entry_receipts WHERE signature = 'same-sig'")[0]["ledger_provenance"], "server")
 
     def test_legacy_default_live_is_quarantined_and_the_hold_stays(self):
         import db

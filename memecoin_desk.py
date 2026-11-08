@@ -283,11 +283,11 @@ def receipt_remaining(case_id: str) -> dict:
     def work(conn):
         _ensure_conn(conn)
         bought_rows = conn.execute(
-            "SELECT signature, qty FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
+            "SELECT signature, qty, ledger, ledger_provenance FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
             (case_id,),
         ).fetchall()
         sold_rows = conn.execute(
-            "SELECT signature, qty FROM memecoin_exit_receipts WHERE case_id = ?",
+            "SELECT signature, qty, ledger, ledger_provenance FROM memecoin_exit_receipts WHERE case_id = ?",
             (case_id,),
         ).fetchall()
         if not bought_rows:
@@ -298,6 +298,8 @@ def receipt_remaining(case_id: str) -> dict:
             if item["signature"] in seen:
                 continue
             seen.add(item["signature"])
+            if item["ledger_provenance"] != "server" or item["ledger"] not in _LEDGERS:
+                return refused | {"reason": "provenance_unproven"}
             qty = item["qty"]
             if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
                 return refused
@@ -308,6 +310,8 @@ def receipt_remaining(case_id: str) -> dict:
             if item["signature"] in exited:
                 continue
             exited.add(item["signature"])
+            if item["ledger_provenance"] != "server" or item["ledger"] not in _LEDGERS:
+                return refused | {"reason": "provenance_unproven"}
             qty = item["qty"]
             if isinstance(qty, bool) or not isinstance(qty, int) or qty < 0:
                 return refused | {"reason": "exit_qty_unproven"}
@@ -552,7 +556,9 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
     snap["live_ledger"] = False
     snap["peak_price_usd"] = snap["entry_price_usd"]
     snap["trail_armed"] = False
-    return _advance(row, "filled", "executor", snap["fill"], snap)
+    if execution_mode(row) not in {"live", "paper"}:
+        return _note(row, "executor", "paper_not_live")
+    return _advance(row, "filled", "executor", snap["fill"], snap, ledger="paper")
 
 
 def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None, now: float | None = None) -> dict:
@@ -902,15 +908,15 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
     row = _case(case_id)
     if row is None or row["stage"] not in {"filled", "partial", "exit_intent"}:
         return _kill(case_id, None, "risk", "stage", None)
-    foreign = _foreign_ledger(row, "risk")
-    if foreign is not None:
-        return foreign
-    snap_now = _snapshot(row)
-    paper = _ledger_of(row) == "paper" or (
-        isinstance(snap_now.get("fill"), dict) and snap_now["fill"].get("fixture") is True
-        and isinstance(snap_now.get("entry_funding"), dict) and snap_now["entry_funding"].get("source") == "paper_harness"
-    )
-    if not paper and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
+    mode = execution_mode(row)
+    if mode == "unknown":
+        return _quarantine(row, "ledger_unknown")
+    if mode == "synthetic":
+        return _note(row, "risk", "synthetic_not_live")
+    paper = mode == "paper"
+    if mode == "live" and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
+        return _note(row, "risk", "exit_unproven")
+    if mode not in {"live", "paper"}:
         return _note(row, "risk", "exit_unproven")
     if not isinstance(snapshot, jupiter_route_v2.Snapshot):
         return _note(row, "risk", "snapshot_unbound")
@@ -1055,15 +1061,15 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
     row = _case(case_id)
     if row is None or row["stage"] not in {"filled", "partial", "exit_intent"}:
         return _kill(case_id, None, "risk", "stage", None)
-    foreign = _foreign_ledger(row, "risk")
-    if foreign is not None:
-        return foreign
     snap = _snapshot(row)
-    paper_exit = _ledger_of(row) == "paper" or (
-        isinstance(snap.get("fill"), dict) and snap["fill"].get("fixture") is True
-        and isinstance(snap.get("entry_funding"), dict) and snap["entry_funding"].get("source") == "paper_harness"
-    )
-    if not paper_exit and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
+    mode = execution_mode(row)
+    if mode == "unknown":
+        return _quarantine(row, "ledger_unknown")
+    if mode == "synthetic":
+        return _note(row, "risk", "synthetic_not_live")
+    if mode == "live" and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
+        return _note(row, "risk", "exit_unproven")
+    if mode not in {"live", "paper"}:
         return _note(row, "risk", "exit_unproven")
     inflight = snap.get("inflight")
     if not isinstance(inflight, dict):
@@ -1248,8 +1254,9 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
     row = _case(case_id)
     if row is None:
         return _kill(case_id, None, "risk", "stage", None)
-    if _ledger_of(row) != "live":
-        return _foreign_ledger(row, "risk")
+    mode = execution_mode(row)
+    if mode not in {"live", "paper"}:
+        return _hold(row, "ledger_unknown" if mode == "unknown" else "synthetic_not_live", status="held")
     snap = _snapshot(row)
     if row["stage"] == "paper_exited":
         return _hold(row, "paper_not_live", status="held")
@@ -1259,8 +1266,7 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
     if not isinstance(remaining, int) or remaining > 0:
         return _hold(row, "tokens_unsold", status="held")
     if not isinstance(snap.get("deposits"), dict):
-        paper = (snap.get("entry_funding") or {}).get("source") == "paper_harness"
-        return _hold(row, "paper_not_live" if paper else "deposit_unobserved", status="held")
+        return _hold(row, "deposit_unobserved", status="held")
     mint = snap.get("deposits", {}).get("mint_ata")
     if not isinstance(mint, dict) or mint.get("preexisting") is True:
         return _hold(row, "preexisting_account" if isinstance(mint, dict) and mint.get("preexisting") is True else "deposit_unobserved", status="held")
@@ -1469,12 +1475,14 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
     row = _case(case_id)
     if row is None or row["stage"] != "filled":
         return _kill(case_id, None, "risk", "stage", None)
-    snap = _snapshot(row)
-    if _ledger_of(row) != "live":
-        return _foreign_ledger(row, "risk")
-    paper = isinstance(snap.get("fill"), dict) and snap["fill"].get("fixture") is True
-    if not paper:
+    mode = execution_mode(row)
+    if mode == "live":
         return _note(row, "risk", "mark_source")
+    if mode == "unknown":
+        return _quarantine(row, "ledger_unknown")
+    if mode != "paper":
+        return _note(row, "risk", "synthetic_not_live")
+    snap = _snapshot(row)
     if not isinstance(source, str) or source == "":
         return _note(row, "risk", "mark_source")
     fetched = _num(fetched_at)
@@ -1512,26 +1520,22 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
         "loss_stop_blocks_exit": False,
     }
     if action != "hold":
-        paper = snap.get("fill", {}).get("fixture") is True
         snap["live_ledger"] = False
-        if paper:
-            notional = _money(snap.get("notional_usd")) or TICKET
-            entry_fee = _money(snap["fill"]["fee_usd"]) or Decimal("0")
-            projection = (notional * price / entry) - notional - entry_fee
-            snap["paper_exit"] = {
-                "action": action,
-                "mark_price_usd": format(price, "f"),
-                "paper_realized_pnl": format(projection, "f"),
-                "counts_toward_live_loss": False,
-                "ledger": "paper",
-                "exit_fee_unpriced": True,
-                "live_ledger": False,
-                "receipt_proceeds": None,
-                "reason": "paper_projection_is_not_a_fill",
-            }
-            target = "paper_exited"
-        else:
-            return _note(row, "risk", "mark_source")
+        notional = _money(snap.get("notional_usd")) or TICKET
+        entry_fee = _money((snap.get("fill") or {}).get("fee_usd")) or Decimal("0")
+        projection = (notional * price / entry) - notional - entry_fee
+        snap["paper_exit"] = {
+            "action": action,
+            "mark_price_usd": format(price, "f"),
+            "paper_realized_pnl": format(projection, "f"),
+            "counts_toward_live_loss": False,
+            "ledger": "paper",
+            "exit_fee_unpriced": True,
+            "live_ledger": False,
+            "receipt_proceeds": None,
+            "reason": "paper_projection_is_not_a_fill",
+        }
+        target = "paper_exited"
         evidence = evidence | {"live_ledger": False, "receipt_proceeds": None}
     else:
         target = "filled"
@@ -1724,10 +1728,10 @@ def mark_open_position(case_id: str, transport, now: float) -> dict:
                 conn.execute(
                     """
                     INSERT INTO memecoin_risk_intents (
-                        id, case_id, ledger, entry_signature, action, pool, slot, mark_price_usd,
+                        id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd,
                         entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals,
                         evidence_json, created_at
-                    ) VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, 'live', 'server', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         intent_id, row["id"], receipt["signature"], action, pool, slot,
@@ -1775,7 +1779,7 @@ def log_for(case_id: str) -> list[dict]:
     ]
 
 
-def _advance(row, stage: str, name: str, evidence: dict, snap: dict | None = None) -> dict:
+def _advance(row, stage: str, name: str, evidence: dict, snap: dict | None = None, ledger: str | None = None) -> dict:
     moment = time.time()
     body = _snapshot(row) if snap is None else snap
 
@@ -1783,10 +1787,16 @@ def _advance(row, stage: str, name: str, evidence: dict, snap: dict | None = Non
         current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
         if current is None or current["stage"] != row["stage"]:
             return {"ok": False, "reason": "stage", "case_id": row["id"], "stage": None if current is None else current["stage"]}
-        conn.execute(
-            "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = ?",
-            (stage, json.dumps(body, sort_keys=True), moment, row["id"], row["stage"]),
-        )
+        if ledger in _LEDGERS:
+            conn.execute(
+                "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, ledger = ?, ledger_provenance = 'server', updated_at = ? WHERE id = ? AND stage = ?",
+                (stage, json.dumps(body, sort_keys=True), ledger, moment, row["id"], row["stage"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = ?",
+                (stage, json.dumps(body, sort_keys=True), moment, row["id"], row["stage"]),
+            )
         _log(conn, row["id"], row["mint"], name, "pass", None, evidence.get("source") if isinstance(evidence, dict) else None, evidence, moment)
         return {"ok": True, "reason": None, "case_id": row["id"], "stage": stage, "mint": row["mint"]}
 
@@ -1852,13 +1862,14 @@ def _ledger_of(row) -> str:
         provenance = row["ledger_provenance"]
     except Exception:
         provenance = None
-    if provenance == "legacy_default":
-        return "unknown"
     if provenance == "server" and value in _LEDGERS:
         return value
-    if provenance is None and value in _LEDGERS and not _LEGACY_LEDGER_DEFAULT:
-        return value
     return "unknown"
+
+
+def execution_mode(row) -> str:
+    """Live, paper, or synthetic comes only from the column and server provenance."""
+    return _ledger_of(row)
 
 
 _LEGACY_LEDGER_DEFAULT = False
@@ -1895,12 +1906,10 @@ def _live_entry_receipt(case_id: str):
         "SELECT signature, qty, cost_basis_lamports, ledger, pool, ledger_provenance FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
         (case_id,),
     )
-    if len(rows) != 1 or rows[0]["ledger"] != "live":
+    if len(rows) != 1 or rows[0]["ledger"] != "live" or rows[0]["ledger_provenance"] != "server":
         return None
-    provenance = rows[0]["ledger_provenance"] if "ledger_provenance" in rows[0].keys() else None
-    if provenance == "legacy_default":
-        return None
-    if provenance not in (None, "server"):
+    case = db.query("SELECT id, ledger, ledger_provenance FROM memecoin_cases WHERE id = ?", (case_id,))
+    if len(case) != 1 or case[0]["ledger"] != "live" or case[0]["ledger_provenance"] != "server":
         return None
     return rows[0]
 
@@ -1913,7 +1922,9 @@ def _matching_intent(case_id: str):
     if len(rows) != 1 or receipt is None:
         return None
     intent = rows[0]
-    if intent["ledger"] != "live" or intent["entry_signature"] != receipt["signature"]:
+    if intent["ledger"] != "live" or intent["ledger_provenance"] != "server" or intent["entry_signature"] != receipt["signature"]:
+        return None
+    if intent["case_id"] != case_id:
         return None
     if intent["basis_cost_lamports"] != receipt["cost_basis_lamports"] or intent["pool"] != receipt["pool"]:
         return None
@@ -1941,10 +1952,10 @@ def _room_for(conn, case_id: str, incoming: Decimal) -> bool:
 def _held_conn(conn, exclude_id=None) -> Decimal:
     """Full ticket stays reserved while tokens or an unrefunded deposit remain."""
     total = Decimal("0")
-    for item in conn.execute("SELECT id, stage, snapshot_json, ledger FROM memecoin_cases"):
+    for item in conn.execute("SELECT id, stage, snapshot_json, ledger, ledger_provenance FROM memecoin_cases"):
         if exclude_id is not None and item["id"] == exclude_id:
             continue
-        if item["ledger"] in {"synthetic", "paper"}:
+        if item["ledger"] == "synthetic" and item["ledger_provenance"] == "server":
             continue
         body = json.loads(item["snapshot_json"])
         remaining = body.get("remaining_raw")
@@ -2447,31 +2458,29 @@ def loss_totals() -> dict:
 def _loss_conn(conn) -> Decimal:
     """Confirmed chain losses only. A paper projection is not in this sum."""
     total = Decimal("0")
-    for item in conn.execute("SELECT stage, snapshot_json, ledger FROM memecoin_cases"):
-        if item["ledger"] != "live":
+    for item in conn.execute("SELECT stage, snapshot_json, ledger, ledger_provenance FROM memecoin_cases"):
+        if item["ledger"] != "live" or item["ledger_provenance"] != "server":
             continue
         body = json.loads(item["snapshot_json"])
         funding = body.get("entry_funding") if isinstance(body.get("entry_funding"), dict) else {}
-        if funding.get("source") == "paper_harness":
-            continue
         signature = funding.get("signature")
         if not isinstance(signature, str):
             continue
         if item["stage"] == "entry_failed":
-            proof = conn.execute("SELECT failed, ledger FROM memecoin_entry_receipts WHERE signature = ?", (signature,)).fetchone()
-            if proof is None or proof["failed"] != 1 or proof["ledger"] != "live":
+            proof = conn.execute("SELECT failed, ledger, ledger_provenance FROM memecoin_entry_receipts WHERE signature = ?", (signature,)).fetchone()
+            if proof is None or proof["failed"] != 1 or proof["ledger"] != "live" or proof["ledger_provenance"] != "server":
                 continue
         elif body.get("pnl_live") is True:
-            proof = conn.execute("SELECT failed, ledger FROM memecoin_entry_receipts WHERE signature = ?", (signature,)).fetchone()
-            if proof is None or proof["failed"] == 1 or proof["ledger"] != "live":
+            proof = conn.execute("SELECT failed, ledger, ledger_provenance FROM memecoin_entry_receipts WHERE signature = ?", (signature,)).fetchone()
+            if proof is None or proof["failed"] == 1 or proof["ledger"] != "live" or proof["ledger_provenance"] != "server":
                 continue
         else:
             continue
         realized = _num(body.get("realized_pnl"))
         if realized is not None and realized < 0:
             total -= realized
-    for refund in conn.execute("SELECT fee_usd, ledger FROM memecoin_refunds"):
-        if refund["ledger"] != "live":
+    for refund in conn.execute("SELECT fee_usd, ledger, ledger_provenance FROM memecoin_refunds"):
+        if refund["ledger"] != "live" or refund["ledger_provenance"] != "server":
             continue
         fee = _num(refund["fee_usd"])
         if fee is not None and fee > 0:
@@ -2633,6 +2642,7 @@ def _ensure_conn(conn) -> None:
         "ALTER TABLE memecoin_entry_receipts ADD COLUMN ledger_provenance TEXT",
         "ALTER TABLE memecoin_exit_receipts ADD COLUMN ledger_provenance TEXT",
         "ALTER TABLE memecoin_refunds ADD COLUMN ledger_provenance TEXT",
+        "ALTER TABLE memecoin_risk_intents ADD COLUMN ledger_provenance TEXT",
     ):
         try:
             conn.execute(statement)
@@ -2677,8 +2687,21 @@ def _ensure_conn(conn) -> None:
             BEFORE INSERT ON {table}
             FOR EACH ROW
             WHEN NEW.ledger IS NULL OR NEW.ledger NOT IN ('live', 'synthetic', 'paper')
+              OR NEW.ledger_provenance IS NULL OR NEW.ledger_provenance NOT IN ('server', 'legacy_default')
             BEGIN
-                SELECT RAISE(ABORT, 'ledger_unknown');
+                SELECT RAISE(ABORT, 'ledger_provenance');
+            END
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {table}_provenance_update
+            BEFORE UPDATE OF ledger, ledger_provenance, case_id ON {table}
+            FOR EACH ROW
+            WHEN (OLD.ledger_provenance = 'server' AND (NEW.ledger_provenance IS NOT 'server' OR NEW.ledger IS NOT OLD.ledger OR NEW.case_id IS NOT OLD.case_id))
+              OR (NEW.ledger_provenance IS NOT NULL AND NEW.ledger_provenance NOT IN ('server', 'legacy_default'))
+            BEGIN
+                SELECT RAISE(ABORT, 'ledger_tamper');
             END
             """
         )

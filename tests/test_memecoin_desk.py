@@ -134,10 +134,10 @@ def _arm_recorded_exit(case_id: str) -> None:
     db.execute(
         """
         INSERT INTO memecoin_risk_intents (
-            id, case_id, ledger, entry_signature, action, pool, slot, mark_price_usd,
+            id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd,
             entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals,
             evidence_json, created_at
-        ) VALUES (?, ?, 'live', ?, 'stop', ?, 1, '1', ?, '0.94', ?, ?, 6, '{}', ?)
+        ) VALUES (?, ?, 'live', 'server', ?, 'stop', ?, 1, '1', ?, '0.94', ?, ?, 6, '{}', ?)
         """,
         (
             "intent-" + case_id, case_id, rows[0]["signature"], rows[0]["pool"],
@@ -481,9 +481,13 @@ class MemecoinDeskTests(unittest.TestCase):
         from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _snap, _tx
         case_id = self._filled(91)
         snap = memecoin_desk.view(case_id)["snapshot"]
-        snap["fill"]["fixture"] = False
+        snap["fill"]["fixture"] = True
+        snap["entry_funding"]["source"] = "paper_harness"
         snap["remaining_raw"] = 50
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
+        db.execute(
+            "UPDATE memecoin_cases SET ledger = 'live', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
+            (json.dumps(snap), case_id),
+        )
         calls = []
 
         def prices(now):
@@ -495,7 +499,10 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["remaining_raw"], 50)
         snap["fill"]["fixture"] = True
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
+        db.execute(
+            "UPDATE memecoin_cases SET ledger = 'paper', ledger_provenance = 'server', snapshot_json = ? WHERE id = ?",
+            (json.dumps(snap), case_id),
+        )
         mint = memecoin_desk.view(case_id)["mint"]
         values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
         unsigned = _tx(_metas(mint, solana_tx.NATIVE_MINT, values), _route(1_000, 0, True, amount=50), side="exit")
