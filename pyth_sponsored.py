@@ -311,8 +311,28 @@ def read_accounts(transport, now: float) -> dict:
         "valid": sol.get("valid") is True and sol.get("reason") != "posted_slot_future",
         "hard_reason": sol.get("reason") if sol.get("reason") in {"posted_slot_future", "slot_unproven"} else None,
         "slot": result["slot"],
+        "price": sol.get("price"),
+        "conf": sol.get("conf"),
+        "expo": sol.get("expo"),
+        "used": True,
     }
     return result
+
+
+def sol_leg(now: float) -> dict:
+    """The last sponsored SOL/USD leg, recomputed for this clock. Not a pool price."""
+    view = status(now)
+    last = _LAST if isinstance(_LAST, dict) else {}
+    if view.get("fresh") is not True or view.get("usable") is not True:
+        return {"fresh": False, "used": False, "reason": view.get("reason") or "not_read"}
+    return {
+        "fresh": True,
+        "used": True,
+        "price": last.get("price"),
+        "conf": last.get("conf"),
+        "expo": last.get("expo"),
+        "reason": None,
+    }
 
 
 def _bind_posted_slot(leg: dict, slot) -> dict:

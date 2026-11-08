@@ -241,8 +241,13 @@ def review_snapshot(snapshot, pool: str, input_mint: str, output_mint: str, amou
     a_to_b = mint_a == input_mint
     if (a_to_b and output_mint != mint_b) or (not a_to_b and output_mint != mint_a):
         return refused | {"reason": "whirlpool_mint_unbound"}
+    if not solana_whirlpool.pool_pda_matches(pool, record[1]):
+        return refused | {"reason": "whirlpool_pda_unbound"}
     for vault, mint in ((vault_a, mint_a), (vault_b, mint_b)):
-        if _vault_unbound(snapshot.accounts, vault, mint):
+        vault_account = snapshot.accounts.get(vault)
+        if not isinstance(vault_account, tuple) or vault_account[0] != solana_tx.TOKEN_PROGRAM:
+            return refused | {"reason": "whirlpool_vault_unbound"}
+        if not solana_whirlpool.vault_authority_is_pool(vault_account[1], mint, pool):
             return refused | {"reason": "whirlpool_vault_unbound"}
     spacing = state["tick_spacing"]
     current = state["tick_current_index"]
@@ -263,8 +268,8 @@ def review_snapshot(snapshot, pool: str, input_mint: str, output_mint: str, amou
         arrays.append({"start_tick_index": parsed_array["start_tick_index"], "ticks": parsed_array["ticks"]})
     oracle = solana_whirlpool.oracle_address(pool)
     oracle_account = snapshot.accounts.get(oracle)
-    if not isinstance(oracle_account, tuple) or oracle_account[0] != solana_whirlpool.PROGRAM_ID or len(oracle_account[1]) < 8:
-        return refused | {"reason": "whirlpool_oracle_unbound"}
+    if not isinstance(oracle_account, tuple) or oracle_account[0] != solana_whirlpool.PROGRAM_ID or not solana_whirlpool.oracle_matches(pool, oracle_account[1]):
+        return refused | {"reason": "whirlpool_oracle_unbound", "oracle_price_proven": False, "pyth_is_separate": True}
     try:
         quoted = solana_whirlpool_quote.quote_exact_in(state, arrays, amount, a_to_b, 0, 0, snapshot.slot)
     except solana_whirlpool_quote.QuoteError:
@@ -287,23 +292,14 @@ def review_snapshot(snapshot, pool: str, input_mint: str, output_mint: str, amou
         "output_mint": output_mint,
         "quote_expiry_proven": False,
         "block_height_missing": True,
+        "oracle_price_proven": False,
+        "pyth_is_separate": True,
+        "slot_is_block_height": False,
         "send": False,
         "sign": False,
         "live_ready": False,
         "jupiter_called": False,
     }
-
-
-def _vault_unbound(accounts: dict, address: str, mint: str) -> bool:
-    record = accounts.get(address)
-    if not isinstance(record, tuple) or record[0] != solana_tx.TOKEN_PROGRAM:
-        return True
-    fields = solana_tx.token_account_fields(record[1])
-    if fields is None or fields[0] != mint:
-        return True
-    if fields[1] in {phantom_transport.REQUIRED_WALLET, address}:
-        return True
-    return False
 
 
 def snapshot_keys(pool_data: bytes, pool: str, a_to_b: bool) -> list[str] | None:

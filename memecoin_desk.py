@@ -212,32 +212,63 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
 
 
 def set_entry_amount(case_id: str, amount: int) -> dict:
-    """Remember the raw entry size on a protected case. This does not send or approve."""
+    """A caller amount cannot replace the size protect() already bound."""
     row = _case(case_id)
     if row is None or row["stage"] != "protected":
         return {"ok": False, "reason": "stage", "case_id": case_id, "send": False, "live_ready": False}
-    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
-        return {"ok": False, "reason": "amount", "case_id": case_id, "send": False, "live_ready": False}
     snap = _snapshot(row)
-    snap["entry_amount_raw"] = amount
-    snap["entry_amount_is_a_fill"] = False
-    snap["send"] = False
-    snap["live_ready"] = False
-
-    def work(conn):
-        current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
-        if current is None or current["stage"] != "protected":
-            return {"ok": False, "reason": "stage", "case_id": row["id"], "send": False, "live_ready": False}
-        conn.execute(
-            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(snap, sort_keys=True), time.time(), row["id"]),
-        )
-        return {"ok": True, "reason": None, "case_id": row["id"], "amount": amount, "stage": "protected", "send": False, "live_ready": False}
-
-    return db.exclusive(work)
+    stored = snap.get("entry_amount_raw")
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored > 0:
+        return {
+            "ok": False, "reason": "amount_locked", "case_id": case_id, "amount": stored,
+            "send": False, "live_ready": False,
+        }
+    return {"ok": False, "reason": "server_amount_required", "case_id": case_id, "send": False, "live_ready": False}
 
 
-def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None) -> dict:
+def _entry_lamports(sol_leg: dict) -> dict:
+    """Largest raw input whose rent, input, and fee ceiling stay inside $8.
+
+    $8 is the maximum. The search stops at the largest integer that still fits.
+    It does not invent a price.
+    """
+    import pyth_sponsored
+    refused = {"ok": False, "reason": "sol_usd_unpriced"}
+    rent = solana_tx.TOKEN_ACCOUNT_RENT
+    room = TICKET - MAX_FEE
+    if room <= 0:
+        return refused | {"reason": "ticket"}
+    if pyth_sponsored.lamports_usd(1, sol_leg) is None:
+        return refused
+    lo, hi = rent + 1, 2_000_000_000
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        priced = pyth_sponsored.lamports_usd(mid, sol_leg)
+        if priced is not None and priced <= room:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is None:
+        return refused | {"reason": "rent_exceeds_ticket"}
+    raw = best - rent
+    if raw < 1:
+        return refused | {"reason": "rent_exceeds_ticket"}
+    exposure = pyth_sponsored.lamports_usd(raw + rent, sol_leg)
+    if exposure is None or exposure + MAX_FEE > TICKET:
+        return refused | {"reason": "ticket"}
+    return {
+        "ok": True,
+        "lamports": raw,
+        "rent_lamports": rent,
+        "exposure_usd": format(exposure, "f"),
+        "fee_usd": format(MAX_FEE, "f"),
+        "total_usd": format(exposure + MAX_FEE, "f"),
+    }
+
+
+def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | None = None, now: float | None = None) -> dict:
     """Persist the stop and the 12/12 trail before an entry can become eligible."""
     row = _case(case_id)
     if row is None or row["stage"] != "analyst_passed":
@@ -277,7 +308,33 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
     }
     if snap.get("reserved_includes_deposit") is not True:
         return {"ok": False, "reason": "deposit_unpriced", "case_id": row["id"], "stage": row["stage"], "mint": row["mint"], "send": False, "live_ready": False}
-    moment = time.time()
+    moment = time.time() if now is None else now
+    import pyth_sponsored
+    sized = _entry_lamports(pyth_sponsored.sol_leg(moment))
+    snap["sources_are_live_mcp"] = False
+    snap["readiness_not_implied"] = True
+    snap["wallet"] = phantom_transport.REQUIRED_WALLET
+    snap["allocation_usd"] = format(ALLOCATION, "f")
+    snap["policy_bps"] = 50
+    snap["entry_amount_is_a_fill"] = False
+    snap["send"] = False
+    snap["live_ready"] = False
+    if sized.get("ok") is True:
+        snap["entry_amount_raw"] = sized["lamports"]
+        snap["entry_amount_source"] = "server_ticket"
+        snap["entry_amount_locked"] = True
+        snap["entry_rent_lamports"] = sized["rent_lamports"]
+        snap["entry_exposure_usd"] = sized["exposure_usd"]
+        snap["entry_fee_usd"] = sized["fee_usd"]
+        snap["entry_total_usd"] = sized["total_usd"]
+        total = _money(sized["total_usd"])
+        if total is not None and total <= TICKET:
+            snap["reserved_usd"] = sized["total_usd"]
+    else:
+        snap["entry_intent_reason"] = sized.get("reason")
+    evidence["entry_amount_raw"] = snap.get("entry_amount_raw")
+    evidence["entry_intent_reason"] = snap.get("entry_intent_reason")
+    evidence["sources_are_live_mcp"] = False
 
     def work(conn):
         current = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
