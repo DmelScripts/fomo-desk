@@ -398,6 +398,17 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
     return db.exclusive(work)
 
 
+def record_jupiter_block(case_id: str, assessment: dict) -> dict:
+    """A Jupiter quote does not open or close a position."""
+    row = _case(case_id)
+    if row is None or row["stage"] not in {"protected", "filled"}:
+        return _kill(case_id, None, "executor", "stage", None)
+    name = "executor" if row["stage"] == "protected" else "risk"
+    if not isinstance(assessment, dict) or assessment.get("execution_allowed") is not False or assessment.get("min_out_proven") is not False:
+        return _note(row, name, "jupiter_assessment")
+    return _note(row, name, "jupiter_instruction_unproven")
+
+
 def view(case_id: str) -> dict | None:
     row = _case(case_id)
     if row is None:

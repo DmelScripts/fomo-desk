@@ -18,10 +18,12 @@ DIAGNOSTIC = {SOL_USDC_POOL, USDC, NATIVE}
 DECODER = None
 
 REMAINING = (
-    "A strict buy decoder for the scanner mint: program, accounts, min-out, and the combined DEX plus network fee. Jupiter route_v2 is not that decoder.",
+    "Jupiter Swap V2 /build returns otherAmountThreshold as JSON. The V1 schema says that field is not used by /swap to build the transaction, and the V2 schema does not publish the swapInstruction byte layout, the hop minimum, or a DEX fee. route_v2 stays disabled. https://developers.jup.ag/docs/api-reference/swap/v1/quote https://developers.jup.ag/docs/api-reference/swap/build",
+    "A Jupiter API key from https://developers.jup.ag/portal raises the keyless 0.5 rps limit. This process does not attach a key. The key is not a signer.",
     "PYTH_API_KEY for the documented Hermes USDC/USD latest-price route. This process does not call Hermes, and a test quote is not that credential.",
-    "solana_read_enabled and rpc_url https://api.mainnet-beta.solana.com for the accounts the decoder names.",
-    "A Phantom session for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t, id eba28e4f-6b99-4543-af72-c7d1b008ce4e. A fake runner is not that session.",
+    "solana_read_enabled and rpc_url https://api.mainnet-beta.solana.com for accounts a proven decoder names. A mint account proves mint and freeze authority only.",
+    "Developer holding, past rugs, and launch bundles are not on the public mint account or DexScreener. The credentialed StalkChain reads were not called.",
+    "A Phantom session for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t, id eba28e4f-6b99-4543-af72-c7d1b008ce4e. A phone connection to a different wallet is not this session.",
 )
 
 
@@ -56,6 +58,8 @@ def _decision(mint: str, side: str) -> dict:
         "effectful": False,
         "decoder": DECODER,
         "jupiter_route_v2": "not_enabled",
+        "jupiter_swap_v2": "refused",
+        "mobile_phantom_is_server_auth": False,
         "diagnostic_sol_usdc_is_not_this_buy": True,
         "wallet": phantom_transport.REQUIRED_WALLET,
         "wallet_id": phantom_transport.REQUIRED_WALLET_ID,
