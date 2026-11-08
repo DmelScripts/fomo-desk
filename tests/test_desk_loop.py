@@ -3946,6 +3946,162 @@ conn.close()
         self.assertFalse(desk_loop.execution_gate(case_id, exit_hash, counting, WHEN)["execution_eligible"])
         self.assertFalse(desk_loop.scheduler_status()["armed"])
 
+    def test_recorded_deposit_potential_is_a_diagnostic_not_a_cap(self):
+        import threading
+        from decimal import localcontext
+        import db
+        import pyth_sponsored
+        from tests.test_jupiter_route_v2 import WHEN, _prices
+        memecoin_desk._ensure()
+        left, right, shared_account = "a" * 64, "b" * 64, "c" * 64
+        synthetic, extra = "d" * 64, "e" * 64
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('left-case', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x11" * 32), '{"reserved_usd": "1.00"}', WHEN, WHEN),
+        )
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('right-case', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x12" * 32), '{"reserved_usd": "2.00"}', WHEN, WHEN),
+        )
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('paper-case', ?, 'protected', ?, ?, ?, 'synthetic', 'server')",
+            (solana_tx.b58encode(b"\x13" * 32), '{"reserved_usd": "3.00"}', WHEN, WHEN),
+        )
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('late-case', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x14" * 32), '{"reserved_usd": "4.00"}', WHEN, WHEN),
+        )
+        for digest, case, ledger, provenance in (
+            (left, "left-case", "live", "server"),
+            (right, "right-case", "live", "server"),
+            (synthetic, "paper-case", "paper", "server"),
+            (extra, "late-case", "live", "server"),
+        ):
+            db.execute(
+                "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, ?, 'entry', 'b64', 'metis', 'hash', 10, 'jupiter_order', ?, ?, ?)",
+                (digest, case, ledger, provenance, WHEN),
+            )
+
+        def exact(digest, case, account, amount, slot):
+            db.execute(
+                """
+                INSERT INTO memecoin_deposit_exact (
+                    message_sha256, case_id, side, account, mint, payer, context_slot,
+                    rent_exact, observed_exact, space, blockhash, deposit_reason, created_at
+                ) VALUES (?, ?, 'entry', ?, 'mint', 'payer', ?, ?, ?, 165, 'hash', 'deposit_hold_unpinned', ?)
+                """,
+                (digest, case, account, slot, str(amount), str(amount), WHEN),
+            )
+
+        exact(left, "left-case", shared_account, 100, 1)
+        exact(left, "left-case", shared_account, 300, 2)
+        exact(right, "right-case", shared_account, 50, 1)
+        exact(synthetic, "paper-case", "other-account", 40, 1)
+        db.execute("DROP TRIGGER IF EXISTS memecoin_deposit_observations_insert")
+        db.execute(
+            """
+            INSERT INTO memecoin_deposit_observations (
+                message_sha256, case_id, side, account, mint, payer, context_slot,
+                rent_lamports, observed_lamports, space, blockhash, deposit_reason, created_at
+            ) VALUES (?, 'left-case', 'entry', ?, 'mint', 'payer', 3, 200, 200, 165, 'hash', 'deposit_hold_unpinned', ?)
+            """,
+            (left, shared_account, WHEN),
+        )
+        memecoin_desk._ensure()
+        db.execute(
+            "INSERT INTO memecoin_reservation_signatures (signature, message_sha256, case_id, kind, created_at) VALUES ('sig-unknown', ?, 'left-case', 'unknown', ?)",
+            (left, WHEN),
+        )
+        holds = {
+            row["id"]: row["snapshot_json"] for row in db.query("SELECT id, snapshot_json FROM memecoin_cases")
+        }
+
+        def oracle(request):
+            if request.get("accounts") == [pyth_sponsored.SOL_ACCOUNT, pyth_sponsored.USDC_ACCOUNT]:
+                calls.append(1)
+                if fail:
+                    raise RuntimeError("oracle down")
+                found = _prices()(request)
+                for item in found["body"]["result"]["value"]:
+                    item["executable"] = False
+                return found
+            raise AssertionError(request.get("method"))
+
+        calls = []
+        fail = False
+        report = desk_loop.diagnose_deposit_potential(oracle, WHEN)
+        self.assertEqual(calls, [1])
+        self.assertFalse(report["completeness"])
+        self.assertEqual(report["scope"], "recorded_observations")
+        self.assertFalse(report["open_liability_reconciled"])
+        self.assertFalse(report["cap_proven"])
+        self.assertFalse(report["ticket_limit_proven"])
+        self.assertFalse(report["allocation_proven"])
+        self.assertFalse(report["execution_eligible"])
+        self.assertFalse(report["added_to_usd_hold"])
+        self.assertFalse(report["refund_credited"])
+        left_row = next(item for item in report["messages"] if item["message_sha256"] == left)
+        right_row = next(item for item in report["messages"] if item["message_sha256"] == right)
+        paper_row = next(item for item in report["messages"] if item["message_sha256"] == synthetic)
+        self.assertTrue(left_row["signature_unknown"])
+        self.assertTrue(left_row["included"])
+        self.assertEqual(left_row["potential_lamports"], 300)
+        self.assertEqual(left_row["observation_count"], 3)
+        self.assertEqual(right_row["potential_lamports"], 50)
+        self.assertEqual(report["gross_lamports"], 350)
+        self.assertFalse(paper_row["included"])
+        self.assertEqual(paper_row["quarantine_reason"], "identity_unproven")
+        self.assertEqual(paper_row["potential_lamports"], 40)
+        self.assertEqual(report["quarantined_lamports"], 40)
+        self.assertTrue(report["quarantine_is_not_zero"])
+        self.assertTrue(report["shared_ambiguity"])
+        shared = report["shared_accounts"][0]
+        self.assertEqual(shared["account"], shared_account)
+        self.assertEqual(shared["gross_lamports"], 350)
+        self.assertEqual(shared["unique_seen_lamports"], 300)
+        self.assertFalse(shared["spent_twice"])
+        self.assertFalse(shared["shared_liability_released"])
+        self.assertEqual(report["valued_lamports"], 350)
+        self.assertEqual(report["gross_usd_ceiling"], desk_loop.deposit_usd_bounds(350, report["deposit_oracle_price"], report["deposit_oracle_conf"], report["deposit_oracle_expo"])["ceiling"])
+        self.assertEqual(left_row["usd_ceiling"], desk_loop.deposit_usd_bounds(300, report["deposit_oracle_price"], report["deposit_oracle_conf"], report["deposit_oracle_expo"])["ceiling"])
+        self.assertEqual({row["id"]: row["snapshot_json"] for row in db.query("SELECT id, snapshot_json FROM memecoin_cases")}, holds)
+        fail = True
+        blind = desk_loop.diagnose_deposit_potential(oracle, WHEN)
+        self.assertEqual(blind["gross_lamports"], 350)
+        self.assertIsNone(blind["gross_usd_ceiling"])
+        self.assertFalse(blind["deposit_price_used"])
+        self.assertEqual(blind["deposit_valuation_reason"], "rpc_transport")
+        fail = False
+        stale = desk_loop.diagnose_deposit_potential(oracle, WHEN + 120)
+        self.assertEqual(stale["gross_lamports"], 350)
+        self.assertIsNone(stale["gross_usd_ceiling"])
+        self.assertEqual(stale["deposit_valuation_reason"], "valuation_stale")
+        self.assertFalse(stale["price_freshness_proven"])
+        exact(extra, "late-case", "solo-account", 2**64 - 1, 1)
+        with localcontext() as low:
+            low.prec = 8
+            huge = desk_loop.diagnose_deposit_potential(oracle, WHEN)
+        gross = 350 + (2**64 - 1)
+        self.assertEqual(huge["gross_lamports"], gross)
+        self.assertEqual(huge["gross_usd_ceiling"], desk_loop.deposit_usd_bounds(gross, huge["deposit_oracle_price"], huge["deposit_oracle_conf"], huge["deposit_oracle_expo"])["ceiling"])
+        self.assertEqual(huge["deposit_oracle_price"], report["deposit_oracle_price"])
+        seen = []
+
+        def append():
+            exact(extra, "late-case", "late-account", 7, 2)
+            seen.append("wrote")
+
+        worker = threading.Thread(target=append)
+        worker.start()
+        mid = desk_loop.diagnose_deposit_potential(oracle, WHEN)
+        worker.join()
+        self.assertEqual(mid["gross_lamports"], sum(item["potential_lamports"] for item in mid["messages"] if item["included"]))
+        self.assertIn(mid["gross_lamports"], {gross, gross + 7})
+        memecoin_desk._ensure()
+        final = desk_loop.diagnose_deposit_potential(oracle, WHEN)
+        self.assertEqual(final["gross_lamports"], gross + 7)
+        self.assertEqual({row["id"]: row["snapshot_json"] for row in db.query("SELECT id, snapshot_json FROM memecoin_cases")}, holds)
+
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
         import shutil
         import sqlite3

@@ -746,7 +746,7 @@ def deposit_usd_bounds(lamports: int, price: int, conf: int, expo: int) -> dict 
         return None
     if not isinstance(lamports, int) or not isinstance(price, int) or not isinstance(conf, int) or not isinstance(expo, int):
         return None
-    if lamports < 1 or lamports >= 2**64 or price <= 0 or conf < 0 or expo < -12 or expo > 0:
+    if lamports < 1 or price <= 0 or conf < 0 or expo < -12 or expo > 0:
         return None
     if price - conf <= 0:
         return None
@@ -852,6 +852,237 @@ def value_deposit_potential(message_sha256: str, transport, now: float) -> dict:
         "deposit_oracle_lower": bounds["lower"],
         "deposit_price_is_future_guarantee": False,
     }
+
+
+def _snapshot_deposit_rows(conn) -> dict:
+    """One transaction's view of both deposit tables and the identity rows they name."""
+    exact = list(conn.execute(
+        """
+        SELECT message_sha256, case_id, side, account, observed_exact AS amount, 'exact' AS storage
+        FROM memecoin_deposit_exact
+        """
+    ))
+    legacy = list(conn.execute(
+        """
+        SELECT message_sha256, case_id, side, account, observed_lamports AS amount, 'legacy' AS storage
+        FROM memecoin_deposit_observations
+        """
+    ))
+    proofs = {
+        row["message_sha256"]: row for row in conn.execute(
+            "SELECT message_sha256, case_id, side, ledger, ledger_provenance FROM memecoin_reservations"
+        )
+    }
+    cases = {
+        row["id"]: row for row in conn.execute(
+            "SELECT id, ledger, ledger_provenance FROM memecoin_cases"
+        )
+    }
+    unknown = {
+        (row["message_sha256"], row["case_id"]) for row in conn.execute(
+            "SELECT message_sha256, case_id FROM memecoin_reservation_signatures WHERE kind = 'unknown'"
+        )
+    }
+    return {"exact": exact, "legacy": legacy, "proofs": proofs, "cases": cases, "unknown": unknown}
+
+
+def _message_potential(rows: list[dict]) -> dict | None:
+    """Per-account maximum for one message. Repeated proofs and the two storages count once."""
+    if not rows:
+        return None
+    case_ids = {row["case_id"] for row in rows}
+    sides = {row["side"] for row in rows}
+    if len(case_ids) != 1 or len(sides) != 1:
+        return {
+            "case_id": None, "side": None, "accounts": {}, "potential_lamports": 0,
+            "observation_count": len(rows), "quarantine_reason": "identity_conflict",
+        }
+    accounts = {}
+    for row in rows:
+        amount = _u64_parse(row["amount"])
+        if amount is None:
+            return {
+                "case_id": next(iter(case_ids)), "side": next(iter(sides)), "accounts": {},
+                "potential_lamports": 0, "observation_count": len(rows),
+                "quarantine_reason": "amount_unproven",
+            }
+        current = accounts.get(row["account"])
+        accounts[row["account"]] = amount if current is None else max(current, amount)
+    return {
+        "case_id": next(iter(case_ids)),
+        "side": next(iter(sides)),
+        "accounts": accounts,
+        "potential_lamports": sum(accounts.values()),
+        "observation_count": len(rows),
+        "quarantine_reason": None,
+    }
+
+
+def diagnose_deposit_potential(transport, now: float) -> dict:
+    """Diagnostic gross of recorded deposit maxima. Not an open-liability or a cap.
+
+    The rows are read in one transaction. One oracle read, if the quantities are
+    nonzero, prices that frozen total. A missing refund reconciliation means the
+    set is not complete. The same account in two messages stays in both.
+    """
+    import db
+    import memecoin_desk
+    import pyth_sponsored
+    memecoin_desk._ensure()
+    snap = db.exclusive(_snapshot_deposit_rows)
+    grouped = {}
+    for row in list(snap["exact"]) + list(snap["legacy"]):
+        grouped.setdefault(row["message_sha256"], []).append(row)
+    messages = []
+    included = 0
+    quarantined = 0
+    by_account = {}
+    for digest, rows in sorted(grouped.items()):
+        built = _message_potential(rows)
+        if built is None:
+            continue
+        proof = snap["proofs"].get(digest)
+        case = None if built["case_id"] is None else snap["cases"].get(built["case_id"])
+        reason = built["quarantine_reason"]
+        if reason is None and proof is None:
+            reason = "reservation_missing"
+        elif reason is None and (
+            proof["ledger"] != "live" or proof["ledger_provenance"] != "server"
+            or proof["case_id"] != built["case_id"] or proof["side"] != built["side"]
+        ):
+            reason = "identity_unproven"
+        elif reason is None and (case is None or case["ledger"] != "live" or case["ledger_provenance"] != "server"):
+            reason = "identity_unproven"
+        signature_unknown = (digest, built["case_id"]) in snap["unknown"]
+        item = {
+            "message_sha256": digest,
+            "case_id": built["case_id"],
+            "side": built["side"],
+            "potential_lamports": built["potential_lamports"],
+            "accounts": [{"account": key, "max_lamports": built["accounts"][key]} for key in sorted(built["accounts"])],
+            "observation_count": built["observation_count"],
+            "signature_unknown": signature_unknown,
+            "included": reason is None,
+            "quarantine_reason": reason,
+            "refund_verified": False,
+        }
+        messages.append(item)
+        bucket = included if reason is None else 0
+        if reason is None:
+            included += built["potential_lamports"]
+        else:
+            quarantined += built["potential_lamports"]
+        del bucket
+        for key, amount in built["accounts"].items():
+            by_account.setdefault(key, []).append({"message_sha256": digest, "max_lamports": amount, "included": reason is None})
+    shared = []
+    for account, uses in sorted(by_account.items()):
+        if len(uses) < 2:
+            continue
+        shared.append({
+            "account": account,
+            "messages": uses,
+            "gross_lamports": sum(item["max_lamports"] for item in uses),
+            "unique_seen_lamports": max(item["max_lamports"] for item in uses),
+            "spent_twice": False,
+            "shared_liability_released": False,
+        })
+    report = {
+        "diagnostic": True,
+        "completeness": False,
+        "scope": "recorded_observations",
+        "open_liability_reconciled": False,
+        "message_count": len(messages),
+        "included_message_count": sum(1 for item in messages if item["included"]),
+        "messages": messages,
+        "gross_lamports": included,
+        "quarantined_lamports": quarantined,
+        "quarantine_is_not_zero": quarantined > 0,
+        "shared_accounts": shared,
+        "shared_ambiguity": len(shared) > 0,
+        "gross_counts_each_message": True,
+        "unique_account_liability_released": False,
+        "cap_proven": False,
+        "ticket_limit_proven": False,
+        "allocation_proven": False,
+        "rent_bound_proven": False,
+        "execution_eligible": False,
+        "price_freshness_proven": False,
+        "preflight_ready": False,
+        "gate_complete": False,
+        "funds_spent": False,
+        "refund_credited": False,
+        "added_to_usd_hold": False,
+        "gross_usd_ceiling": None,
+        "gross_usd_floor": None,
+        "deposit_price_used": False,
+        "deposit_valuation_reason": "no_lamport_liability" if included == 0 and quarantined == 0 else None,
+        "deposit_oracle_price": None,
+        "deposit_oracle_conf": None,
+        "deposit_oracle_expo": None,
+        "deposit_oracle_publish_time": None,
+        "deposit_oracle_slot": None,
+        "deposit_price_is_future_guarantee": False,
+    }
+    if included == 0 and quarantined == 0:
+        return report
+    if not callable(transport):
+        report["deposit_valuation_reason"] = "deposit_source"
+        return report
+    try:
+        read = pyth_sponsored.read_accounts(transport, now)
+    except Exception:
+        report["deposit_valuation_reason"] = "rpc_transport"
+        return report
+    if not isinstance(read, dict) or read.get("fetched") is not True or read.get("reason") in {"rpc_transport", "rpc_status", "rpc_shape"}:
+        report["deposit_valuation_reason"] = read.get("reason") if isinstance(read, dict) and read.get("reason") else "rpc_transport"
+        return report
+    sol = read.get("sol")
+    executable = read.get("account_executable")
+    if not isinstance(executable, list) or len(executable) != 2 or any(flag is not False for flag in executable):
+        report["deposit_valuation_reason"] = "price_account_executable"
+        return report
+    if not isinstance(sol, dict) or sol.get("fresh") is not True or sol.get("used") is not True:
+        reason = sol.get("reason") if isinstance(sol, dict) and sol.get("reason") else (read.get("reason") if isinstance(read, dict) else None)
+        report["deposit_valuation_reason"] = reason or "sol_usd_unpriced"
+        return report
+    price, conf, expo = sol.get("price"), sol.get("conf"), sol.get("expo")
+    if included == 0:
+        report["deposit_oracle_price"] = price
+        report["deposit_oracle_conf"] = conf
+        report["deposit_oracle_expo"] = expo
+        report["deposit_oracle_publish_time"] = sol.get("publish_time")
+        report["deposit_oracle_slot"] = read.get("slot")
+        report["deposit_valuation_reason"] = "included_quantity_empty"
+        report["deposit_price_used"] = False
+        if quarantined > 0:
+            held = deposit_usd_bounds(quarantined, price, conf, expo)
+            report["quarantined_usd_ceiling"] = None if held is None else held["ceiling"]
+            report["quarantined_usd_floor"] = None if held is None else held["floor"]
+        return report
+    priced = deposit_usd_bounds(included, price, conf, expo)
+    if priced is None:
+        report["deposit_valuation_reason"] = "valuation_not_positive"
+        return report
+    for item in messages:
+        if not item["included"] or item["potential_lamports"] <= 0:
+            continue
+        item_price = deposit_usd_bounds(item["potential_lamports"], price, conf, expo)
+        item["usd_ceiling"] = None if item_price is None else item_price["ceiling"]
+        item["usd_floor"] = None if item_price is None else item_price["floor"]
+    report.update({
+        "gross_usd_ceiling": priced["ceiling"],
+        "gross_usd_floor": priced["floor"],
+        "deposit_price_used": True,
+        "deposit_valuation_reason": None,
+        "deposit_oracle_price": price,
+        "deposit_oracle_conf": conf,
+        "deposit_oracle_expo": expo,
+        "deposit_oracle_publish_time": sol.get("publish_time"),
+        "deposit_oracle_slot": read.get("slot"),
+        "valued_lamports": included,
+    })
+    return report
 
 
 def _ledger_fields(message_sha256: str) -> dict:
