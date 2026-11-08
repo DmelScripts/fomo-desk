@@ -48,8 +48,12 @@ class DeskLoopTests(unittest.TestCase):
             return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode("ascii"), "base64"]}}}}
 
         result = desk_loop.run_once(MINT, transport, NOW)
-        self.assertEqual(result["reason"], "lp")
-        self.assertEqual(result["stage"], "rejected")
+        self.assertEqual(result["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(result["stage"], "scout_passed")
+        self.assertEqual(result["capability"]["transport"], "unconfigured")
+        self.assertEqual(result["capability"]["lp"], "unproven")
+        self.assertEqual(result["capability"]["score"], "unapproved")
+        self.assertEqual(result["capability"]["analyst_formula"], "UNAPPROVED")
         self.assertFalse(result["stalkchain"]["called"])
         self.assertIn("dev_rugs", result["stalkchain"]["unproven"])
         self.assertIn("holder_growth", result["stalkchain"]["unproven"])
@@ -132,7 +136,8 @@ class DeskLoopTests(unittest.TestCase):
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(found["candidates"], 1)
         self.assertEqual(found["kills"][0]["mint"], MINT)
-        self.assertEqual(found["kills"][0]["reason"], "lp")
+        self.assertEqual(found["kills"][0]["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(found["kills"][0]["capability"]["transport"], "unconfigured")
         self.assertEqual(found["kills"][0]["source"], "dexscreener")
         self.assertFalse(found["caller_named_mint"])
         self.assertFalse(found["armed"])
@@ -177,8 +182,16 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual({item[1]["token"] for item in calls}, {MINT})
         self.assertTrue(all(item[0].startswith("https://data.stalkchain.com/api/v1/tools/") for item in calls))
         kill = next(item for item in found["kills"] if item.get("mint") == MINT)
-        self.assertEqual(kill["reason"], "lp")
-        self.assertEqual(kill["stage"], "rejected")
+        self.assertEqual(kill["reason"], "response_fields_unpublished")
+        self.assertEqual(kill["stage"], "scout_passed")
+        self.assertEqual(kill["capability"]["transport"], "ready")
+        self.assertEqual(kill["capability"]["request_schema"], "documented")
+        self.assertFalse(kill["capability"]["response_verified"])
+        self.assertEqual(kill["capability"]["freshness"], "unobserved")
+        self.assertEqual(kill["capability"]["lp"], "unproven")
+        self.assertEqual(kill["capability"]["rugs"], "unproven")
+        self.assertEqual(kill["capability"]["growth"], "unproven")
+        self.assertEqual(kill["capability"]["score"], "unapproved")
         self.assertFalse(kill["score_measured"])
         self.assertFalse(kill["fixture_is_mainnet_proof"])
         self.assertFalse(found["armed"])
@@ -213,6 +226,132 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(held["fixture_is_mainnet_proof"])
         self.assertFalse(held["fdv_used_as_market_cap"])
         self.assertFalse(desk_loop.collect_holder_count(MINT, {"source": "stalkchain", "holder_count": 12, "fetched_at": NOW})["written"])
+
+    def test_the_public_reader_posts_only_the_documented_stalkchain_tool(self):
+        import io
+        import json
+        import urllib.error
+        import urllib.request
+        os.environ.pop("STALKCHAIN_API_KEY", None)
+        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
+        posts = []
+
+        class _Response:
+            def __init__(self, status, body):
+                self.status = status
+                self._body = body
+            def read(self):
+                return self._body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(req, timeout=8):
+            url = req.full_url
+            if url.endswith("/token-boosts/latest/v1"):
+                return _Response(200, json.dumps([{"chainId": "solana", "tokenAddress": MINT}]).encode())
+            if "/token-pairs/" in url:
+                return _Response(200, json.dumps(_pair()).encode())
+            if "api.mainnet-beta.solana.com" in url:
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                import base64
+                body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
+                return _Response(200, json.dumps(body).encode())
+            raise AssertionError(url)
+
+        def build_opener(*handlers):
+            self.assertTrue(any(item is stalkchain_adapter._NoRedirect or isinstance(item, stalkchain_adapter._NoRedirect) for item in handlers))
+            class _Opener:
+                def open(self, req, timeout=8):
+                    posts.append(req)
+                    if req.full_url.endswith("stalkchain_token_onchain") and credit["block"]:
+                        raise urllib.error.HTTPError(req.full_url, 402, "payment", {}, io.BytesIO(b""))
+                    if redirect["block"]:
+                        raise urllib.error.HTTPError(req.full_url, 302, "moved", {"Location": "https://evil.example/"}, io.BytesIO(b""))
+                    asked = json.loads(req.data.decode())["token"]
+                    body = {"data": {"mint": asked, "marketCapBasis": "market_cap", "fdvUsd": 9, "lpBurnedPercent": 91}, "meta": {}}
+                    return _Response(200, json.dumps(body).encode())
+            return _Opener()
+
+        credit = {"block": False}
+        redirect = {"block": False}
+        original_open = urllib.request.urlopen
+        original_build = urllib.request.build_opener
+        urllib.request.urlopen = urlopen
+        urllib.request.build_opener = build_opener
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original_open))
+        self.addCleanup(lambda: setattr(urllib.request, "build_opener", original_build))
+        import stalkchain_adapter
+        with self.assertRaises(RuntimeError):
+            desk_loop.public_reader({"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT}})
+        quiet = desk_loop.run_discovery(desk_loop.public_reader, NOW)
+        self.assertEqual(posts, [])
+        self.assertEqual(quiet["kills"][0]["reason"], "stalkchain_credentials_missing")
+        self.assertNotEqual(quiet["kills"][0]["reason"], "lp")
+        os.environ["STALKCHAIN_API_KEY"] = "sc_dummy_not_real"
+        other = solana_tx.b58encode(b"\x47" * 32)
+        global_pair = _pair()
+        def urlopen(req, timeout=8):
+            url = req.full_url
+            if url.endswith("/token-boosts/latest/v1"):
+                return _Response(200, json.dumps([{"chainId": "solana", "tokenAddress": other}]).encode())
+            if "/token-pairs/" in url:
+                body = json.loads(json.dumps(global_pair))
+                body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                return _Response(200, json.dumps(body).encode())
+            if "api.mainnet-beta.solana.com" in url:
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                import base64
+                body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
+                return _Response(200, json.dumps(body).encode())
+            raise AssertionError(url)
+        urllib.request.urlopen = urlopen
+        found = desk_loop.run_discovery(desk_loop.public_reader, NOW)
+        self.assertEqual(len(posts), 4)
+        self.assertEqual([item.full_url for item in posts], [stalkchain_adapter.URL + name for name in stalkchain_adapter.TOOLS])
+        self.assertTrue(all(item.get_method() == "POST" for item in posts))
+        self.assertTrue(all(json.loads(item.data.decode()) == {"token": other} for item in posts))
+        self.assertTrue(all(item.get_header("Authorization") == "Bearer sc_dummy_not_real" for item in posts))
+        self.assertNotIn("sc_dummy_not_real", json.dumps(found))
+        kill = found["kills"][0]
+        self.assertEqual(kill["reason"], "response_fields_unpublished")
+        self.assertNotEqual(kill["reason"], "lp")
+        self.assertFalse(kill["capability"]["response_verified"])
+        self.assertEqual(kill["capability"]["analyst_formula"], "UNAPPROVED")
+        self.assertIn("lpBurnedPercent", kill["stalkchain"]["unmapped_keys"])
+        self.assertFalse(kill["stalkchain"]["fdv_used_as_market_cap"])
+        posts.clear()
+        credit["block"] = True
+        limited = stalkchain_adapter.read_mint(other, desk_loop.public_reader)
+        credit["block"] = False
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(limited["reason"], "stalkchain_credit_limit")
+        self.assertEqual(limited["capability"]["transport"], "credit_limited")
+        self.assertNotIn("sc_dummy_not_real", json.dumps(limited))
+        posts.clear()
+        redirect["block"] = True
+        moved = stalkchain_adapter.read_mint(other, desk_loop.public_reader)
+        redirect["block"] = False
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(moved["reason"], "redirect_refused")
+        self.assertNotIn("evil.example", json.dumps(moved))
+        self.assertNotIn("sc_dummy_not_real", json.dumps(moved))
+        for bad in (
+            {"method": "GET", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT}},
+            {"method": "POST", "url": "https://evil.example/api/v1/tools/stalkchain_token_onchain", "json": {"token": MINT}},
+            {"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_wallet_decode", "json": {"token": MINT}},
+            {"method": "POST", "url": "https://data.stalkchain.com/api/v1/account", "json": {"token": MINT}},
+            {"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT, "extra": 1}},
+            {"method": "POST", "url": "https://api.jup.ag/swap/v2/execute", "json": {"token": MINT}},
+        ):
+            with self.assertRaises(RuntimeError):
+                desk_loop.public_reader(bad)
+        self.assertFalse(desk_loop.scheduler_status()["armed"])
 
     def test_observed_mcp_measurements_do_not_become_a_pass(self):
         import copy
@@ -306,8 +445,9 @@ class DeskLoopTests(unittest.TestCase):
 
         found = desk_loop.run_discovery(transport, NOW)
         kill = next(item for item in found["kills"] if item.get("mint") == mint)
-        self.assertEqual(kill["reason"], "lp")
-        self.assertEqual(kill["stage"], "rejected")
+        self.assertEqual(kill["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(kill["stage"], "scout_passed")
+        self.assertEqual(kill["capability"]["transport"], "unconfigured")
         self.assertFalse(kill["score_measured"])
         self.assertFalse(kill["fixture_is_mainnet_proof"])
         self.assertFalse(found["armed"])
@@ -342,7 +482,7 @@ class DeskLoopTests(unittest.TestCase):
 
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(found["candidates"], 2)
-        self.assertEqual({item.get("reason") for item in found["kills"] if item.get("mint")}, {"lp"})
+        self.assertEqual({item.get("reason") for item in found["kills"] if item.get("mint")}, {"stalkchain_credentials_missing"})
         self.assertIn("not_solana", {item.get("reason") for item in found["kills"]})
         status = desk_loop.scheduler_status()
         self.assertFalse(status["authorized"])
@@ -597,7 +737,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertNotEqual(quoted["context_slot"], 1)
         self.assertEqual(__import__("hashlib").sha256(provided["data"]).hexdigest(), quoted["instruction_sha256"])
         unknown = next(item for item in found["kills"] if item.get("mint") == other)
-        self.assertEqual(unknown["reason"], "lp")
+        self.assertEqual(unknown["reason"], "stalkchain_credentials_missing")
         self.assertFalse(unknown["jupiter_called"])
         self.assertFalse(unknown["quote"]["score_measured"])
         self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "protected")

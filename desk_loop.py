@@ -119,6 +119,8 @@ def run_discovery(transport, now: float) -> dict:
             "quote": result.get("quote"),
             "jupiter_called": result.get("jupiter_called") is True,
             "source_fields": result.get("source_fields"),
+            "capability": result.get("capability"),
+            "stalkchain": result.get("stalkchain"),
             "observed": result.get("observed"),
             "score_measured": False,
             "fixture_is_mainnet_proof": False,
@@ -309,11 +311,26 @@ def run_once(mint: str, transport, now: float) -> dict:
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
         onchain["freeze_authority_revoked"] = account["freeze_authority_revoked"]
-    filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
-    blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": filtered.get("reason") or "features_unpublished", "send": False, "live_ready": False, "sources_are_live_mcp": False}
+    source_reason = coverage.get("reason")
+    source_blocks_lp = source_reason in {
+        "stalkchain_credentials_missing", "stalkchain_transport_missing", "stalkchain_transport",
+        "host_refused", "method_refused", "tool_refused", "body_refused", "redirect_refused",
+        "stalkchain_unauthorized", "stalkchain_credit_limit", "stalkchain_status",
+        "envelope", "mint_mismatch", "response_fields_unpublished",
+    }
+    authorities_clear = account.get("ok") is True and account.get("mint_authority_revoked") is True and account.get("freeze_authority_revoked") is True
+    if authorities_clear and source_blocks_lp:
+        reported = source_reason
+        stage = opened.get("stage")
+    else:
+        filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
+        reported = filtered.get("reason") or "features_unpublished"
+        stage = filtered.get("stage")
+    blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": reported, "send": False, "live_ready": False, "sources_are_live_mcp": False}
     return stopped | {
-        "reason": filtered.get("reason") or "features_unpublished",
-        "stage": filtered.get("stage"),
+        "reason": reported,
+        "capability": coverage.get("capability"),
+        "stage": stage,
         "case_id": opened["case_id"],
         "stalkchain": coverage,
         "mint_account_ok": account.get("ok") is True,
@@ -1159,12 +1176,60 @@ def _confirmed(request: dict) -> dict:
     return config
 
 
+def _open_no_redirect(req):
+    """One POST. A redirect is returned, not followed, so the bearer stays on the first host."""
+    import urllib.error
+    import urllib.request
+    opener = urllib.request.build_opener(stalkchain_adapter._NoRedirect)
+    try:
+        with opener.open(req, timeout=8) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = exc.read()
+        except Exception:
+            payload = b""
+        return exc.code, payload
+
+
 def public_reader(request: dict) -> dict:
-    """Documented DexScreener GET or one mainnet getAccountInfo. The unarmed process does not call this."""
+    """Documented public reads. StalkChain is one POST to a known tool, not an open URL."""
     import json
+    import os
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
+    url = request.get("url")
+    if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):
+        if request.get("method") != "POST":
+            raise RuntimeError("method_refused")
+        prefix = stalkchain_adapter.URL
+        if not url.startswith(prefix) or url[len(prefix):] not in stalkchain_adapter.TOOLS:
+            raise RuntimeError("tool_refused")
+        body = request.get("json")
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or set(body) != {"token"} or not isinstance(token, str) or not 32 <= len(token) <= 64:
+            raise RuntimeError("body_refused")
+        secret = os.environ.get(stalkchain_adapter.ENV, "").strip()
+        if secret == "":
+            raise RuntimeError("stalkchain_credentials_missing")
+        payload = json.dumps({"token": token}, separators=(",", ":")).encode()
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "accept": "application/json",
+                "content-type": "application/json",
+                "authorization": "Bearer " + secret,
+            },
+            method="POST",
+        )
+        status, raw = _open_no_redirect(req)
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else None
+        except Exception:
+            parsed = None
+        return {"status": status, "body": parsed}
     method = request.get("method")
     if request.get("kind") == "rpc" or method in {"getAccountInfo", "getMultipleAccounts", "getMinimumBalanceForRentExemption", "getSlot", "getTransaction", "getSignatureStatuses", "getGenesisHash", "getLatestBlockhash", "getBlockHeight", "isBlockhashValid"}:
         if method == "getAccountInfo":
@@ -1201,7 +1266,6 @@ def public_reader(request: dict) -> dict:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
     else:
-        url = request.get("url")
         if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
             raise RuntimeError("host_refused")
         if url.startswith("https://api.jup.ag/") and ("/execute" in url or "/submit" in url):

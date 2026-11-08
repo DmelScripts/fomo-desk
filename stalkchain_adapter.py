@@ -79,6 +79,43 @@ def field_requirements() -> list[dict]:
     return rows
 
 
+def capability(reason: str, *, called: bool, http_status=None) -> dict:
+    """Transport and request shape are separate from an unverified response."""
+    transport = {
+        "stalkchain_credentials_missing": "unconfigured",
+        "host_refused": "host_blocked",
+        "method_refused": "request_rejected",
+        "tool_refused": "request_rejected",
+        "body_refused": "request_rejected",
+        "redirect_refused": "redirect_refused",
+        "stalkchain_unauthorized": "unauthorized",
+        "stalkchain_credit_limit": "credit_limited",
+        "stalkchain_status": "http_error",
+        "stalkchain_transport": "transport_error",
+        "response_fields_unpublished": "ready",
+        "envelope": "ready",
+        "mint_mismatch": "ready",
+    }.get(reason, "unconfigured" if not called else "transport_error")
+    if http_status == 402:
+        transport = "credit_limited"
+    request_schema = "not_sent"
+    if called and reason in {"method_refused", "tool_refused", "body_refused", "host_refused"}:
+        request_schema = "rejected"
+    elif called:
+        request_schema = "documented"
+    return {
+        "transport": transport,
+        "request_schema": request_schema,
+        "response_verified": False,
+        "freshness": "unobserved",
+        "lp": "unproven",
+        "rugs": "unproven",
+        "growth": "unproven",
+        "score": "unapproved",
+        "analyst_formula": "UNAPPROVED",
+    }
+
+
 def this_process_has_key() -> bool:
     value = os.environ.get(ENV)
     return isinstance(value, str) and bool(value.strip())
@@ -183,9 +220,9 @@ def read_mint(mint: str, transport) -> dict:
         "freshness": "unobserved",
     }
     if not public["this_process_key_present"]:
-        return public | {"ok": False, "reason": "stalkchain_credentials_missing"}
+        return public | {"ok": False, "reason": "stalkchain_credentials_missing", "capability": capability("stalkchain_credentials_missing", called=False)}
     if transport is None:
-        return public | {"ok": False, "reason": "stalkchain_transport_missing"}
+        return public | {"ok": False, "reason": "stalkchain_transport_missing", "capability": capability("stalkchain_transport_missing", called=False)}
     secret = os.environ.get(ENV, "").strip()
     named = {}
     for tool in TOOLS:
@@ -193,16 +230,26 @@ def read_mint(mint: str, transport) -> dict:
         request["headers"] = {"authorization": "Bearer " + secret}
         try:
             response = transport(request)
+        except RuntimeError as exc:
+            code = str(exc)
+            if code not in {"host_refused", "method_refused", "tool_refused", "body_refused", "redirect_refused", "stalkchain_credentials_missing"}:
+                code = "stalkchain_transport"
+            return public | {"ok": False, "reason": code, "called": True, "capability": capability(code, called=True)}
         except Exception:
-            return public | {"ok": False, "reason": "stalkchain_transport", "called": True}
+            return public | {"ok": False, "reason": "stalkchain_transport", "called": True, "capability": capability("stalkchain_transport", called=True)}
         status = response.get("status") if isinstance(response, dict) else None
         if status == 401 or status == 403:
-            return public | {"ok": False, "reason": "stalkchain_unauthorized", "called": True, "http_status": status}
+            return public | {"ok": False, "reason": "stalkchain_unauthorized", "called": True, "http_status": status, "capability": capability("stalkchain_unauthorized", called=True, http_status=status)}
+        if status == 402:
+            return public | {"ok": False, "reason": "stalkchain_credit_limit", "called": True, "http_status": 402, "capability": capability("stalkchain_credit_limit", called=True, http_status=402)}
+        if status in {301, 302, 303, 307, 308}:
+            return public | {"ok": False, "reason": "redirect_refused", "called": True, "http_status": status, "capability": capability("redirect_refused", called=True, http_status=status)}
         if status != 200 or not isinstance(response, dict):
-            return public | {"ok": False, "reason": "stalkchain_status", "called": True, "http_status": status}
+            return public | {"ok": False, "reason": "stalkchain_status", "called": True, "http_status": status, "capability": capability("stalkchain_status", called=True, http_status=status)}
         parsed = normalize(response.get("body"), mint)
         if parsed.get("ok") is not True:
-            return public | {"ok": False, "reason": parsed.get("reason"), "called": True, "tool": tool, "fields": field_requirements(), "freshness": "unobserved"}
+            reason = parsed.get("reason")
+            return public | {"ok": False, "reason": reason, "called": True, "tool": tool, "fields": field_requirements(), "freshness": "unobserved", "capability": capability(reason, called=True)}
         named.update(parsed["named"])
         public.setdefault("unmapped_keys", [])
         public["unmapped_keys"] = sorted(set(public["unmapped_keys"]) | set(parsed.get("unmapped_keys") or []))
@@ -219,4 +266,5 @@ def read_mint(mint: str, transport) -> dict:
         "live_mcp": False,
         "freshness": "unobserved",
         "fixture_is_mainnet_proof": False,
+        "capability": capability("response_fields_unpublished", called=True),
     }
