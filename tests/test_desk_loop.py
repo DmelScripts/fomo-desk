@@ -1,6 +1,7 @@
 """The six-role handoff fetches. Caller labels are not a source. Nothing is armed."""
 import os
 import unittest
+from pathlib import Path
 
 import desk_loop
 import memecoin_desk
@@ -64,3 +65,35 @@ class DeskLoopTests(unittest.TestCase):
         result = desk_loop.run_once(MINT, None, NOW)
         self.assertEqual(result["reason"], "network_disabled")
         self.assertFalse(result["armed"])
+        self.assertFalse(result["scheduled"] if "scheduled" in result else desk_loop.readiness()["run_once_scheduled"])
+
+    def test_a_present_key_is_sent_on_the_call_and_absent_from_the_result(self):
+        os.environ["STALKCHAIN_API_KEY"] = "sc_test_not_a_real_key"
+        self.addCleanup(lambda: os.environ.pop("STALKCHAIN_API_KEY", None))
+        seen = []
+
+        def transport(request):
+            seen.append(request["url"])
+            self.assertTrue(request["headers"]["authorization"].endswith("sc_test_not_a_real_key"))
+            self.assertEqual(request["json"], {"token": MINT})
+            return {"status": 200, "body": {"data": {"marketCapBasis": "market_cap", "fdvUsd": 9}, "meta": {}}}
+
+        result = __import__("stalkchain_adapter").read_mint(MINT, transport)
+        self.assertEqual(len(seen), 4)
+        self.assertNotIn("sc_test_not_a_real_key", __import__("json").dumps(result))
+        self.assertEqual(result["reason"], "response_fields_unpublished")
+        self.assertEqual(result["named"]["marketCapBasis"], "market_cap")
+        self.assertFalse(result["fdv_used_as_market_cap"])
+        self.assertIn("lp_lock_expiry", result["unproven"])
+        self.assertIn("holder_growth", result["unproven"])
+        self.assertFalse(result["score_measured"])
+        self.assertEqual(result["render_presence"], "unknown")
+        view = desk_loop.readiness()
+        self.assertTrue(view["stalkchain_env_present"])
+        self.assertNotIn("sc_test_not_a_real_key", __import__("json").dumps(view))
+        self.assertFalse(view["run_once_scheduled"])
+        self.assertFalse(view["deployed"])
+        self.assertEqual(view["render_presence"], "unknown")
+        self.assertEqual(view["onchain_pyth"], "price_update_v2_layout_unverified")
+        self.assertIsNone(__import__("pyth_sponsored").status()["account"])
+        self.assertNotIn("desk_loop", Path("server.py").read_text(encoding="utf-8"))

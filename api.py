@@ -1269,6 +1269,14 @@ def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:
     return body
 
 
+@router.get("/api/memecoin/readiness")
+def memecoin_readiness(request: Request) -> JSONResponse:
+    """This process only. Presence booleans, never a secret. Not a deployed production probe."""
+    require_app_token(request)
+    import desk_loop
+    return JSONResponse(desk_loop.readiness(), headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/memecoin/scout")
 def memecoin_scout(request: Request, body: dict | None = None) -> JSONResponse:
     """DexScreener snapshot only. A passed flag is not a field."""

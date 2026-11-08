@@ -40,6 +40,13 @@ HERMES_CATALOG_URL = "https://hermes.pyth.network/v2/price_feeds"
 CREDENTIAL_ENV = "PYTH_API_KEY"
 
 
+def this_process_has_key() -> bool:
+    """Whether this process has PYTH_API_KEY. Render's dashboard is not checked."""
+    import os
+    value = os.environ.get(CREDENTIAL_ENV)
+    return isinstance(value, str) and bool(value.strip())
+
+
 def keyless_catalog_is_not_a_price() -> dict:
     """The documented no-auth route lists feeds. It does not return a price."""
     return {

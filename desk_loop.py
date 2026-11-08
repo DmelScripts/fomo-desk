@@ -14,52 +14,15 @@ https://docs.pyth.network/api-reference/hermes/price-feeds
 
 from __future__ import annotations
 
-import os
-
 import dexscreener_public
 import memecoin_desk
+import pyth_sponsored
 import solana_mint_read
-
-STALK_URL = "https://data.stalkchain.com/api/v1/tools/"
-STALK_ENV = "STALKCHAIN_API_KEY"
-UNPROVEN = (
-    "lp_burned_or_locked",
-    "lp_lock_expiry",
-    "dev_holding_pct",
-    "dev_rugs",
-    "bundled_launch_pct",
-    "holder_growth",
-    "unique_buyers",
-    "smart_wallets",
-)
+import stalkchain_adapter
+import usdc_valuation
 
 
-def stalk_coverage() -> dict:
-    """The adapter. A missing key does not become a clean developer or a burned LP."""
-    key = os.environ.get(STALK_ENV)
-    present = isinstance(key, str) and bool(key.strip())
-    if not present:
-        return {
-            "ok": False,
-            "called": False,
-            "reason": "stalkchain_credentials_missing",
-            "unproven": list(UNPROVEN),
-            "url": STALK_URL,
-            "credential_env": STALK_ENV,
-            "live_ready": False,
-        }
-    return {
-        "ok": False,
-        "called": False,
-        "reason": "stalkchain_not_invoked",
-        "unproven": list(UNPROVEN),
-        "url": STALK_URL,
-        "credential_env": STALK_ENV,
-        "live_ready": False,
-    }
-
-
-def run_once(mint: str, transport, now: float) -> dict:
+def run_once(mint: str, transport, now: float, stalk_transport=None) -> dict:
     """Fetch, then hand off. No loop is started and no flag is turned on."""
     stopped = {"ok": False, "send": False, "sign": False, "live_ready": False, "armed": False, "mint": mint}
     if transport is None:
@@ -86,7 +49,7 @@ def run_once(mint: str, transport, now: float) -> dict:
         value = (rpc["body"].get("result") or {}).get("value") if isinstance(rpc["body"].get("result"), dict) else None
         if isinstance(value, dict):
             account = solana_mint_read.parse_account(value, mint)
-    coverage = stalk_coverage()
+    coverage = stalkchain_adapter.read_mint(mint, stalk_transport)
     onchain = {"source": solana_mint_read.SOURCE, "fetched_at": now}
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
@@ -105,5 +68,39 @@ def run_once(mint: str, transport, now: float) -> dict:
         "sign": False,
         "live_ready": False,
         "armed": False,
+        "server_loop": False,
+        "scheduled": False,
         "usd_live": False,
+        "onchain_pyth": pyth_sponsored.status(),
     }
+
+
+def readiness() -> dict:
+    """Presence and status for this process. Not a Render inventory and not a secret."""
+    pyth = pyth_sponsored.status()
+    catalog = usdc_valuation.keyless_catalog_is_not_a_price()
+    return {
+        "coded": True,
+        "deployed": False,
+        "this_process_only": True,
+        "server_loop": False,
+        "run_once_scheduled": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "stalkchain_env_present": stalkchain_adapter.this_process_has_key(),
+        "pyth_env_present": usdc_valuation.this_process_has_key(),
+        "render_presence": "unknown",
+        "hermes_price_requires_key": True,
+        "keyless_catalog_is_price": False,
+        "keyless_catalog_reason": catalog["reason"],
+        "onchain_pyth": pyth["reason"],
+        "onchain_pyth_available": False,
+        "blocked_because": [
+            "stalkchain_response_fields_for_lp_rug_growth_are_unpublished",
+            pyth["reason"],
+            "hermes_price_requires_key",
+        ],
+    }
+
+
