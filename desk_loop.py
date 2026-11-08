@@ -3139,7 +3139,8 @@ def _flow_gap(base: dict, reason: str) -> dict:
         "dex_fee_separated": False, "dex_fee_lamports": None, "network_fee_added_to_input": False,
         "dex_fee_embedded_in_input": True, "one_shot_fee_used": False, "combined_fee_cap_proven": False,
         "wrap_principal_netted": False, "rent_netted": False, "payer_delta_used": False,
-        "pool_bytes_at_landed_slot": False, "account_read_is_historical": False,
+        "pool_bytes_at_landed_slot": False, "pool_bytes_fetched": False, "pool_pda_rederived": False,
+        "account_read_is_historical": False, "vault_binding": None,
         "hold_released": False, "reservation_consumed": False,
         "cost_basis_proven": False, "refund_proven": False, "fill_proven": False,
         "holds": True, "resend": False, "execution_eligible": False,
@@ -3189,6 +3190,8 @@ def _swap_legs(decoded):
         "source": bound["source"], "destination": bound["destination"],
         "source_mint": bound["source_mint"], "destination_mint": bound["destination_mint"],
         "vault_in": vault_in, "vault_out": vault_out,
+        "a_to_b": parsed["a_to_b"] is True,
+        "swap_accounts": hop[1:],
     }
 
 
@@ -3226,49 +3229,187 @@ def _classic_inner_transfer(item, decoded):
     return {"source": keys[0], "destination": keys[1], "authority": keys[2], "amount": amount}
 
 
-def _swap_transfers(meta, decoded, swap_index):
+# Anchor discriminator for pub fn swap. swap_v2 and two_hop_swap are different instructions.
+# Source: orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d
+# programs/whirlpool/src/lib.rs declare_id and pub fn swap,
+# programs/whirlpool/src/instructions/swap.rs vault constraints,
+# programs/whirlpool/src/util/swap_utils.rs perform_swap.
+_WHIRLPOOL_SWAP_DISC = bytes.fromhex("f8c69e91e17587c8")
+_WHIRLPOOL_SWAP_V2_DISC = bytes.fromhex("2b04ed0b1ac91e62")
+_WHIRLPOOL_TWO_HOP_DISC = bytes.fromhex("c360ed6c44a2dbe6")
+_WHIRLPOOL_SWAP_SOURCE = "orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d"
+_VAULT_BINDING = "whirlpool_swap_constraint"
+
+
+def _b58_exact(data: str, size: int):
     import solana_tx
+    try:
+        raw = solana_tx.b58decode(data, size)
+    except Exception:
+        return None
+    if len(raw) != size or solana_tx.b58encode(raw) != data:
+        return None
+    return raw
+
+
+def _inner_program(item, decoded):
+    if not isinstance(item, dict):
+        return None
+    index = item.get("programIdIndex")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(decoded.static_keys):
+        return None
+    return decoded.static_keys[index]
+
+
+def _stack_height(item):
+    height = item.get("stackHeight") if isinstance(item, dict) else None
+    if isinstance(height, bool) or not isinstance(height, int) or height < 2:
+        return None
+    return height
+
+
+def _whirlpool_swap_data(raw: bytes):
+    """Canonical exact-in swap. A different discriminator is not this instruction."""
+    if len(raw) != 42:
+        return None, "whirlpool_discriminator"
+    disc = raw[:8]
+    if disc in {_WHIRLPOOL_SWAP_V2_DISC, _WHIRLPOOL_TWO_HOP_DISC}:
+        return None, "whirlpool_variant"
+    if disc != _WHIRLPOOL_SWAP_DISC:
+        return None, "whirlpool_discriminator"
+    amount = int.from_bytes(raw[8:16], "little")
+    specified = raw[40]
+    direction = raw[41]
+    if specified not in (0, 1) or direction not in (0, 1) or amount <= 0:
+        return None, "whirlpool_amount"
+    if specified != 1:
+        return None, "whirlpool_amount"
+    return {"amount": amount, "a_to_b": direction == 1}, None
+
+
+def _decode_whirlpool_swap(item, decoded):
+    """The published 11-account swap. Extra accounts and swap_v2 stay unsupported."""
+    import solana_tx
+    import solana_whirlpool
+    if _inner_program(item, decoded) != solana_whirlpool.PROGRAM_ID:
+        return None, "whirlpool_program"
+    accounts = item.get("accounts")
+    data = item.get("data")
+    if not isinstance(accounts, list) or len(accounts) != 11 or not isinstance(data, str):
+        return None, "whirlpool_accounts"
+    raw = _b58_exact(data, 42)
+    if raw is None:
+        return None, "whirlpool_discriminator"
+    parsed, reason = _whirlpool_swap_data(raw)
+    if parsed is None:
+        return None, reason
+    keys = []
+    for index in accounts:
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(decoded.static_keys):
+            return None, "whirlpool_accounts"
+        keys.append(decoded.static_keys[index])
+    if keys[0] != solana_tx.TOKEN_PROGRAM:
+        return None, "whirlpool_program"
+    parsed["accounts"] = keys
+    parsed["height"] = _stack_height(item)
+    return parsed, None
+
+
+def _attributed_transfers(meta, decoded, legs):
+    """The two SPL transfers have to be the children of one canonical Whirlpool swap.
+
+    A successful swap applies the pool's vault-field constraints to the accounts
+    in that instruction. This does not fetch the pool account and does not rederive
+    its PDA.     A transfer that is not nested under that swap is not attributed to it.
+    """
+    import solana_tx
+    import solana_whirlpool
     groups = meta.get("innerInstructions")
     if groups is None:
         return None, "inner_transfers_missing"
     if not isinstance(groups, list):
         return None, "inner_transfers_untyped"
-    found = []
+    rows = None
     for group in groups:
         if not isinstance(group, dict):
             return None, "inner_transfers_untyped"
         outer = group.get("index")
-        rows = group.get("instructions")
-        if isinstance(outer, bool) or not isinstance(outer, int) or not isinstance(rows, list):
+        instructions = group.get("instructions")
+        if isinstance(outer, bool) or not isinstance(outer, int) or not isinstance(instructions, list):
             return None, "inner_transfers_untyped"
-        for item in rows:
-            if not isinstance(item, dict):
+        for item in instructions:
+            program = _inner_program(item, decoded)
+            if program is None:
                 return None, "inner_transfers_untyped"
-            program_index = item.get("programIdIndex")
-            if isinstance(program_index, bool) or not isinstance(program_index, int):
-                return None, "inner_transfers_untyped"
-            if program_index < 0 or program_index >= len(decoded.static_keys):
-                return None, "inner_transfers_untyped"
-            program = decoded.static_keys[program_index]
             if program == solana_tx.TOKEN_2022:
                 return None, "token_2022_unsupported"
             if program == solana_tx.SYSTEM_PROGRAM:
                 return None, "inner_economic_unsupported"
-            if program != solana_tx.TOKEN_PROGRAM:
-                if outer == swap_index and program != __import__("solana_whirlpool").PROGRAM_ID:
-                    return None, "inner_economic_unsupported"
-                continue
-            if outer != swap_index:
+            if program == solana_tx.TOKEN_PROGRAM and outer != legs["index"]:
                 return None, "inner_transfer_outside_swap"
-            parsed = _classic_inner_transfer(item, decoded)
-            if not isinstance(parsed, dict):
-                return None, "inner_transfer_unsupported"
-            found.append(parsed)
-    if len(found) == 0:
-        return None, "inner_transfers_missing"
-    if len(found) != 2:
-        return None, "inner_transfer_count"
-    return found, None
+        if outer == legs["index"]:
+            if rows is not None:
+                return None, "whirlpool_swap_count"
+            rows = instructions
+    if rows is None:
+        return None, "whirlpool_swap_missing"
+    hops = [index for index, item in enumerate(rows) if _inner_program(item, decoded) == solana_whirlpool.PROGRAM_ID]
+    if len(hops) == 0:
+        return None, "whirlpool_swap_missing"
+    if len(hops) != 1:
+        return None, "whirlpool_swap_count"
+    hop_index = hops[0]
+    swap, reason = _decode_whirlpool_swap(rows[hop_index], decoded)
+    if swap is None:
+        return None, reason
+    if swap["height"] is None or swap["accounts"] != legs["swap_accounts"] or swap["a_to_b"] is not legs["a_to_b"]:
+        return None, "whirlpool_nesting" if swap["height"] is None else ("whirlpool_direction" if swap["a_to_b"] is not legs["a_to_b"] else "whirlpool_accounts")
+    parent = swap["height"]
+    children = []
+    for item in rows[hop_index + 1:]:
+        if _inner_program(item, decoded) == solana_whirlpool.PROGRAM_ID:
+            return None, "whirlpool_swap_count"
+        height = _stack_height(item)
+        if height is None:
+            return None, "whirlpool_nesting"
+        if height <= parent:
+            break
+        if height != parent + 1:
+            return None, "whirlpool_nesting"
+        children.append(item)
+    for item in rows[:hop_index]:
+        if _inner_program(item, decoded) == solana_tx.TOKEN_PROGRAM:
+            return None, "whirlpool_nesting"
+    if len(children) != 2:
+        return None, "inner_transfer_count" if len(children) > 2 else "whirlpool_nesting"
+    transfers = []
+    for item in children:
+        if _inner_program(item, decoded) != solana_tx.TOKEN_PROGRAM:
+            return None, "inner_economic_unsupported"
+        parsed = _classic_inner_transfer(item, decoded)
+        if not isinstance(parsed, dict):
+            return None, "inner_transfer_unsupported"
+        transfers.append(parsed)
+    owner_a, vault_a, owner_b, vault_b = swap["accounts"][3], swap["accounts"][4], swap["accounts"][5], swap["accounts"][6]
+    pool = swap["accounts"][2]
+    user = swap["accounts"][1]
+    if swap["a_to_b"]:
+        expect_in = (owner_a, vault_a, user)
+        expect_out = (vault_b, owner_b, pool)
+    else:
+        expect_in = (owner_b, vault_b, user)
+        expect_out = (vault_a, owner_a, pool)
+    got_in = (transfers[0]["source"], transfers[0]["destination"], transfers[0]["authority"])
+    got_out = (transfers[1]["source"], transfers[1]["destination"], transfers[1]["authority"])
+    if got_in != expect_in or got_out != expect_out:
+        return None, "whirlpool_transfer"
+    if transfers[0]["amount"] != swap["amount"]:
+        return None, "whirlpool_amount"
+    if transfers[0]["source"] != legs["source"] or transfers[0]["destination"] != legs["vault_in"]:
+        return None, "whirlpool_transfer"
+    if transfers[1]["source"] != legs["vault_out"] or transfers[1]["destination"] != legs["destination"]:
+        return None, "whirlpool_transfer"
+    return {"input": transfers[0], "output": transfers[1], "swap": swap}, None
 
 
 def record_landed_flow(case_id: str, signature: str, transport, now: float) -> dict:
@@ -3276,12 +3417,13 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
 
     The body that supplies the transfers has to be the stored signature, message,
     success, fee, and slot. Its token pre/post metadata has to be the stored
-    quantity. The gross source transfer is the native input and already includes
-    the pool fee; that fee is not decomposed and is not invented from the one-shot
-    formula. A system transfer inside the swap is another debit, so the flow stays
-    unproven. The payer delta, the outer wrap, and the wSOL close are not the
-    input or the proceeds. Pool bytes are not in the transaction. A later vault
-    token balance would not by itself prove the pool vault. No receipt is booked.
+    quantity. One canonical Whirlpool swap, nested above those two transfers,
+    supplies the vault binding: that instruction's published constraints require
+    the vault accounts to be the pool's vault fields at execution. The pool
+    account is not fetched and its PDA is not rederived. The gross source
+    transfer is the native input and already includes the pool fee. The fee is
+    not added again and is not taken from the one-shot formula. The separate
+    combined-fee cap stays unproven. No receipt is booked.
     """
     import db
     import solana_tx
@@ -3317,15 +3459,11 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
             return _flow_gap(quantity, "route_unbound")
     elif legs["destination_mint"] != solana_tx.NATIVE_MINT or legs["source_mint"] != observed["mint"]:
         return _flow_gap(quantity, "route_unbound")
-    found, reason = _swap_transfers(meta, decoded, legs["index"])
+    found, reason = _attributed_transfers(meta, decoded, legs)
     if found is None:
         return _flow_gap(quantity, reason)
-    inward = [item for item in found if item["source"] == legs["source"] and item["destination"] == legs["vault_in"] and item["authority"] == wallet]
-    outward = [item for item in found if item["source"] == legs["vault_out"] and item["destination"] == legs["destination"] and item["authority"] == legs["pool"]]
-    if len(inward) != 1 or len(outward) != 1:
-        return _flow_gap(quantity, "inner_identity")
-    input_text = _u64_canon(inward[0]["amount"])
-    output_text = _u64_canon(outward[0]["amount"])
+    input_text = _u64_canon(found["input"]["amount"])
+    output_text = _u64_canon(found["output"]["amount"])
     if input_text is None or output_text is None:
         return _flow_gap(quantity, "inner_amount")
     if observed["side"] == "entry":
@@ -3347,13 +3485,16 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
             row["message_sha256"] == bound["digest"] and row["case_id"] == case_id
             and row["input_raw"] == input_text and row["output_raw"] == output_text
             and row["proceeds_raw"] == proceeds and row["network_fee_lamports"] == bound["fee"]
-            and row["landed_slot"] == bound["slot"]
+            and row["landed_slot"] == bound["slot"] and row["vault_binding"] == _VAULT_BINDING
         )
         return _flow_gap(quantity, None if same else "flow_conflict") | {
             "flow_recorded": same, "flow_proven": same, "idempotent": same,
             "input_raw": input_text if same else None, "output_raw": output_text if same else None,
             "proceeds_raw": proceeds if same else None,
             "dex_fee_embedded_in_input": True,
+            "vault_binding": _VAULT_BINDING if same else None,
+            "vault_binding_source": _WHIRLPOOL_SWAP_SOURCE if same else None,
+            "pool_bytes_fetched": False, "pool_pda_rederived": False,
         }
     fee = bound["fee"]
 
@@ -3362,13 +3503,14 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
             """
             INSERT INTO memecoin_landed_flow (
                 signature, message_sha256, case_id, side, direction, input_mint, output_mint,
-                input_raw, output_raw, proceeds_raw, network_fee_lamports, landed_slot, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_raw, output_raw, proceeds_raw, network_fee_lamports, landed_slot,
+                vault_binding, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signature, bound["digest"], case_id, observed["side"], direction,
                 legs["source_mint"], legs["destination_mint"], input_text, output_text, proceeds,
-                fee, bound["slot"], float(now),
+                fee, bound["slot"], _VAULT_BINDING, float(now),
             ),
         )
 
@@ -3383,6 +3525,8 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
                 "flow_recorded": True, "flow_proven": True, "idempotent": True,
                 "input_raw": input_text, "output_raw": output_text, "proceeds_raw": proceeds,
                 "network_fee_lamports": fee, "dex_fee_embedded_in_input": True,
+                "vault_binding": _VAULT_BINDING, "vault_binding_source": _WHIRLPOOL_SWAP_SOURCE,
+                "pool_bytes_fetched": False, "pool_pda_rederived": False,
             }
         return _flow_gap(quantity, "flow_conflict")
     return _flow_gap(quantity, None) | {
@@ -3390,7 +3534,8 @@ def record_landed_flow(case_id: str, signature: str, transport, now: float) -> d
         "input_raw": input_text, "output_raw": output_text, "proceeds_raw": proceeds,
         "input_mint": legs["source_mint"], "output_mint": legs["destination_mint"],
         "network_fee_lamports": fee, "dex_fee_embedded_in_input": True,
-        "next_missing": "historical_pool_vault_bytes",
+        "vault_binding": _VAULT_BINDING, "vault_binding_source": _WHIRLPOOL_SWAP_SOURCE,
+        "next_missing": "actual_combined_fee_proof",
     }
 
 

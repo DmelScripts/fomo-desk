@@ -4394,10 +4394,14 @@ def _install_landed_flow(conn) -> None:
             proceeds_raw TEXT,
             network_fee_lamports INTEGER NOT NULL,
             landed_slot INTEGER NOT NULL,
+            vault_binding TEXT NOT NULL,
             created_at REAL NOT NULL
         )
         """
     )
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(memecoin_landed_flow)")]
+    if columns and "vault_binding" not in columns:
+        conn.execute("ALTER TABLE memecoin_landed_flow ADD COLUMN vault_binding TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_landed_flow_pin (
@@ -4435,6 +4439,7 @@ def _install_landed_flow(conn) -> None:
         OR length(NEW.input_raw) < 1 OR length(NEW.output_raw) < 1
         OR NEW.input_raw GLOB '*[^0-9]*' OR NEW.output_raw GLOB '*[^0-9]*'
         OR NEW.input_raw GLOB '0?*' OR NEW.output_raw GLOB '0?*'
+        OR NEW.vault_binding != 'whirlpool_swap_constraint'
         OR NEW.input_raw = '0' OR NEW.output_raw = '0'
         OR length(NEW.input_raw) > 20 OR length(NEW.output_raw) > 20
         OR (length(NEW.input_raw) = 20 AND NEW.input_raw > '18446744073709551615')

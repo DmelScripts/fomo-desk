@@ -4610,41 +4610,80 @@ conn.close()
         reads = {"n": 0}
         lock = threading.Lock()
 
-        def inners(view):
+        swap_disc = bytes.fromhex("f8c69e91e17587c8")
+
+        def hop(view):
+            amount = view["input"] if view["mode"] != "amount" else view["input"] + 1
+            direction = (view["side"] == "entry") if view["mode"] != "direction" else (view["side"] != "entry")
+            specified = 0 if view["mode"] == "specified" else 1
+            disc = bytes.fromhex("2b04ed0b1ac91e62") if view["mode"] == "variant" else swap_disc
+            if view["mode"] == "bad_disc":
+                disc = bytes(8)
+            payload = disc + int(amount).to_bytes(8, "little") + (1).to_bytes(8, "little") + (0).to_bytes(16, "little") + bytes([specified, 1 if direction else 0])
+            accounts = [solana_tx.TOKEN_PROGRAM, wallet, pool, wsol, vault_a, held, vault_b, *ticks, oracle]
+            if view["mode"] == "wrong_vault":
+                accounts[4] = oracle
+            if view["mode"] == "wrong_pool":
+                accounts[2] = oracle
+            if view["mode"] == "extra_account":
+                accounts.append(oracle)
             keys = view["keys"]
+            instruction = {
+                "programIdIndex": keys.index(solana_whirlpool.PROGRAM_ID),
+                "accounts": [keys.index(item) for item in accounts],
+                "data": solana_tx.b58encode(payload),
+                "stackHeight": 2,
+            }
             if view["side"] == "entry":
-                rows = [
+                legs = [
                     transfer(keys, wsol, vault_a, wallet, view["input"]),
                     transfer(keys, vault_b, held, pool, view["output"]),
                 ]
             else:
-                rows = [
+                legs = [
                     transfer(keys, held, vault_b, wallet, view["input"]),
                     transfer(keys, vault_a, wsol, pool, view["output"]),
                 ]
+            for item in legs:
+                item["stackHeight"] = 4 if view["mode"] == "deep" else (2 if view["mode"] == "sibling" else 3)
             if view["mode"] == "extra":
-                rows.append(transfer(keys, wsol, vault_a, wallet, 1))
+                extra = transfer(keys, wsol, vault_a, wallet, 1)
+                extra["stackHeight"] = 3
+                legs.append(extra)
             if view["mode"] == "token2022":
-                rows[0] = transfer(keys, wsol, vault_a, wallet, view["input"], solana_tx.TOKEN_2022)
+                legs[0] = transfer(keys, wsol if view["side"] == "entry" else held, vault_a if view["side"] == "entry" else vault_b, wallet, view["input"], solana_tx.TOKEN_2022)
+                legs[0]["stackHeight"] = 3
             if view["mode"] == "authority":
-                rows[0]["accounts"][2] = keys.index(pool)
+                legs[0]["accounts"][2] = keys.index(pool)
+            if view["mode"] == "reversed":
+                legs = [legs[1], legs[0]]
             if view["mode"] == "system":
-                payload = (2).to_bytes(4, "little") + (111).to_bytes(8, "little")
-                rows.append({
+                system = {
                     "programIdIndex": keys.index(solana_tx.SYSTEM_PROGRAM),
                     "accounts": [keys.index(wallet), keys.index(wsol)],
-                    "data": solana_tx.b58encode(payload),
-                })
-            if view["mode"] == "whirlpool":
-                rows.insert(0, {
-                    "programIdIndex": keys.index(solana_whirlpool.PROGRAM_ID),
-                    "accounts": [keys.index(pool)],
-                    "data": solana_tx.b58encode(bytes([1])),
-                })
-            if view["mode"] == "outside":
-                return [{"index": 0, "instructions": rows}]
+                    "data": solana_tx.b58encode((2).to_bytes(4, "little") + (111).to_bytes(8, "little")),
+                    "stackHeight": 3,
+                }
+                legs.append(system)
+            if view["mode"] == "two":
+                instructions = [instruction, dict(instruction), *legs]
+            elif view["mode"] == "before":
+                instructions = [*legs, instruction]
+            elif view["mode"] == "no_swap":
+                instructions = legs
+            else:
+                instructions = [instruction, *legs]
+            if view["mode"] == "no_stack":
+                for item in instructions:
+                    item.pop("stackHeight", None)
+            return instructions
+
+        def inners(view):
             if view["mode"] == "missing":
                 return None
+            rows = hop(view)
+            if view["mode"] == "outside":
+                return [{"index": 0, "instructions": rows}]
             return [{"index": view["index"], "instructions": rows}]
 
         def transport(request):
@@ -4744,9 +4783,14 @@ conn.close()
         self.assertEqual(evidence["slot"], 20)
         self.assertEqual(evidence["meta_err"], "null")
         self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
-        overlay["mode"] = "whirlpool"
-        bought = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 2)
+        overlay["mode"] = "no_swap"
+        absent = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 2)
         overlay.clear()
+        self.assertEqual(absent["flow_reason"], "whirlpool_swap_missing")
+        self.assertFalse(absent["flow_recorded"])
+        self.assertIsNone(absent["vault_binding"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_flow")[0]["n"], 0)
+        bought = desk_loop.record_landed_flow("flow-case", buy_sig, transport, 3)
         self.assertTrue(bought["flow_recorded"], bought)
         self.assertEqual(bought["input_raw"], "1000000")
         self.assertEqual(bought["output_raw"], "1000")
@@ -4772,7 +4816,11 @@ conn.close()
         self.assertFalse(bought["reservation_consumed"])
         self.assertFalse(bought["execution_eligible"])
         self.assertTrue(bought["holds"])
-        self.assertEqual(bought["next_missing"], "historical_pool_vault_bytes")
+        self.assertEqual(bought["vault_binding"], "whirlpool_swap_constraint")
+        self.assertEqual(bought["vault_binding_source"], "orca-so/whirlpools@2509ad9d9894a38c922e6e84a6a3a9de5e9ccd2d")
+        self.assertFalse(bought["pool_bytes_fetched"])
+        self.assertFalse(bought["pool_pda_rederived"])
+        self.assertEqual(bought["next_missing"], "actual_combined_fee_proof")
         self.assertEqual(db.query("SELECT message_sha256, input_raw FROM memecoin_landed_flow WHERE signature = ?", (buy_sig,))[0]["message_sha256"], buy_hash)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'flow-case'")[0]["snapshot_json"], snap)
@@ -4797,9 +4845,24 @@ conn.close()
             ("missing", "missing", "inner_transfers_missing"),
             ("extra", "extra", "inner_transfer_count"),
             ("token2022", "token2022", "token_2022_unsupported"),
-            ("authority", "authority", "inner_identity"),
+            ("authority", "authority", "whirlpool_transfer"),
             ("outside", "outside", "inner_transfer_outside_swap"),
             ("output", "output", "quantity_mismatch"),
+            ("no_swap", "no_swap", "whirlpool_swap_missing"),
+            ("two", "two", "whirlpool_swap_count"),
+            ("bad_disc", "bad_disc", "whirlpool_discriminator"),
+            ("variant", "variant", "whirlpool_variant"),
+            ("wrong_vault", "wrong_vault", "whirlpool_accounts"),
+            ("wrong_pool", "wrong_pool", "whirlpool_accounts"),
+            ("extra_account", "extra_account", "whirlpool_accounts"),
+            ("direction", "direction", "whirlpool_direction"),
+            ("specified", "specified", "whirlpool_amount"),
+            ("amount", "amount", "whirlpool_amount"),
+            ("sibling", "sibling", "whirlpool_nesting"),
+            ("before", "before", "whirlpool_nesting"),
+            ("deep", "deep", "whirlpool_nesting"),
+            ("reversed", "reversed", "whirlpool_transfer"),
+            ("no_stack", "no_stack", "whirlpool_nesting"),
         ):
             overlay.clear()
             overlay["mode"] = mode
