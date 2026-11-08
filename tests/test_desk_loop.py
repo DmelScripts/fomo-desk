@@ -1940,9 +1940,19 @@ conn.close()
                 compute = [bytes(item.data) for item in decoded_sim.instructions if decoded_sim.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
                 fee = jupiter_route_v2.network_fee(compute, decoded_sim.required_signatures)["network_lamports"]
                 post = 50_000_000 - fee
-                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": None, "unitsConsumed": 1000, "accounts": [{"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}]}}}}
+                account = {"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}
+                if mode == "fee_only":
+                    account = {"lamports": post}
+                elif mode == "rent_constant":
+                    account["lamports"] = post - solana_tx.TOKEN_ACCOUNT_RENT
+                elif mode == "malformed_owner":
+                    account = {"lamports": post, "owner": True, "data": ["", "base64"]}
+                elif mode == "malformed_data":
+                    account = {"lamports": post, "owner": solana_tx.SYSTEM_PROGRAM, "data": "raw"}
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"err": None, "unitsConsumed": 1000, "accounts": [account]}}}}
             if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
-                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}}}}
+                payer = {"lamports": 50_000_000} if chain.get("fee_payer_shape") == "lamports_only" else {"lamports": 50_000_000, "owner": solana_tx.SYSTEM_PROGRAM, "data": ["", "base64"], "executable": False, "rentEpoch": 0}
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": payer}}}
             if method == "getMinimumBalanceForRentExemption":
                 return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
             if method == "getAccountInfo":
@@ -2053,10 +2063,16 @@ conn.close()
         preview = desk_loop.run_supervised(transport, WHEN, rounds=1)
         entry_preflight = next(item["preflight"] for item in preview["discovery"]["reservations"] if item.get("case_id") == case_id and item.get("side") == "entry")
         self.assertTrue(entry_preflight["simulation_clear"], entry_preflight)
+        self.assertTrue(entry_preflight["account_validated"], entry_preflight)
+        self.assertTrue(entry_preflight["network_fee_arithmetic_match"], entry_preflight)
         self.assertFalse(entry_preflight["preflight_ready"], entry_preflight)
-        self.assertEqual(entry_preflight["reason"], "fee_usd_unproven")
-        self.assertTrue(entry_preflight["fee_lamports_match"])
+        self.assertEqual(entry_preflight["reason"], "fee_composition_unproven")
+        self.assertFalse(entry_preflight["fee_lamports_match"])
+        self.assertFalse(entry_preflight["fee_composition_proven"])
+        self.assertFalse(entry_preflight["rent_bound_proven"])
+        self.assertTrue(entry_preflight["rent_unproven"])
         self.assertFalse(entry_preflight["fee_usd_proven"])
+        self.assertFalse(entry_preflight["ticket_limit_proven"])
         self.assertFalse(entry_preflight["slippage_proven_by_simulation"])
         self.assertFalse(entry_preflight["price_freshness_proven"])
         self.assertFalse(entry_preflight["gate_complete"])
@@ -2099,7 +2115,9 @@ conn.close()
         rfq_calls = chain["sim_calls"]
         rfq_fresh = desk_loop.preflight_reserved("rfq-case", rfq_hash, transport, WHEN)
         self.assertFalse(rfq_fresh["preflight_ready"], rfq_fresh)
-        self.assertEqual(rfq_fresh["reason"], "fee_usd_unproven")
+        self.assertEqual(rfq_fresh["reason"], "fee_composition_unproven")
+        self.assertFalse(rfq_fresh["fee_lamports_match"])
+        self.assertFalse(rfq_fresh["rent_bound_proven"])
         self.assertEqual(rfq_fresh["case_id"], "rfq-case")
         self.assertFalse(rfq_fresh["gate_complete"])
         self.assertFalse(rfq_fresh["price_freshness_proven"])
@@ -2110,6 +2128,49 @@ conn.close()
         self.assertFalse(rfq_late["attempted"])
         self.assertFalse(rfq_late["resend"])
         self.assertEqual(chain["sim_calls"], rfq_after)
+        entry_id = db.query("SELECT message_sha256 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_sha256"]
+        chain["preflight_mode"] = "fee_only"
+        fee_only = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        self.assertTrue(fee_only["simulation_clear"], fee_only)
+        self.assertFalse(fee_only["account_validated"])
+        self.assertFalse(fee_only["fee_lamports_match"])
+        self.assertFalse(fee_only["fee_composition_proven"])
+        self.assertFalse(fee_only["rent_bound_proven"])
+        self.assertFalse(fee_only["network_fee_arithmetic_match"])
+        self.assertFalse(fee_only["rent_constant_arithmetic_match"])
+        self.assertIsNone(fee_only["observed_lamport_delta"])
+        self.assertEqual(fee_only["reason"], "simulation_account_malformed")
+        self.assertFalse(fee_only["preflight_ready"])
+        chain["preflight_mode"] = "rent_constant"
+        rent_constant = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        self.assertTrue(rent_constant["account_validated"], rent_constant)
+        self.assertTrue(rent_constant["rent_constant_arithmetic_match"], rent_constant)
+        self.assertFalse(rent_constant["rent_bound_proven"])
+        self.assertFalse(rent_constant["fee_lamports_match"])
+        self.assertFalse(rent_constant["fee_composition_proven"])
+        self.assertFalse(rent_constant["network_fee_arithmetic_match"])
+        self.assertEqual(rent_constant["reason"], "fee_composition_unproven")
+        self.assertFalse(rent_constant["preflight_ready"])
+        self.assertFalse(rent_constant["gate_complete"])
+        chain["preflight_mode"] = "malformed_owner"
+        malformed_owner = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        self.assertEqual(malformed_owner["reason"], "simulation_account_malformed")
+        self.assertFalse(malformed_owner["account_validated"])
+        self.assertFalse(malformed_owner["fee_lamports_match"])
+        self.assertFalse(malformed_owner["rent_bound_proven"])
+        chain["preflight_mode"] = "malformed_data"
+        malformed_data = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        self.assertEqual(malformed_data["reason"], "simulation_account_malformed")
+        self.assertFalse(malformed_data["fee_lamports_match"])
+        self.assertFalse(malformed_data["rent_bound_proven"])
+        chain["preflight_mode"] = "clear"
+        chain["fee_payer_shape"] = "lamports_only"
+        bare_payer = desk_loop.preflight_reserved(case_id, entry_id, transport, WHEN)
+        chain["fee_payer_shape"] = None
+        self.assertEqual(bare_payer["reason"], "simulation_account_malformed")
+        self.assertFalse(bare_payer["network_fee_arithmetic_match"])
+        self.assertFalse(bare_payer["fee_lamports_match"])
+        self.assertFalse(bare_payer["rent_bound_proven"])
         held_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
         chain["preflight_mode"] = "err"
         failed_sim = desk_loop.run_supervised(transport, WHEN, rounds=1)
@@ -2720,9 +2781,14 @@ conn.close()
         exit_preflight = next(item["preflight"] for item in exit_round["discovery"]["reservations"] if item.get("message_sha256") == stored["message_sha256"])
         self.assertEqual(exit_preflight["side"], "exit")
         self.assertTrue(exit_preflight["simulation_clear"], exit_preflight)
-        self.assertTrue(exit_preflight["fee_lamports_match"], exit_preflight)
+        self.assertTrue(exit_preflight["account_validated"], exit_preflight)
+        self.assertTrue(exit_preflight["network_fee_arithmetic_match"], exit_preflight)
+        self.assertFalse(exit_preflight["fee_lamports_match"], exit_preflight)
+        self.assertFalse(exit_preflight["fee_composition_proven"])
+        self.assertFalse(exit_preflight["rent_bound_proven"])
+        self.assertTrue(exit_preflight["rent_unproven"])
         self.assertFalse(exit_preflight["preflight_ready"], exit_preflight)
-        self.assertEqual(exit_preflight["reason"], "fee_usd_unproven")
+        self.assertEqual(exit_preflight["reason"], "fee_composition_unproven")
         self.assertFalse(exit_preflight["gate_complete"])
         self.assertFalse(exit_preflight["price_freshness_proven"])
         self.assertFalse(exit_preflight["sign"])
@@ -2905,6 +2971,165 @@ conn.close()
         self.assertEqual(db.query("SELECT message_sha256 FROM memecoin_reservations WHERE message_sha256 = ?", (exit_hash,))[0]["message_sha256"], exit_hash)
         self.assertFalse(desk_loop.execution_gate(case_id, exit_hash, counting, WHEN)["execution_eligible"])
         self.assertFalse(desk_loop.scheduler_status()["armed"])
+
+    def test_predecessor_preflight_attempt_cannot_be_replaced(self):
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+        import threading
+        import db
+        root = Path(__file__).resolve().parents[1]
+        source = tempfile.mkdtemp()
+        built = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(source, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(built, ignore_errors=True))
+        archive = subprocess.run(["git", "archive", "3c48ff3cd45ea36c8301ceb6c828d4839b18b692"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["tar", "-x"], cwd=source, check=True, input=archive.stdout)
+        script = r"""
+import os, sqlite3
+import db
+import memecoin_desk
+db.init_db()
+memecoin_desk._ensure()
+db.execute("INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('bound-case', 'mint-bound', 'protected', '{\"reserved_usd\": \"8.00\"}', 1, 1, 'live', 'server')")
+db.execute("INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('other-case', 'mint-other', 'protected', '{\"reserved_usd\": \"1.00\"}', 1, 1, 'live', 'server')")
+db.execute("INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES ('entryhashentryhashentryhashentryhashentry', 'bound-case', 'entry', 'YQ==', 'metis', 'entry-block', 1000000, 'jupiter_order', 'live', 'server', 1)")
+db.execute("INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES ('exithashexithashexithashexithashexit', 'bound-case', 'exit', 'Yg==', 'metis', 'exit-block', 1000000, 'jupiter_order', 'live', 'server', 1)")
+db.execute("INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES ('otherhashotherhashotherhashotherhashot', 'other-case', 'entry', 'Yw==', 'metis', 'other-block', 1000000, 'jupiter_order', 'live', 'server', 1)")
+db.execute("INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES ('entryhashentryhashentryhashentryhashentry', 'bound-case', 'entry', 'entry-block', 2000028, 0, 1)")
+path = os.path.join(os.environ["DESK_DATA_DIR"], "desk.db")
+conn = sqlite3.connect(path)
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+conn.commit()
+conn.close()
+"""
+        env = os.environ.copy()
+        env["DESK_DATA_DIR"] = built
+        env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+        env.pop("STALKCHAIN_API_KEY", None)
+        ran = subprocess.run([sys.executable, "-c", script], cwd=source, env=env, capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        desk = Path(os.environ["DESK_DATA_DIR"]) / "desk.db"
+        for suffix in ("", "-wal", "-shm"):
+            extra = Path(str(desk) + suffix)
+            if extra.exists():
+                extra.unlink()
+        shutil.copy(Path(built) / "desk.db", desk)
+        path = str(desk)
+        original = ("entryhashentryhashentryhashentryhashentry", "bound-case", "entry", "entry-block", 2000028, 0)
+        retarget = "INSERT OR REPLACE INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'exithashexithashexithashexithashexit', 'bound-case', 'exit', 'exit-block', 999, 1, 9)"
+
+        def row(conn):
+            return tuple(conn.execute("SELECT message_sha256, case_id, side, blockhash, context_slot, err_clear FROM memecoin_preflight_attempts WHERE id = 1").fetchone())
+
+        raw = sqlite3.connect(path)
+        try:
+            self.assertEqual(raw.execute("PRAGMA recursive_triggers").fetchone()[0], 0)
+            raw.execute("BEGIN")
+            raw.execute(retarget)
+            self.assertEqual(row(raw), ("exithashexithashexithashexithashexit", "bound-case", "exit", "exit-block", 999, 1))
+            raw.rollback()
+            self.assertEqual(row(raw), original)
+        finally:
+            raw.close()
+        before = sqlite3.connect(path)
+        try:
+            names = {item[0] for item in before.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memecoin_preflight%'")}
+        finally:
+            before.close()
+        self.assertIn("memecoin_preflight_attempts_insert", names)
+        self.assertNotIn("memecoin_preflight_attempts_record", names)
+        real_install = memecoin_desk._install_preflight_audit
+
+        def explode(conn):
+            real_install(conn)
+            raise RuntimeError("preflight audit failed")
+
+        memecoin_desk._install_preflight_audit = explode
+        try:
+            with self.assertRaises(RuntimeError):
+                memecoin_desk._ensure()
+        finally:
+            memecoin_desk._install_preflight_audit = real_install
+        rolled = sqlite3.connect(path)
+        try:
+            rolled_names = {item[0] for item in rolled.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memecoin_preflight%'")}
+            self.assertEqual(rolled_names, names)
+            rolled.execute("BEGIN")
+            rolled.execute(retarget)
+            self.assertEqual(row(rolled), ("exithashexithashexithashexithashexit", "bound-case", "exit", "exit-block", 999, 1))
+            rolled.rollback()
+            self.assertEqual(row(rolled), original)
+        finally:
+            rolled.close()
+        memecoin_desk._ensure()
+        db.init_db()
+        stored = db.query("SELECT message_sha256, case_id, side, blockhash, context_slot, err_clear FROM memecoin_preflight_attempts WHERE id = 1")[0]
+        self.assertEqual(tuple(stored[key] for key in ("message_sha256", "case_id", "side", "blockhash", "context_slot", "err_clear")), original)
+        pinned = db.query("SELECT message_sha256, case_id, side, blockhash, context_slot, err_clear FROM memecoin_preflight_attempt_pin WHERE id = 1")[0]
+        self.assertEqual(tuple(pinned[key] for key in ("message_sha256", "case_id", "side", "blockhash", "context_slot", "err_clear")), original)
+        self.assertEqual(db.query("SELECT id FROM memecoin_preflight_attempt_anchor WHERE id = 1")[0]["id"], 1)
+        self.assertEqual(db.query("SELECT id FROM memecoin_preflight_attempt_seal WHERE id = 1")[0]["id"], 1)
+
+        def reject(sql, params=()):
+            raw = sqlite3.connect(path)
+            try:
+                self.assertEqual(raw.execute("PRAGMA recursive_triggers").fetchone()[0], 0)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    raw.execute(sql, params)
+                raw.rollback()
+                self.assertEqual(row(raw), original)
+            finally:
+                raw.close()
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute(sql, params)
+            stayed = db.query("SELECT message_sha256, case_id, side, blockhash, context_slot, err_clear FROM memecoin_preflight_attempts WHERE id = 1")[0]
+            self.assertEqual(tuple(stayed[key] for key in ("message_sha256", "case_id", "side", "blockhash", "context_slot", "err_clear")), original)
+
+        reject(retarget)
+        reject("INSERT INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'exithashexithashexithashexithashexit', 'bound-case', 'exit', 'exit-block', 999, 1, 9) ON CONFLICT(id) DO UPDATE SET message_sha256 = 'exithashexithashexithashexithashexit', case_id = 'bound-case', side = 'exit', blockhash = 'exit-block', context_slot = 999, err_clear = 1")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'otherhashotherhashotherhashotherhashot', 'other-case', 'entry', 'other-block', 2000028, 0, 1)")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'exithashexithashexithashexithashexit', 'bound-case', 'entry', 'entry-block', 2000028, 0, 1)")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'entryhashentryhashentryhashentryhashentry', 'bound-case', 'exit', 'entry-block', 2000028, 0, 1)")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempts (id, message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES (1, 'entryhashentryhashentryhashentryhashentry', 'bound-case', 'entry', 'entry-block', 999, 0, 1)")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempt_pin (id, message_sha256, case_id, side, blockhash, context_slot, err_clear) VALUES (1, 'exithashexithashexithashexithashexit', 'bound-case', 'exit', 'exit-block', 999, 1)")
+        reject("INSERT OR REPLACE INTO memecoin_preflight_attempt_anchor (id) VALUES (1)")
+        reject("UPDATE memecoin_preflight_attempts SET context_slot = 999 WHERE id = 1")
+        reject("DELETE FROM memecoin_preflight_attempts WHERE id = 1")
+        db.execute(
+            "INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES ('entryhashentryhashentryhashentryhashentry', 'bound-case', 'entry', 'entry-block', 2000028, 1, 2)"
+        )
+        fresh = db.query("SELECT id, message_sha256, side, context_slot FROM memecoin_preflight_attempts WHERE id != 1")
+        self.assertEqual(len(fresh), 1, fresh)
+        self.assertNotEqual(fresh[0]["id"], 1)
+        self.assertEqual(fresh[0]["message_sha256"], original[0])
+        self.assertEqual(db.query("SELECT side, context_slot FROM memecoin_preflight_attempt_pin WHERE id = ?", (fresh[0]["id"],))[0]["side"], "entry")
+        errors = []
+
+        def append():
+            try:
+                db.execute(
+                    "INSERT INTO memecoin_preflight_attempts (message_sha256, case_id, side, blockhash, context_slot, err_clear, created_at) VALUES ('entryhashentryhashentryhashentryhashentry', 'bound-case', 'entry', 'entry-block', 2000028, 1, 3)"
+                )
+            except Exception as exc:
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=append) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        ids = [item["id"] for item in db.query("SELECT id FROM memecoin_preflight_attempts ORDER BY id")]
+        self.assertEqual(ids[0], 1)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertGreaterEqual(len(ids), 4)
+        stayed = db.query("SELECT message_sha256, case_id, side, blockhash, context_slot, err_clear FROM memecoin_preflight_attempts WHERE id = 1")[0]
+        self.assertEqual(tuple(stayed[key] for key in ("message_sha256", "case_id", "side", "blockhash", "context_slot", "err_clear")), original)
+        self.assertEqual(db.exclusive(lambda conn: conn.execute("PRAGMA user_version").fetchone()[0]), 12)
+        self.assertEqual(db.get_setting("memecoin_lineage_trigger"), "14")
 
     def test_predecessor_slot_pointer_is_repaired_from_the_proofs(self):
         import hashlib

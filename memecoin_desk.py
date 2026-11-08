@@ -3480,14 +3480,86 @@ def _replace_reservation_triggers(conn) -> None:
 
 
 def _install_preflight_audit(conn) -> None:
-    """An attempt is bound to the reservation that was simulated. It cannot be retargeted."""
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_insert")
+    """Append-only attempts. An existing id cannot be replaced, whatever the PRAGMA is.
+
+    The pin keeps the proof. The anchor and seal keep the pin from being replaced
+    when REPLACE deletes a row without firing that table's delete trigger.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_preflight_attempt_pin (
+            id INTEGER PRIMARY KEY,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            blockhash TEXT NOT NULL,
+            context_slot INTEGER NOT NULL,
+            err_clear INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_preflight_attempt_anchor (
+            id INTEGER PRIMARY KEY
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_preflight_attempt_seal (
+            id INTEGER PRIMARY KEY
+        )
+        """
+    )
+    for name in (
+        "memecoin_preflight_attempts_insert",
+        "memecoin_preflight_attempts_record",
+        "memecoin_preflight_attempts_update",
+        "memecoin_preflight_attempts_delete",
+        "memecoin_preflight_attempt_pin_insert",
+        "memecoin_preflight_attempt_pin_update",
+        "memecoin_preflight_attempt_pin_delete",
+        "memecoin_preflight_attempt_anchor_insert",
+        "memecoin_preflight_attempt_anchor_update",
+        "memecoin_preflight_attempt_anchor_delete",
+        "memecoin_preflight_attempt_seal_update",
+        "memecoin_preflight_attempt_seal_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_preflight_attempt_pin (
+            id, message_sha256, case_id, side, blockhash, context_slot, err_clear
+        )
+        SELECT id, message_sha256, case_id, side, blockhash, context_slot, err_clear
+        FROM memecoin_preflight_attempts
+        WHERE id NOT IN (SELECT id FROM memecoin_preflight_attempt_pin)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_preflight_attempt_anchor (id)
+        SELECT id FROM memecoin_preflight_attempt_pin
+        WHERE id NOT IN (SELECT id FROM memecoin_preflight_attempt_anchor)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO memecoin_preflight_attempt_seal (id)
+        SELECT id FROM memecoin_preflight_attempt_anchor
+        WHERE id NOT IN (SELECT id FROM memecoin_preflight_attempt_seal)
+        """
+    )
     conn.execute(
         """
         CREATE TRIGGER memecoin_preflight_attempts_insert
         BEFORE INSERT ON memecoin_preflight_attempts
         FOR EACH ROW
-        WHEN NOT EXISTS (
+        WHEN (NEW.id > 0 AND EXISTS (
+            SELECT 1 FROM memecoin_preflight_attempt_pin WHERE id = NEW.id
+        ))
+        OR NOT EXISTS (
             SELECT 1 FROM memecoin_reservations
             WHERE message_sha256 = NEW.message_sha256
               AND case_id = NEW.case_id
@@ -3501,26 +3573,75 @@ def _install_preflight_audit(conn) -> None:
         END
         """
     )
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_update")
     conn.execute(
         """
-        CREATE TRIGGER memecoin_preflight_attempts_update
-        BEFORE UPDATE ON memecoin_preflight_attempts
+        CREATE TRIGGER memecoin_preflight_attempts_record
+        AFTER INSERT ON memecoin_preflight_attempts
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_preflight_attempt_pin (
+                id, message_sha256, case_id, side, blockhash, context_slot, err_clear
+            ) VALUES (
+                NEW.id, NEW.message_sha256, NEW.case_id, NEW.side, NEW.blockhash, NEW.context_slot, NEW.err_clear
+            );
+            INSERT INTO memecoin_preflight_attempt_anchor (id) VALUES (NEW.id);
+            INSERT INTO memecoin_preflight_attempt_seal (id) VALUES (NEW.id);
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_preflight_attempt_pin_insert
+        BEFORE INSERT ON memecoin_preflight_attempt_pin
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM memecoin_preflight_attempt_anchor WHERE id = NEW.id)
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_preflight_attempts
+            WHERE id = NEW.id
+              AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id
+              AND side = NEW.side
+              AND blockhash = NEW.blockhash
+              AND context_slot = NEW.context_slot
+              AND err_clear = NEW.err_clear
+        )
         BEGIN
             SELECT RAISE(ABORT, 'preflight_unbound');
         END
         """
     )
-    conn.execute("DROP TRIGGER IF EXISTS memecoin_preflight_attempts_delete")
     conn.execute(
         """
-        CREATE TRIGGER memecoin_preflight_attempts_delete
-        BEFORE DELETE ON memecoin_preflight_attempts
+        CREATE TRIGGER memecoin_preflight_attempt_anchor_insert
+        BEFORE INSERT ON memecoin_preflight_attempt_anchor
+        FOR EACH ROW
+        WHEN EXISTS (SELECT 1 FROM memecoin_preflight_attempt_seal WHERE id = NEW.id)
+        OR NOT EXISTS (SELECT 1 FROM memecoin_preflight_attempt_pin WHERE id = NEW.id)
         BEGIN
             SELECT RAISE(ABORT, 'preflight_unbound');
         END
         """
     )
+    for name, table, kind in (
+        ("memecoin_preflight_attempts_update", "memecoin_preflight_attempts", "UPDATE"),
+        ("memecoin_preflight_attempts_delete", "memecoin_preflight_attempts", "DELETE"),
+        ("memecoin_preflight_attempt_pin_update", "memecoin_preflight_attempt_pin", "UPDATE"),
+        ("memecoin_preflight_attempt_pin_delete", "memecoin_preflight_attempt_pin", "DELETE"),
+        ("memecoin_preflight_attempt_anchor_update", "memecoin_preflight_attempt_anchor", "UPDATE"),
+        ("memecoin_preflight_attempt_anchor_delete", "memecoin_preflight_attempt_anchor", "DELETE"),
+        ("memecoin_preflight_attempt_seal_update", "memecoin_preflight_attempt_seal", "UPDATE"),
+        ("memecoin_preflight_attempt_seal_delete", "memecoin_preflight_attempt_seal", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'preflight_unbound');
+            END
+            """
+        )
 
 
 def _install_lineage_triggers(conn) -> None:

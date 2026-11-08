@@ -601,15 +601,37 @@ def _preflight_report(**extra) -> dict:
         "attempted": False, "simulate": False, "sign": False, "send": False,
         "simulation_clear": False, "preflight_ready": False, "gate_complete": False,
         "price_freshness_proven": False, "slippage_proven_by_simulation": False,
-        "fee_usd_proven": False, "fee_lamports_match": False, "rent_bound_proven": False,
+        "fee_usd_proven": False, "fee_lamports_match": False, "fee_composition_proven": False,
+        "rent_bound_proven": False, "rent_unproven": True, "ticket_limit_proven": False,
+        "account_validated": False, "observed_lamport_delta": None,
+        "network_fee_arithmetic_match": False, "rent_constant_arithmetic_match": False,
         "sig_verify": False, "replace_recent_blockhash": False, "message_rewritten": False,
         "holds": True, "resend": False, "operation": "unimplemented", "reason": None,
     }
     return base | extra
 
 
-def _account_lamports(response, tip: int):
+def _system_account_lamports(value):
+    """Lamports from a system account that carries owner and base64 data.
+
+    A bare lamport number is not an account. It cannot support a fee or rent claim.
+    """
     import solana_tx
+    if not isinstance(value, dict):
+        return None
+    owner = value.get("owner")
+    if not isinstance(owner, str) or owner != solana_tx.SYSTEM_PROGRAM:
+        return None
+    data = value.get("data")
+    if not isinstance(data, (list, tuple)) or len(data) != 2 or not isinstance(data[0], str) or data[1] != "base64":
+        return None
+    lamports = value.get("lamports")
+    if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0:
+        return None
+    return lamports
+
+
+def _account_lamports(response, tip: int):
     body = response.get("body") if isinstance(response, dict) else None
     result = body.get("result") if isinstance(body, dict) else None
     if not isinstance(result, dict):
@@ -618,13 +640,7 @@ def _account_lamports(response, tip: int):
     slot = None if context is None else context.get("slot")
     if isinstance(slot, bool) or not isinstance(slot, int) or slot < tip or slot > tip + __import__("jupiter_route_v2").SLOT_LAG_MAX:
         return None
-    value = result.get("value")
-    if not isinstance(value, dict) or value.get("owner") != solana_tx.SYSTEM_PROGRAM:
-        return None
-    lamports = value.get("lamports")
-    if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0:
-        return None
-    return lamports
+    return _system_account_lamports(result.get("value"))
 
 
 def _simulation_result(response, tip: int) -> dict:
@@ -709,41 +725,29 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
             return _preflight_report(attempted=True, simulate=True, reason="preflight_unbound", case_id=case_id, message_sha256=message_sha256, blockhash=proof["blockhash"])
     if parsed.get("ok") is not True:
         return _preflight_report(attempted=True, simulate=True, reason=parsed.get("reason"), case_id=case_id, message_sha256=message_sha256, blockhash=proof["blockhash"], context_slot=parsed.get("slot"))
-    post = None
     accounts = parsed.get("accounts")
-    if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict):
-        lamports = accounts[0].get("lamports")
-        if not isinstance(lamports, bool) and isinstance(lamports, int) and lamports >= 0:
-            post = lamports
-    fee_match = False
-    rent_ok = False
-    if pre is not None and post is not None and isinstance(network, int):
-        delta = pre - post
-        if delta == network:
-            fee_match = True
-            rent_ok = True
-        elif delta == network + solana_tx.TOKEN_ACCOUNT_RENT:
-            fee_match = True
-            rent_ok = True
-    clear = True
-    # The lamport delta can match the network fee and one token-account rent.
-    # It does not price that fee in USD, prove 50 bps, or prove the $8 ticket.
-    fee_usd_proven = False
-    slippage_proven = False
-    ticket_limit_proven = False
-    ready = clear and fee_match and rent_ok and fee_usd_proven and slippage_proven and ticket_limit_proven
-    if not fee_match or not rent_ok:
-        reason = "fee_unproven"
-    elif not fee_usd_proven:
-        reason = "fee_usd_unproven"
-    elif not slippage_proven:
-        reason = "slippage_unproven"
-    else:
-        reason = "ticket_limit_unproven"
+    post_value = accounts[0] if isinstance(accounts, list) and accounts else None
+    post = _system_account_lamports(post_value)
+    account_ok = pre is not None and post is not None
+    observed = None
+    network_match = False
+    rent_constant = False
+    if account_ok and isinstance(network, int) and network >= 0:
+        observed = pre - post
+        if observed == network:
+            network_match = True
+        elif observed == network + solana_tx.TOKEN_ACCOUNT_RENT:
+            rent_constant = True
+    # A fee-payer delta still mixes the swap, wrapped SOL, rent, and any refund.
+    # Matching the network fee, or that fee plus the constant token-account rent,
+    # is only arithmetic. It is not fee composition and it is not rent proof.
     return _preflight_report(
-        attempted=True, simulate=True, simulation_clear=clear, preflight_ready=ready,
-        reason=reason, fee_lamports_match=fee_match, rent_bound_proven=rent_ok,
-        fee_usd_proven=fee_usd_proven, slippage_proven_by_simulation=slippage_proven,
+        attempted=True, simulate=True, simulation_clear=True, preflight_ready=False,
+        reason="fee_composition_unproven" if account_ok else "simulation_account_malformed",
+        account_validated=account_ok, observed_lamport_delta=observed,
+        network_fee_arithmetic_match=network_match, rent_constant_arithmetic_match=rent_constant,
+        fee_lamports_match=False, fee_composition_proven=False, rent_bound_proven=False, rent_unproven=True,
+        fee_usd_proven=False, slippage_proven_by_simulation=False, ticket_limit_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
         context_slot=parsed["slot"], lookups_resolved=False, execution_guarantee=False,
         signature_validated=False,
