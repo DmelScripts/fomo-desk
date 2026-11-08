@@ -568,12 +568,12 @@ def _quote_intent(mint: str, pool: str, allow_synthetic: bool = False) -> dict:
         intent_row = memecoin_desk._matching_intent(rows[0]["id"])
         if intent_row is None:
             return refused | {"reason": "exit_unproven"}
-        if snap.get("entry_price_usd") != intent_row["entry_price_usd"] or snap.get("basis_cost_lamports") != intent_row["basis_cost_lamports"]:
-            return refused | {"reason": "basis_changed"}
+        if intent_row["pool"] != pool:
+            return refused | {"reason": "pool_mismatch", "holds": True}
         left = memecoin_desk.receipt_remaining(rows[0]["id"])
         if left.get("ok") is not True or not isinstance(left.get("remaining"), int) or left["remaining"] <= 0:
             return refused | {"reason": "flat" if left.get("remaining") == 0 else left.get("reason")}
-        return {"ok": True, "side": "exit", "amount": left["remaining"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": pool}
+        return {"ok": True, "side": "exit", "amount": left["remaining"], "input_mint": mint, "output_mint": solana_tx.NATIVE_MINT, "a_to_b": False, "case_id": rows[0]["id"], "pool": intent_row["pool"], "intent_id": intent_row["id"]}
     amount = snap.get("entry_amount_raw")
     if stage == "protected" and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
         return {"ok": True, "side": "entry", "amount": amount, "input_mint": solana_tx.NATIVE_MINT, "output_mint": mint, "a_to_b": True, "case_id": rows[0]["id"], "pool": pool}
@@ -597,82 +597,6 @@ def _open_positions() -> list:
         )
     except Exception:
         return []
-
-
-def read_trusted_mark(case_id: str, transport, now: float):
-    """Fetch genesis, the pool, the mint, and Pyth. Caller bytes cannot become a mark."""
-    import base64
-    import jupiter_route_v2
-    import pyth_sponsored
-    import solana_inspect
-    import solana_tx
-    import solana_whirlpool
-    refused = {"ok": False, "trusted": False}
-    receipt = memecoin_desk._live_entry_receipt(case_id)
-    if receipt is None or not isinstance(receipt["pool"], str):
-        return refused | {"reason": "basis_unproven"}
-    try:
-        genesis = transport({"kind": "rpc", "method": "getGenesisHash"})
-    except Exception:
-        return refused | {"reason": "genesis"}
-    genesis_body = genesis.get("body") if isinstance(genesis, dict) else None
-    if not isinstance(genesis_body, dict) or genesis_body.get("result") != solana_inspect.MAINNET_GENESIS:
-        return refused | {"reason": "genesis"}
-    pool = receipt["pool"]
-    first = jupiter_route_v2.read_snapshot(transport, [pool], now)
-    if first.get("ok") is not True:
-        return refused | {"reason": first.get("reason") or "exit_mark_unpriced"}
-    record = first["snapshot"].accounts.get(pool)
-    if not isinstance(record, tuple) or record[0] != solana_whirlpool.PROGRAM_ID:
-        return refused | {"reason": "whirlpool_pool_unbound"}
-    if not solana_whirlpool.pool_pda_matches(pool, record[1]):
-        return refused | {"reason": "whirlpool_pda_unbound"}
-    fields = solana_whirlpool.pool_fields(record[1])
-    case = memecoin_desk.view(case_id)
-    if fields is None or case is None or case["mint"] not in {fields[0], fields[2]}:
-        return refused | {"reason": "mark_mint"}
-    vaults = (fields[1], fields[3])
-    oracle = solana_whirlpool.oracle_address(pool)
-    second = jupiter_route_v2.read_snapshot(transport, [vaults[0], vaults[1], oracle], now)
-    if second.get("ok") is not True:
-        return refused | {"reason": second.get("reason") or "whirlpool_vault_unbound"}
-    accounts = second["snapshot"].accounts
-    for vault, mint in ((vaults[0], fields[0]), (vaults[1], fields[2])):
-        vault_account = accounts.get(vault)
-        if not isinstance(vault_account, tuple) or vault_account[0] != solana_tx.TOKEN_PROGRAM:
-            return refused | {"reason": "whirlpool_vault_unbound"}
-        if not solana_whirlpool.vault_authority_is_pool(vault_account[1], mint, pool):
-            return refused | {"reason": "whirlpool_vault_unbound"}
-    oracle_account = accounts.get(oracle)
-    if not isinstance(oracle_account, tuple) or oracle_account[0] != solana_whirlpool.PROGRAM_ID or not solana_whirlpool.oracle_matches(pool, oracle_account[1]):
-        return refused | {"reason": "whirlpool_oracle_unbound"}
-    try:
-        mint_info = transport({"kind": "rpc", "method": "getAccountInfo", "mint": case["mint"]})
-    except Exception:
-        return refused | {"reason": "mint_decimals"}
-    mint_body = mint_info.get("body") if isinstance(mint_info, dict) else None
-    mint_value = ((mint_body or {}).get("result") or {}).get("value") if isinstance(mint_body, dict) else None
-    if not isinstance(mint_value, dict) or mint_value.get("owner") != solana_tx.TOKEN_PROGRAM:
-        return refused | {"reason": "mint_decimals"}
-    parsed = solana_mint_read.parse_account(mint_value, case["mint"])
-    if parsed.get("ok") is not True:
-        return refused | {"reason": "mint_decimals"}
-    try:
-        mint_raw = base64.b64decode(mint_value["data"][0], validate=True)
-    except Exception:
-        return refused | {"reason": "mint_decimals"}
-    if len(mint_raw) < 82:
-        return refused | {"reason": "mint_decimals"}
-    decimals = mint_raw[44]
-    sol = pyth_sponsored.read_accounts(transport, now)
-    leg = sol.get("sol") if isinstance(sol, dict) and sol.get("fresh") is True else None
-    if not isinstance(leg, dict) or leg.get("fresh") is not True:
-        return refused | {"reason": sol.get("reason") if isinstance(sol, dict) else "sol_usd_unpriced"}
-    measured = memecoin_desk.measure_pool_price(record[1], case["mint"], decimals, leg)
-    if measured.get("ok") is not True:
-        return refused | {"reason": measured.get("reason")}
-    from decimal import Decimal
-    return memecoin_desk._seal_mark(case["mint"], pool, Decimal(measured["price"]), float(now), first["snapshot"].slot, decimals)
 
 
 def _supervise_open(transport, now: float) -> list:
@@ -709,13 +633,9 @@ def _supervise_open(transport, now: float) -> list:
             continue
         intent = snap.get("exit_intent") if isinstance(snap.get("exit_intent"), dict) else {}
         if row["stage"] == "filled":
-            bound = read_trusted_mark(row["id"], transport, now)
-            if not isinstance(bound, memecoin_desk.BoundPrice):
-                found.append({"mint": row["mint"], "reason": bound.get("reason") if isinstance(bound, dict) else "exit_mark_unpriced", "jupiter_called": False, "supervised": True})
-                continue
-            marked = memecoin_desk.apply_live_mark(row["id"], bound, now)
+            marked = memecoin_desk.mark_open_position(row["id"], transport, now)
             if marked.get("action") not in {"stop", "trail"}:
-                found.append({"mint": row["mint"], "reason": marked.get("reason") or "exit_hold", "action": marked.get("action"), "jupiter_called": False, "supervised": True, "mark_price": format(bound.price, "f")})
+                found.append({"mint": row["mint"], "reason": marked.get("reason") or "exit_hold", "action": marked.get("action"), "jupiter_called": False, "supervised": True, "mark_price": marked.get("mark_price")})
                 continue
         elif memecoin_desk._matching_intent(row["id"]) is None:
             found.append({"mint": row["mint"], "reason": "exit_unproven", "jupiter_called": False, "supervised": True})

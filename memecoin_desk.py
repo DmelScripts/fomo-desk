@@ -474,7 +474,7 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
             _log(conn, row["id"], row["mint"], "executor", "kill", "allocation", None, {"reason": "allocation"}, moment)
             return {"ok": False, "reason": "allocation", "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
         conn.execute(
-            "UPDATE memecoin_cases SET stage = 'protected', snapshot_json = ?, ledger = ?, updated_at = ? WHERE id = ? AND stage = 'analyst_passed'",
+            "UPDATE memecoin_cases SET stage = 'protected', snapshot_json = ?, ledger = ?, ledger_provenance = 'server', updated_at = ? WHERE id = ? AND stage = 'analyst_passed'",
             (json.dumps(snap, sort_keys=True), "synthetic" if ledger == "synthetic" else "live", moment, row["id"]),
         )
         _log(conn, row["id"], row["mint"], "executor", "pass", None, None, evidence, moment)
@@ -841,7 +841,7 @@ def confirm_entry(case_id: str, signature: str, now: float | None = None) -> dic
         if breach:
             _halt_entries(conn, moment)
         conn.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, pool) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, pool, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'server')",
             (signature, row["id"], proven["message_sha256"], proven["slot"], proven["qty"], proven["cost_basis_lamports"], proven["network_fee_lamports"], proven["dex_fee_lamports"], "unpriced" if fee_usd is None else format(fee_usd, "f"), _ledger_of(row), inflight.get("pool") if isinstance(inflight.get("pool"), str) else None),
         )
         conn.execute("UPDATE memecoin_cases SET stage = 'filled', snapshot_json = ?, updated_at = ? WHERE id = ?", (json.dumps(fresh, sort_keys=True), moment, row["id"]))
@@ -905,17 +905,18 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
     foreign = _foreign_ledger(row, "risk")
     if foreign is not None:
         return foreign
-    if _live_entry_receipt(row["id"]) is not None and _matching_intent(row["id"]) is None:
+    snap_now = _snapshot(row)
+    paper = _ledger_of(row) == "paper" or (
+        isinstance(snap_now.get("fill"), dict) and snap_now["fill"].get("fixture") is True
+        and isinstance(snap_now.get("entry_funding"), dict) and snap_now["entry_funding"].get("source") == "paper_harness"
+    )
+    if not paper and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
         return _note(row, "risk", "exit_unproven")
     if not isinstance(snapshot, jupiter_route_v2.Snapshot):
         return _note(row, "risk", "snapshot_unbound")
     if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
         return _note(row, "risk", "quantity")
     moment = time.time() if now is None else now
-    prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
-    sol = prices.get("sol") if isinstance(prices, dict) else None
-    if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
-        return _note(row, "risk", prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound")
     try:
         digest = hashlib.sha256(solana_tx.message_bytes(message_b64)).hexdigest()
         decoded = solana_tx.decode_transaction(__import__("base64").b64decode(message_b64, validate=True))
@@ -924,6 +925,17 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
     route = memecoin_exit._route(decoded)
     if route is None or route["source_mint"] != row["mint"] or route["in_amount"] != qty:
         return _note(row, "risk", "exit_mint")
+    if not paper:
+        intent_now = _matching_intent(row["id"])
+        cursor_pool = 7
+        if route["keys"][cursor_pool] != jupiter_route_v2.EVENT:
+            cursor_pool += 1
+        if intent_now is None or route["keys"][cursor_pool + 5] != intent_now["pool"]:
+            return _note(row, "risk", "pool_mismatch")
+    prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
+    sol = prices.get("sol") if isinstance(prices, dict) else None
+    if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
+        return _note(row, "risk", prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound")
     cursor = 7
     if route["keys"][cursor] != jupiter_route_v2.EVENT:
         cursor += 1
@@ -1047,6 +1059,12 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
     if foreign is not None:
         return foreign
     snap = _snapshot(row)
+    paper_exit = _ledger_of(row) == "paper" or (
+        isinstance(snap.get("fill"), dict) and snap["fill"].get("fixture") is True
+        and isinstance(snap.get("entry_funding"), dict) and snap["entry_funding"].get("source") == "paper_harness"
+    )
+    if not paper_exit and (_live_entry_receipt(row["id"]) is None or _matching_intent(row["id"]) is None):
+        return _note(row, "risk", "exit_unproven")
     inflight = snap.get("inflight")
     if not isinstance(inflight, dict):
         return _hold(row, "exit_not_reserved", status="held")
@@ -1160,7 +1178,7 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
                 (moment,),
             )
         conn.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, snapshot_slot, provenance_json, qty, ledger) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, snapshot_slot, provenance_json, qty, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'server')",
             (
                 signature, row["id"], proven["message_sha256"], proven["slot"],
                 "unpriced" if fee_usd is None else format(fee_usd, "f"),
@@ -1299,7 +1317,7 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
         if breach:
             _halt_entries(conn, moment)
         conn.execute(
-            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger) VALUES (?, ?, ?, ?, ?, 1, ?)",
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, 1, ?, 'server')",
             (signature, row["id"], rent, 0 if not isinstance(fee_lamports, int) else fee_lamports, "unpriced" if refund_fee is None else format(refund_fee, "f"), _ledger_of(row)),
         )
         conn.execute(
@@ -1412,7 +1430,7 @@ def _record_refund(row, proven: dict, *, released: bool, moment: float) -> dict:
         fresh["live_events"] = events
         fresh["realized_pnl"] = trading
         conn.execute(
-            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memecoin_refunds (signature, case_id, rent_lamports, network_fee_lamports, fee_usd, released, ledger, ledger_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, 'server')",
             (signature, row["id"], proven.get("rent_lamports") or 0, fee_lamports if isinstance(fee_lamports, int) else 0, "unpriced" if refund_fee is None else format(refund_fee, "f"), 1 if released else 0, _ledger_of(row)),
         )
         conn.execute(
@@ -1535,29 +1553,6 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
     return db.exclusive(work)
 
 
-class BoundPrice:
-    """A price computed from pool bytes and a fresh SOL leg. A caller string is not one."""
-
-    def __init__(self, token, mint: str, pool: str, price: Decimal, fetched_at: float, slot: int, decimals: int):
-        if token is not _PRICE_TOKEN:
-            raise TypeError("unbound price")
-        self.mint = mint
-        self.pool = pool
-        self.price = price
-        self.fetched_at = fetched_at
-        self.slot = slot
-        self.decimals = decimals
-        self.source = "server_pool_pyth"
-
-
-_PRICE_TOKEN = object()
-
-
-def _seal_mark(mint: str, pool: str, price: Decimal, fetched_at: float, slot: int, decimals: int) -> BoundPrice:
-    """Only the transport reader calls this, after genesis, owner, PDA, and Pyth checks."""
-    return BoundPrice(_PRICE_TOKEN, mint, pool, price, fetched_at, slot, decimals)
-
-
 def measure_pool_price(pool_data: bytes, mint: str, decimals: int, sol_leg: dict) -> dict:
     """Arithmetic only. The result is not a mark and cannot open an exit."""
     import jupiter_route_v2
@@ -1592,30 +1587,85 @@ def read_bound_price(case_id: str, pool_data: bytes, pool: str, sol_leg: dict, d
     return measured
 
 
-def apply_live_mark(case_id: str, bound, now: float | None = None) -> dict:
-    """Move a live filled position only from a sealed pool price. A paper fill is not accepted here."""
-    moment = time.time() if now is None else now
-    if not isinstance(bound, BoundPrice):
-        return {"ok": False, "reason": "mark_source", "case_id": case_id, "send": False, "live_ready": False}
+def mark_open_position(case_id: str, transport, now: float) -> dict:
+    """Read the chain and persist the exit in one call. A price object is not an argument."""
+    import base64
+    import jupiter_route_v2
+    import pyth_sponsored
+    import solana_inspect
+    import solana_mint_read
+    import solana_whirlpool
+    moment = now
+    if not callable(transport):
+        return {"ok": False, "reason": "mark_source", "case_id": case_id, "send": False, "live_ready": False, "recorded": False}
     row = _case(case_id)
-    if row is None or row["stage"] != "filled":
-        return _kill(case_id, None, "risk", "stage", None)
-    if bound.mint != row["mint"]:
-        return _note(row, "risk", "mark_source")
-    if abs(Decimal(str(moment)) - Decimal(str(bound.fetched_at))) > FRESH_S:
-        return _note(row, "risk", "mark_stale")
+    if row is None or row["stage"] != "filled" or _ledger_of(row) != "live":
+        return {"ok": False, "reason": "stage", "case_id": case_id, "send": False, "live_ready": False, "recorded": False}
     snap = _snapshot(row)
     if isinstance(snap.get("fill"), dict) and snap["fill"].get("fixture") is True:
-        return _note(row, "risk", "paper_not_live")
-    if snap.get("fill_basis_proven") is not True:
-        return _note(row, "risk", "basis_unproven")
+        return {"ok": False, "reason": "paper_not_live", "case_id": case_id, "send": False, "live_ready": False, "recorded": False}
+    receipt = _live_entry_receipt(case_id)
+    if receipt is None or not isinstance(receipt["pool"], str):
+        return {"ok": False, "reason": "basis_unproven", "case_id": case_id, "send": False, "live_ready": False, "recorded": False}
     entry = _money(snap.get("entry_price_usd"))
     stop_px = _money(snap.get("stop_price_usd"))
     if entry is None or stop_px is None or snap.get("entry_price_source") != "entry_receipt":
-        return _note(row, "risk", "basis_unproven")
-    price = bound.price if isinstance(bound.price, Decimal) else _money(bound.price)
-    if price is None:
-        return _note(row, "risk", "mark_price")
+        return {"ok": False, "reason": "basis_unproven", "case_id": case_id, "send": False, "live_ready": False, "recorded": False}
+    try:
+        genesis = transport({"kind": "rpc", "method": "getGenesisHash"})
+    except Exception:
+        return {"ok": False, "reason": "genesis", "case_id": case_id, "send": False, "recorded": False}
+    genesis_body = genesis.get("body") if isinstance(genesis, dict) else None
+    if not isinstance(genesis_body, dict) or genesis_body.get("result") != solana_inspect.MAINNET_GENESIS:
+        return {"ok": False, "reason": "genesis", "case_id": case_id, "send": False, "recorded": False}
+    pool = receipt["pool"]
+    first = jupiter_route_v2.read_snapshot(transport, [pool], now)
+    if first.get("ok") is not True:
+        return {"ok": False, "reason": first.get("reason") or "exit_mark_unpriced", "case_id": case_id, "send": False, "recorded": False}
+    record = first["snapshot"].accounts.get(pool)
+    if not isinstance(record, tuple) or record[0] != solana_whirlpool.PROGRAM_ID or not solana_whirlpool.pool_pda_matches(pool, record[1]):
+        return {"ok": False, "reason": "whirlpool_pool_unbound" if not isinstance(record, tuple) or record[0] != solana_whirlpool.PROGRAM_ID else "whirlpool_pda_unbound", "case_id": case_id, "send": False, "recorded": False}
+    fields = solana_whirlpool.pool_fields(record[1])
+    if fields is None or row["mint"] not in {fields[0], fields[2]}:
+        return {"ok": False, "reason": "mark_mint", "case_id": case_id, "send": False, "recorded": False}
+    oracle = solana_whirlpool.oracle_address(pool)
+    second = jupiter_route_v2.read_snapshot(transport, [fields[1], fields[3], oracle], now)
+    if second.get("ok") is not True:
+        return {"ok": False, "reason": second.get("reason") or "whirlpool_vault_unbound", "case_id": case_id, "send": False, "recorded": False}
+    accounts = second["snapshot"].accounts
+    for vault, mint in ((fields[1], fields[0]), (fields[3], fields[2])):
+        vault_account = accounts.get(vault)
+        if not isinstance(vault_account, tuple) or vault_account[0] != solana_tx.TOKEN_PROGRAM or not solana_whirlpool.vault_authority_is_pool(vault_account[1], mint, pool):
+            return {"ok": False, "reason": "whirlpool_vault_unbound", "case_id": case_id, "send": False, "recorded": False}
+    oracle_account = accounts.get(oracle)
+    if not isinstance(oracle_account, tuple) or oracle_account[0] != solana_whirlpool.PROGRAM_ID or not solana_whirlpool.oracle_matches(pool, oracle_account[1]):
+        return {"ok": False, "reason": "whirlpool_oracle_unbound", "case_id": case_id, "send": False, "recorded": False}
+    try:
+        mint_info = transport({"kind": "rpc", "method": "getAccountInfo", "mint": row["mint"]})
+    except Exception:
+        return {"ok": False, "reason": "mint_decimals", "case_id": case_id, "send": False, "recorded": False}
+    mint_body = mint_info.get("body") if isinstance(mint_info, dict) else None
+    mint_value = ((mint_body or {}).get("result") or {}).get("value") if isinstance(mint_body, dict) else None
+    if not isinstance(mint_value, dict) or mint_value.get("owner") != solana_tx.TOKEN_PROGRAM:
+        return {"ok": False, "reason": "mint_decimals", "case_id": case_id, "send": False, "recorded": False}
+    if solana_mint_read.parse_account(mint_value, row["mint"]).get("ok") is not True:
+        return {"ok": False, "reason": "mint_decimals", "case_id": case_id, "send": False, "recorded": False}
+    try:
+        mint_raw = base64.b64decode(mint_value["data"][0], validate=True)
+    except Exception:
+        return {"ok": False, "reason": "mint_decimals", "case_id": case_id, "send": False, "recorded": False}
+    if len(mint_raw) < 82:
+        return {"ok": False, "reason": "mint_decimals", "case_id": case_id, "send": False, "recorded": False}
+    decimals = mint_raw[44]
+    sol = pyth_sponsored.read_accounts(transport, now)
+    leg = sol.get("sol") if isinstance(sol, dict) and sol.get("fresh") is True else None
+    if not isinstance(leg, dict) or leg.get("fresh") is not True:
+        return {"ok": False, "reason": sol.get("reason") if isinstance(sol, dict) else "sol_usd_unpriced", "case_id": case_id, "send": False, "recorded": False}
+    measured = measure_pool_price(record[1], row["mint"], decimals, leg)
+    if measured.get("ok") is not True:
+        return {"ok": False, "reason": measured.get("reason"), "case_id": case_id, "send": False, "recorded": False}
+    price = Decimal(measured["price"])
+    slot = first["snapshot"].slot
     peak = _money(snap.get("peak_price_usd")) or entry
     if price > peak:
         peak = price
@@ -1633,13 +1683,13 @@ def apply_live_mark(case_id: str, bound, now: float | None = None) -> dict:
     if action != "hold":
         snap["exit_intent"] = {
             "action": action,
-            "source": bound.source,
+            "source": "server_pool_pyth",
             "live": True,
             "mark_price_usd": format(price, "f"),
-            "pool": bound.pool,
-            "slot": bound.slot,
-            "fetched_at": bound.fetched_at,
-            "decimals": bound.decimals,
+            "pool": pool,
+            "slot": slot,
+            "fetched_at": moment,
+            "decimals": decimals,
             "entry_price_usd": format(entry, "f"),
             "stop_price_usd": format(stop_px, "f"),
         }
@@ -1654,21 +1704,19 @@ def apply_live_mark(case_id: str, bound, now: float | None = None) -> dict:
         if _halted_conn(conn):
             return {"ok": False, "reason": "kill_switch", "case_id": row["id"], "stage": "filled", "mint": row["mint"]}
         receipt = conn.execute(
-            "SELECT signature, qty, cost_basis_lamports, ledger, pool FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
+            "SELECT signature, qty, cost_basis_lamports, ledger, pool, ledger_provenance FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
             (row["id"],),
         ).fetchone()
-        if receipt is None or receipt["ledger"] != "live" or not isinstance(receipt["pool"], str):
+        if receipt is None or receipt["ledger"] != "live" or receipt["pool"] != pool:
             return {"ok": False, "reason": "basis_unproven", "case_id": row["id"], "stage": "filled"}
-        if receipt["pool"] != bound.pool or receipt["cost_basis_lamports"] != snap.get("basis_cost_lamports"):
-            return {"ok": False, "reason": "basis_changed", "case_id": row["id"], "stage": "filled"}
         intent_id = None
         if action != "hold":
             evidence = {
-                "action": action, "pool": bound.pool, "slot": bound.slot,
+                "action": action, "pool": pool, "slot": slot,
                 "mark_price_usd": format(price, "f"), "entry_price_usd": format(entry, "f"),
                 "stop_price_usd": format(stop_px, "f"), "entry_signature": receipt["signature"],
                 "qty": receipt["qty"], "basis_cost_lamports": receipt["cost_basis_lamports"],
-                "decimals": bound.decimals,
+                "decimals": decimals,
             }
             intent_id = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
             existing = conn.execute("SELECT id FROM memecoin_risk_intents WHERE case_id = ?", (row["id"],)).fetchone()
@@ -1682,9 +1730,9 @@ def apply_live_mark(case_id: str, bound, now: float | None = None) -> dict:
                     ) VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        intent_id, row["id"], receipt["signature"], action, bound.pool, bound.slot,
+                        intent_id, row["id"], receipt["signature"], action, pool, slot,
                         format(price, "f"), format(entry, "f"), format(stop_px, "f"), receipt["qty"],
-                        receipt["cost_basis_lamports"], bound.decimals, json.dumps(evidence, sort_keys=True), moment,
+                        receipt["cost_basis_lamports"], decimals, json.dumps(evidence, sort_keys=True), moment,
                     ),
                 )
             else:
@@ -1694,8 +1742,8 @@ def apply_live_mark(case_id: str, bound, now: float | None = None) -> dict:
             "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = 'filled' AND ledger = 'live'",
             (target, json.dumps(snap, sort_keys=True), moment, row["id"]),
         )
-        _log(conn, row["id"], row["mint"], "risk", "pass", None, bound.source, {"action": action, "price_usd": format(price, "f"), "pool": bound.pool, "slot": bound.slot, "intent_id": intent_id}, moment)
-        return {"ok": True, "reason": None, "case_id": row["id"], "stage": target, "mint": row["mint"], "action": action, "intent_id": intent_id}
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "server_pool_pyth", {"action": action, "price_usd": format(price, "f"), "pool": pool, "slot": slot, "intent_id": intent_id}, moment)
+        return {"ok": True, "reason": None, "case_id": row["id"], "stage": target, "mint": row["mint"], "action": action, "intent_id": intent_id, "mark_price": format(price, "f"), "recorded": action != "hold"}
 
     return db.exclusive(work)
 
@@ -1795,12 +1843,25 @@ _LEDGERS = {"live", "synthetic", "paper"}
 
 
 def _ledger_of(row) -> str:
-    """Only the three written names count. Null and anything else are unknown, not live."""
+    """A name counts only with server provenance. A legacy default is unknown."""
     try:
         value = row["ledger"]
     except Exception:
         return "unknown"
-    return value if value in _LEDGERS else "unknown"
+    try:
+        provenance = row["ledger_provenance"]
+    except Exception:
+        provenance = None
+    if provenance == "legacy_default":
+        return "unknown"
+    if provenance == "server" and value in _LEDGERS:
+        return value
+    if provenance is None and value in _LEDGERS and not _LEGACY_LEDGER_DEFAULT:
+        return value
+    return "unknown"
+
+
+_LEGACY_LEDGER_DEFAULT = False
 
 
 def _foreign_ledger(row, stage_name: str) -> dict | None:
@@ -1831,10 +1892,15 @@ def _quarantine(row, reason: str) -> dict:
 def _live_entry_receipt(case_id: str):
     _ensure()
     rows = db.query(
-        "SELECT signature, qty, cost_basis_lamports, ledger, pool FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
+        "SELECT signature, qty, cost_basis_lamports, ledger, pool, ledger_provenance FROM memecoin_entry_receipts WHERE case_id = ? AND failed = 0",
         (case_id,),
     )
     if len(rows) != 1 or rows[0]["ledger"] != "live":
+        return None
+    provenance = rows[0]["ledger_provenance"] if "ledger_provenance" in rows[0].keys() else None
+    if provenance == "legacy_default":
+        return None
+    if provenance not in (None, "server"):
         return None
     return rows[0]
 
@@ -2160,7 +2226,7 @@ def _book_failed_entry(row, inflight: dict, signature: str, pulled: dict, moment
         if halt_this:
             _halt_entries(conn, moment)
         conn.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, 0, 0, ?, 0, ?, 1, ?)",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, ?, ?, ?, 0, 0, ?, 0, ?, 1, ?, 'server')",
             (signature, row["id"], digest, int(pulled.get("slot") or 0), fee, "unpriced" if fee_usd is None else format(fee_usd, "f"), _ledger_of(row)),
         )
         conn.execute(
@@ -2240,7 +2306,7 @@ def _book_unreconciled_entry(row, inflight: dict, signature: str, pulled: dict, 
         fresh["live_events"] = events
         _halt_entries(conn, moment)
         conn.execute(
-            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger) VALUES (?, ?, ?, ?, 0, ?, ?, 0, ?, 2, ?)",
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance) VALUES (?, ?, ?, ?, 0, ?, ?, 0, ?, 2, ?, 'server')",
             (
                 signature, row["id"], inflight.get("message_sha256"), int(pulled.get("slot") or 0),
                 0 if not isinstance(spent, int) else spent,
@@ -2563,6 +2629,10 @@ def _ensure_conn(conn) -> None:
         "ALTER TABLE memecoin_exit_receipts ADD COLUMN ledger TEXT",
         "ALTER TABLE memecoin_refunds ADD COLUMN ledger TEXT",
         "ALTER TABLE memecoin_entry_receipts ADD COLUMN pool TEXT",
+        "ALTER TABLE memecoin_cases ADD COLUMN ledger_provenance TEXT",
+        "ALTER TABLE memecoin_entry_receipts ADD COLUMN ledger_provenance TEXT",
+        "ALTER TABLE memecoin_exit_receipts ADD COLUMN ledger_provenance TEXT",
+        "ALTER TABLE memecoin_refunds ADD COLUMN ledger_provenance TEXT",
     ):
         try:
             conn.execute(statement)
@@ -2612,6 +2682,44 @@ def _ensure_conn(conn) -> None:
             END
             """
         )
+    _classify_ledgers(conn)
+
+
+def _legacy_live_default(conn, table: str) -> bool:
+    try:
+        info = list(conn.execute(f"PRAGMA table_info({table})"))
+    except Exception:
+        return False
+    for column in info:
+        name = column[1]
+        default = column[4]
+        if name == "ledger" and default is not None and "live" in str(default).lower():
+            return True
+    return False
+
+
+def _classify_ledgers(conn) -> None:
+    """Stamp legacy default-live rows once. Explicit names on a schema with no default stay server."""
+    global _LEGACY_LEDGER_DEFAULT
+    tables = ("memecoin_cases", "memecoin_entry_receipts", "memecoin_exit_receipts", "memecoin_refunds")
+    legacy = any(_legacy_live_default(conn, table) for table in tables)
+    _LEGACY_LEDGER_DEFAULT = legacy
+    seen = conn.execute("SELECT value FROM settings WHERE key = 'memecoin_ledger_migration'").fetchone()
+    if seen is not None and seen[0] == "13":
+        return
+    for table in tables:
+        if _legacy_live_default(conn, table):
+            conn.execute(
+                f"UPDATE {table} SET ledger_provenance = 'legacy_default' WHERE ledger_provenance IS NULL"
+            )
+        else:
+            conn.execute(
+                f"UPDATE {table} SET ledger_provenance = 'server' WHERE ledger_provenance IS NULL AND ledger IN ('live', 'synthetic', 'paper')"
+            )
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES ('memecoin_ledger_migration', '13', ?) ON CONFLICT(key) DO UPDATE SET value = '13', updated_at = excluded.updated_at",
+        (time.time(),),
+    )
 
 
 def _money(value) -> Decimal | None:

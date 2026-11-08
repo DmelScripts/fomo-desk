@@ -482,6 +482,19 @@ class MemecoinDeskTests(unittest.TestCase):
         case_id = self._filled(91)
         snap = memecoin_desk.view(case_id)["snapshot"]
         snap["fill"]["fixture"] = False
+        snap["remaining_raw"] = 50
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
+        calls = []
+
+        def prices(now):
+            calls.append(now)
+            return {"fresh": False}
+
+        blocked = memecoin_desk.reserve_exit(case_id, "not-a-message", 50, None, prices, NOW)
+        self.assertEqual(blocked["reason"], "exit_unproven")
+        self.assertEqual(calls, [])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["remaining_raw"], 50)
+        snap["fill"]["fixture"] = True
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
         mint = memecoin_desk.view(case_id)["mint"]
         values, accounts = _pool(mint, solana_tx.NATIVE_MINT)
