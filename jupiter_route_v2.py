@@ -240,8 +240,73 @@ def _amm_bound(parsed: dict, state: dict, a_to_b: bool) -> dict:
     return {"ok": True, "est_out": quoted["token_est_out"], "min_out": quoted["token_min_out"]}
 
 
+def _wrap_shape(decoded: solana_tx.Decoded, *, side: str, mint: str) -> dict:
+    """Compute budget, wallet ATA creates, the SOL wrap, one Jupiter swap, and the close.
+
+    A buy must transfer exactly the swap input into the wallet's wSOL account and
+    sync it. An exit closes that account back to the wallet and does not wrap
+    extra SOL. Any other program or a second transfer is rejected.
+    """
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    kinds = []
+    transfer = None
+    swap = None
+    compute = []
+    for instruction in decoded.instructions:
+        program = decoded.static_keys[instruction.program_index]
+        keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        data = bytes(instruction.data)
+        if program == solana_tx.COMPUTE_BUDGET:
+            kinds.append("compute")
+            compute.append(data)
+            continue
+        if program == solana_tx.ASSOCIATED_TOKEN and data == bytes([1]) and len(keys) == 6:
+            payer, ata, owner, created_mint, system, token_program = keys
+            expected = solana_tx.associated_token_address(owner, created_mint, token_program)
+            if payer != wallet or owner != wallet or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM or ata != expected:
+                return {"error": "wrap_unbound"}
+            if created_mint not in {solana_tx.NATIVE_MINT, mint}:
+                return {"error": "wrap_unbound"}
+            kinds.append("create")
+            continue
+        if program == solana_tx.SYSTEM_PROGRAM and solana_tx.system_transfer(data) is not None and len(keys) == 2:
+            if transfer is not None or keys[0] != wallet or keys[1] != wsol:
+                return {"error": "spend_unbound"}
+            transfer = solana_tx.system_transfer(data)
+            kinds.append("transfer")
+            continue
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([17]) and keys == [wsol]:
+            kinds.append("sync")
+            continue
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and keys == [wsol, wallet, wallet]:
+            kinds.append("close")
+            continue
+        if program == solana_jupiter.PROGRAM_ID:
+            if swap is not None:
+                return {"error": "extra_swap"}
+            swap = instruction
+            kinds.append("swap")
+            continue
+        return {"error": "sibling_unverified"}
+    body = [kind for kind in kinds if kind != "compute"]
+    while body and body[0] == "create":
+        body = body[1:]
+    if side == "buy":
+        if body != ["transfer", "sync", "swap", "close"]:
+            return {"error": "wrap_unbound"}
+    elif side == "exit":
+        if transfer is not None or body != ["swap", "close"]:
+            return {"error": "wrap_unbound"}
+    else:
+        return {"error": "side"}
+    if swap is None or "compute" not in kinds:
+        return {"error": "swap_missing"}
+    return {"swap": swap, "compute": compute, "transfer": transfer, "wsol": wsol}
+
+
 def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote: dict | None, *, side: str, mint: str) -> dict:
-    """Read compute budget and the swap from the message. A side blob is not the fee."""
+    """Read the wrap and the swap from the message. A side blob is not the fee."""
     import base64
     refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "message_bound": False}
     try:
@@ -250,20 +315,17 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
         return refused | {"reason": "message"}
     if decoded.lookups:
         return refused | {"reason": "lookup_unresolved", "message_bound": True}
-    compute = []
-    swap = None
-    for instruction in decoded.instructions:
-        program = decoded.static_keys[instruction.program_index]
-        if program == solana_tx.COMPUTE_BUDGET:
-            compute.append(bytes(instruction.data))
-        elif program == solana_jupiter.PROGRAM_ID:
-            if swap is not None:
-                return refused | {"reason": "extra_swap", "message_bound": True}
-            swap = instruction
-        else:
-            return refused | {"reason": "sibling_unverified", "message_bound": True}
-    if swap is None:
-        return refused | {"reason": "swap_missing", "message_bound": True}
+    shape = _wrap_shape(decoded, side=side, mint=mint)
+    if shape.get("error"):
+        return refused | {"reason": shape["error"], "message_bound": True}
+    swap = shape["swap"]
+    parsed = parse(bytes(swap.data))
+    if side == "buy" and shape.get("transfer") != parsed.get("in_amount"):
+        return refused | {"reason": "wrap_amount", "message_bound": True, "min_out": parsed.get("min_out")}
+    if side == "buy" and decoded.static_keys[swap.account_indexes[1]] != shape["wsol"]:
+        return refused | {"reason": "wrap_unbound", "message_bound": True}
+    if side == "exit" and decoded.static_keys[swap.account_indexes[2]] != shape["wsol"]:
+        return refused | {"reason": "wrap_unbound", "message_bound": True}
     accounts = []
     for index in swap.account_indexes:
         try:
@@ -271,10 +333,12 @@ def decode_message(tx_b64: str, account_data: dict, canonical_pool: bytes, quote
         except ValueError:
             return refused | {"reason": "accounts", "message_bound": True}
         accounts.append({"pubkey": decoded.static_keys[index], "isSigner": signer, "isWritable": writable})
-    return decode(
+    result = decode(
         accounts, bytes(swap.data), side=side, mint=mint, account_data=account_data,
-        compute=compute, canonical_pool=canonical_pool, quote=quote, message_bound=True,
+        compute=shape["compute"], canonical_pool=canonical_pool, quote=quote, message_bound=True,
     )
+    result["wrap_verified"] = result.get("ok") is True
+    return result
 
 
 def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_data: dict, compute: list[bytes], canonical_pool: bytes, quote: dict | None, message_bound: bool = False) -> dict:

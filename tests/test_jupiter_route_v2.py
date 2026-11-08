@@ -34,8 +34,9 @@ def _route(quoted: int, slippage: int, a_to_b: bool = True, amount: int = 1_000_
 
 def _pool(source_mint: str, dest_mint: str, fee_rate: int = 100):
     pool = solana_tx.b58encode(b"\x21" * 32)
-    source = solana_tx.b58encode(b"\x66" * 32)
-    dest = solana_tx.b58encode(b"\x69" * 32)
+    wsol = solana_tx.associated_token_address(WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    source = wsol if source_mint == solana_tx.NATIVE_MINT else solana_tx.b58encode(b"\x66" * 32)
+    dest = wsol if dest_mint == solana_tx.NATIVE_MINT else solana_tx.b58encode(b"\x69" * 32)
     vault_a = solana_tx.b58encode(b"\x31" * 32)
     vault_b = solana_tx.b58encode(b"\x32" * 32)
     spacing, current = 8, 16
@@ -101,7 +102,7 @@ def _canonical() -> bytes:
     )
 
 
-def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False) -> str:
+def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None) -> str:
     ordered = []
     def add(pubkey: str) -> None:
         if pubkey not in ordered:
@@ -115,15 +116,30 @@ def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000
         bucket = writable if item["isWritable"] else readonly
         if item["pubkey"] not in writable and item["pubkey"] not in readonly and item["pubkey"] not in ordered:
             bucket.append(item["pubkey"])
-    budget = solana_tx.COMPUTE_BUDGET
-    if budget not in readonly:
-        readonly.append(budget)
+    wsol = solana_tx.associated_token_address(WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    for pubkey in (wsol, solana_tx.SYSTEM_PROGRAM, solana_tx.TOKEN_PROGRAM, solana_tx.ASSOCIATED_TOKEN, solana_tx.COMPUTE_BUDGET):
+        if pubkey not in writable and pubkey not in readonly and pubkey not in ordered:
+            (writable if pubkey == wsol else readonly).append(pubkey)
     ordered = [WALLET] + writable + readonly
     index = {pubkey: pos for pos, pubkey in enumerate(ordered)}
+    amount = int.from_bytes(swap[8:16], "little")
+    create = (index[solana_tx.ASSOCIATED_TOKEN], [index[WALLET], index[wsol], index[WALLET], index[solana_tx.NATIVE_MINT], index[solana_tx.SYSTEM_PROGRAM], index[solana_tx.TOKEN_PROGRAM]], bytes([1]))
+    transfer = (index[solana_tx.SYSTEM_PROGRAM], [index[WALLET], index[wsol]], (2).to_bytes(4, "little") + amount.to_bytes(8, "little"))
+    sync = (index[solana_tx.TOKEN_PROGRAM], [index[wsol]], bytes([17]))
+    close = (index[solana_tx.TOKEN_PROGRAM], [index[wsol], index[WALLET], index[WALLET]], bytes([9]))
     swap_ix = (index[solana_jupiter.PROGRAM_ID], [index[item["pubkey"]] for item in metas], swap)
-    limit_ix = (index[budget], [], bytes([2]) + limit.to_bytes(4, "little"))
-    price_ix = (index[budget], [], bytes([3]) + price.to_bytes(8, "little"))
-    instructions = [price_ix, swap_ix] if omit_limit else [limit_ix, price_ix, swap_ix]
+    budget = index[solana_tx.COMPUTE_BUDGET]
+    limit_ix = (budget, [], bytes([2]) + limit.to_bytes(4, "little"))
+    price_ix = (budget, [], bytes([3]) + price.to_bytes(8, "little"))
+    head = [price_ix] if omit_limit else [limit_ix, price_ix]
+    if side == "buy":
+        instructions = head + [create, transfer, sync, swap_ix, close]
+    else:
+        instructions = head + [swap_ix, close]
+    if extra_transfer is not None:
+        if extra_transfer not in index:
+            raise AssertionError("extra")
+        instructions.append((index[solana_tx.SYSTEM_PROGRAM], [index[WALLET], index[extra_transfer]], (2).to_bytes(4, "little") + (1).to_bytes(8, "little")))
     return solana_tx.encode_legacy(WALLET, ordered, len(readonly), instructions, solana_tx.b58encode(b"\x44" * 32))
 
 
@@ -173,7 +189,7 @@ class RouteV2Tests(unittest.TestCase):
         self.assertFalse(buy["live_ready"])
         values_out, data_out = _pool(TOKEN, solana_tx.NATIVE_MINT)
         sell = jupiter_route_v2.decode_message(
-            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(999_899, 50, True)),
+            _tx(_metas(TOKEN, solana_tx.NATIVE_MINT, values_out), _route(999_899, 50, True), side="exit"),
             data_out, canonical, QUOTE, side="exit", mint=TOKEN,
         )
         self.assertTrue(sell["ok"], sell)

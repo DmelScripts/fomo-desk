@@ -1,8 +1,10 @@
 """USDC per USD from Pyth's published price and confidence. Off unless configured.
 
 Hermes price reads require a Pyth API key (since 26 August 2026) and are not
-called. The on-chain feed is permissionless, but this process does not read
-mainnet. Tests supply the documented price, conf, expo, and publish_time.
+called. The keyless feed list returns metadata only and is not a price:
+https://docs.pyth.network/api-reference/hermes/price-feeds
+The on-chain contracts are permissionless, but this process does not parse a
+Pyth account. Tests supply the documented price, conf, expo, and publish_time.
 No depeg band is added. The source's own confidence is the bound: a fee or
 loss is priced at price+conf, and proceeds at price-conf. If that interval
 is not strictly positive, or the timestamp is stale, the quote is unusable
@@ -34,7 +36,23 @@ _QUOTE = None
 
 _HARNESS = None
 HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest"
+HERMES_CATALOG_URL = "https://hermes.pyth.network/v2/price_feeds"
 CREDENTIAL_ENV = "PYTH_API_KEY"
+
+
+def keyless_catalog_is_not_a_price() -> dict:
+    """The documented no-auth route lists feeds. It does not return a price."""
+    return {
+        "ok": False,
+        "usable": False,
+        "reason": "metadata_not_a_price",
+        "url": HERMES_CATALOG_URL,
+        "price_requires": CREDENTIAL_ENV,
+        "documented": "https://docs.pyth.network/llms-price-feeds-core.txt",
+        "fetched": False,
+        "live_provider": False,
+        "authenticated_live": False,
+    }
 # A test may install a callable that returns the documented JSON. This module does not call Hermes.
 PRICE_TRANSPORT = None
 
