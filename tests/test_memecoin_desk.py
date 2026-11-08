@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+from pathlib import Path
 import time
 import unittest
 from decimal import Decimal
@@ -1742,3 +1743,182 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertFalse(later["entry_halt"])
         self.assertEqual(db.get_setting("memecoin_entry_halt"), "1")
         self.assertEqual(_protect(case(544))["reason"], "entry_halt")
+
+    def test_a_tighter_route_clears_a_nondivisible_pool_estimate(self):
+        import base64
+        import json as _json
+        import urllib.request
+        from tests.test_jupiter_route_v2 import PRICE_SLOT, WHEN, _metas, _pool, _prices, _route, _snap, _tx
+        import desk_loop
+        import jupiter_route_v2
+        import jupiter_swap_v2
+        import solana_jupiter
+        wallet = phantom_transport.REQUIRED_WALLET
+        rent = solana_tx.TOKEN_ACCOUNT_RENT
+        queue = []
+
+        def urlopen(req, timeout=8):
+            payload = _json.loads(req.data.decode())
+            if payload["method"] == "getGenesisHash":
+                body = {"jsonrpc": "2.0", "result": __import__("solana_inspect").MAINNET_GENESIS}
+            else:
+                body = {"jsonrpc": "2.0", "result": queue.pop(0)}
+
+            class _Response:
+                status = 200
+                def read(self):
+                    return _json.dumps(body).encode()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+            return _Response()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        case_id = self._analyzed(91)
+        _protect(case_id)
+        mint = memecoin_desk.view(case_id)["mint"]
+        raw_idl = _json.loads(Path("tests/fixtures/jupiter_program_idl.json").read_text(encoding="utf-8"))
+        route_args = [arg["name"] for arg in next(item for item in raw_idl["instructions"] if item["name"] == "route_v2")["args"]]
+        self.assertNotIn("min_out", route_args)
+        self.assertNotIn("other_amount_threshold", route_args)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        probe = jupiter_route_v2.decode_message(
+            _tx(_metas(solana_tx.NATIVE_MINT, mint, values), _route(1, 0, True, amount=1_000_000), side="buy"),
+            _snap(accounts, WHEN), side="buy", mint=mint, now=WHEN, slippage_allowance_bps=0, price_transport=_prices(),
+        )
+        est = probe["amm_est_out"]
+        self.assertEqual(est, 999_899)
+        request = jupiter_route_v2.quote_request(est)
+        self.assertEqual(request["slippage_bps"], 49)
+        self.assertEqual(request["quoted_out_amount"], est)
+        self.assertGreaterEqual(request["min_out"], request["owner_floor"])
+        url = jupiter_swap_v2.build_url(solana_tx.NATIVE_MINT, mint, "1000000", slippage_bps=request["slippage_bps"])
+        self.assertIn("slippageBps=49", url)
+        self.assertNotIn("slippageBps=50", url)
+        ata = solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM)
+        owned = accounts.pop(values["dest"])
+        values["dest"] = ata
+        accounts[ata] = owned
+
+        def sign(route, nonce):
+            unsigned = _tx(_metas(solana_tx.NATIVE_MINT, mint, values), route, side="buy", fund_mint=mint)
+            raw = bytearray(base64.b64decode(unsigned))
+            raw[1:65] = bytes([nonce]) + b"\x61" * 63
+            return base64.b64encode(bytes(raw)).decode()
+
+        loose = sign(_route(est, 50, True, amount=1_000_000), 11)
+        refused = memecoin_desk.reserve_entry(case_id, loose, _snap(accounts, WHEN), _prices(), WHEN)
+        self.assertEqual(refused["reason"], "min_below_amm", refused)
+        raised = sign(_route(est + 1, 49, True, amount=1_000_000), 12)
+        self.assertEqual(memecoin_desk.reserve_entry(case_id, raised, _snap(accounts, WHEN), _prices(), WHEN)["reason"], "quoted_above_amm")
+        wider = sign(_route(est, 51, True, amount=1_000_000), 13)
+        self.assertEqual(memecoin_desk.reserve_entry(case_id, wider, _snap(accounts, WHEN), _prices(), WHEN)["reason"], "slippage_exceeds")
+        signed = sign(_route(request["quoted_out_amount"], request["slippage_bps"], True, amount=1_000_000), 14)
+        decoded_route = solana_tx.decode_transaction(base64.b64decode(signed))
+        swap = next(item for item in decoded_route.instructions if decoded_route.static_keys[item.program_index] == solana_jupiter.PROGRAM_ID)
+        parsed = jupiter_route_v2.parse(bytes(swap.data))
+        self.assertEqual(parsed["slippage_bps"], 49)
+        self.assertEqual(parsed["quoted_out_amount"], est)
+        self.assertEqual(parsed["min_out"], request["min_out"])
+        reserved = memecoin_desk.reserve_entry(case_id, signed, _snap(accounts, WHEN), _prices(), WHEN)
+        self.assertTrue(reserved["ok"], reserved)
+        self.assertEqual(reserved["instruction_slippage_bps"], 49)
+        self.assertEqual(reserved["quoted_out_amount"], est)
+        self.assertEqual(reserved["amm_est_out"], est)
+        self.assertGreaterEqual(reserved["min_out"], reserved["owner_min_out"])
+        self.assertEqual(reserved["max_slippage_bps"], 50)
+        self.assertFalse(reserved["effectual_entry"])
+        self.assertIn("lp_fields_unpublished", reserved["effectual_blocked_by"])
+        self.assertIn("quote_expiry_unproven", reserved["effectual_blocked_by"])
+        self.assertFalse(reserved["send"])
+        self.assertFalse(reserved["live_ready"])
+        decoded = solana_tx.decode_transaction(base64.b64decode(signed))
+        pre = [0] * len(decoded.static_keys)
+        post = [0] * len(decoded.static_keys)
+        pre[0] = 200_000_000
+        post[0] = 200_000_000 - (1_000_000 + 5000 + rent)
+        ata_index = decoded.static_keys.index(ata)
+        post[ata_index] = rent
+        signature = solana_tx.first_signature(signed)
+        queue.append({
+            "slot": PRICE_SLOT, "blockTime": int(WHEN), "transaction": [signed, "base64"],
+            "meta": {
+                "err": None, "fee": 5000, "preBalances": pre, "postBalances": post,
+                "preTokenBalances": [],
+                "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": str(est)}}],
+            },
+        })
+        booked = memecoin_desk.confirm_entry(case_id, signature, WHEN)
+        self.assertTrue(booked["ok"], booked)
+        self.assertEqual(booked["qty"], est)
+        self.assertFalse(booked["effectual_entry"])
+        self.assertFalse(booked["quote_expiry_proven"])
+        out_values, out_accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        out_owned = out_accounts.pop(out_values["source"])
+        out_values["source"] = ata
+        out_accounts[ata] = out_owned
+        exit_probe = jupiter_route_v2.decode_message(
+            _tx(_metas(mint, solana_tx.NATIVE_MINT, out_values), _route(1, 0, True, amount=est), side="exit"),
+            _snap(out_accounts, WHEN), side="exit", mint=mint, now=WHEN, slippage_allowance_bps=0, price_transport=_prices(),
+        )
+        exit_est = exit_probe["amm_est_out"]
+        self.assertIsInstance(exit_est, int)
+        exit_request = jupiter_route_v2.quote_request(exit_est)
+        self.assertLessEqual(exit_request["slippage_bps"], 50)
+        self.assertGreaterEqual(exit_request["min_out"], exit_request["owner_floor"])
+        loose_exit = _tx(_metas(mint, solana_tx.NATIVE_MINT, out_values), _route(exit_est, 50, True, amount=est), side="exit")
+        if jupiter_route_v2.minimum_out(exit_est, 50) < exit_request["owner_floor"]:
+            loose_raw = bytearray(base64.b64decode(loose_exit))
+            loose_raw[1:65] = b"\x72" * 64
+            loose_signed = base64.b64encode(bytes(loose_raw)).decode()
+            self.assertEqual(
+                memecoin_desk.reserve_exit(case_id, loose_signed, est, _snap(out_accounts, WHEN), _prices(), WHEN)["reason"],
+                "min_below_amm",
+            )
+        exit_unsigned = _tx(
+            _metas(mint, solana_tx.NATIVE_MINT, out_values),
+            _route(exit_request["quoted_out_amount"], exit_request["slippage_bps"], True, amount=est),
+            side="exit",
+        )
+        exit_raw = bytearray(base64.b64decode(exit_unsigned))
+        exit_raw[1:65] = b"\x73" * 64
+        exit_signed = base64.b64encode(bytes(exit_raw)).decode()
+        exit_reserved = memecoin_desk.reserve_exit(case_id, exit_signed, est, _snap(out_accounts, WHEN), _prices(), WHEN)
+        self.assertTrue(exit_reserved["ok"], exit_reserved)
+        self.assertEqual(exit_reserved["instruction_slippage_bps"], exit_request["slippage_bps"])
+        self.assertEqual(exit_reserved["quoted_out_amount"], exit_est)
+        self.assertGreaterEqual(exit_reserved["min_out"], exit_request["owner_floor"])
+        self.assertFalse(exit_reserved["send"])
+        exit_decoded = solana_tx.decode_transaction(bytes(exit_raw))
+        pre = [0] * len(exit_decoded.static_keys)
+        post = [0] * len(exit_decoded.static_keys)
+        pre[0] = 5_000_000
+        post[0] = 5_000_000 + exit_est
+        pre[exit_decoded.static_keys.index(ata)] = rent
+        post[exit_decoded.static_keys.index(ata)] = rent
+        queue.append({
+            "slot": PRICE_SLOT, "transaction": [exit_signed, "base64"],
+            "meta": {
+                "err": None, "fee": 5000, "preBalances": pre, "postBalances": post,
+                "preTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": str(est)}}],
+                "postTokenBalances": [{"mint": mint, "owner": wallet, "uiTokenAmount": {"amount": "0"}}],
+            },
+        })
+        closed = memecoin_desk.confirm_exit(case_id, solana_tx.first_signature(exit_signed), WHEN)
+        self.assertTrue(closed["ok"], closed)
+        self.assertFalse(closed.get("live_ready", False))
+        blocked = desk_loop.readiness()["blocked_because"]
+        self.assertIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", blocked)
+        self.assertNotIn("owner_slippage_unapproved", blocked)
+        self.assertFalse(desk_loop.readiness()["live_ready"])
+        self.assertFalse(desk_loop.readiness()["send"])
+        self.assertFalse(desk_loop.readiness()["sign"])
+        reasons = desk_loop.scheduler_status()["ready_because"]
+        self.assertIn("lp_fields_unpublished", reasons)
+        self.assertIn("rug_history_unpublished", reasons)
+        self.assertIn("holder_growth_unproven", reasons)
+        self.assertNotIn("owner_slippage_unapproved", reasons)
+        self.assertFalse(desk_loop.scheduler_status()["armed"])

@@ -78,11 +78,63 @@ def candidate_floors(quoted: int, slippage_bps: int) -> tuple[int, int] | None:
 
 
 def minimum_out(quoted: int, slippage_bps: int) -> int | None:
-    """The lower reading. We do not claim the program uses it."""
+    """The floor this decoder reads from the route bytes.
+
+    route_v2's IDL arguments are in_amount, quoted_out_amount, slippage_bps,
+    platform_fee_bps, positive_slippage_bps, and route_plan. There is no
+    minimum-output argument, so this does not invent one. The reading is
+    quoted_out_amount * (10000 - slippage_bps) // 10000. The other integer
+    reading is one raw unit higher when there is a remainder. A keyless sample
+    matched that higher reading, and that sample is not the program's comparison.
+    """
     floors = candidate_floors(quoted, slippage_bps)
     if floors is None:
         return None
     return floors[0]
+
+
+def quote_request(estimate: int) -> dict:
+    """Largest declared bps whose encoded floor still meets the 50 bps ceiling.
+
+    The quoted output is the pool estimate. It is not raised by one unit, and
+    this function does not call a route API. 50 is the maximum. A non-divisible
+    estimate steps down, including to 0 when that is the only encoding whose
+    floor is at least the ceiling.
+    """
+    import owner_slippage
+    refused = {"ok": False, "send": False, "sign": False, "live_ready": False, "network": "not_called", "idl_has_explicit_minimum": False}
+    if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate <= 0:
+        return refused | {"reason": "quote_unbound"}
+    try:
+        ceiling = owner_slippage.minimum_units(estimate, owner_slippage.BPS)
+    except ValueError:
+        return refused | {"reason": "quote_unbound"}
+    chosen = None
+    encoded = None
+    for bps in range(owner_slippage.BPS, -1, -1):
+        candidate = minimum_out(estimate, bps)
+        if candidate is not None and candidate >= ceiling:
+            chosen = bps
+            encoded = candidate
+            break
+    if chosen is None or encoded is None:
+        return refused | {"reason": "no_encoded_minimum", "owner_floor": ceiling, "quoted_out_amount": estimate}
+    return {
+        "ok": True,
+        "reason": None,
+        "quoted_out_amount": estimate,
+        "slippage_bps": chosen,
+        "min_out": encoded,
+        "owner_floor": ceiling,
+        "owner_ceiling_bps": owner_slippage.BPS,
+        "quoted_raised": False,
+        "idl_has_explicit_minimum": False,
+        "encoding": "quoted_times_kept_bps_floor",
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        "network": "not_called",
+    }
 
 
 def parse(data: bytes) -> dict:

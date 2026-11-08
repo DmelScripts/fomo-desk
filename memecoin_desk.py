@@ -445,6 +445,9 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         "message_sha256": digest,
         "input_lamports": route["in_amount"],
         "min_out": route["min_out"],
+        "instruction_slippage_bps": parsed.get("slippage_bps"),
+        "quoted_out_amount": parsed.get("quoted_out_amount"),
+        "owner_min_out": slip.get("allowance_floor"),
         "mint": row["mint"],
         "wallet": phantom_transport.REQUIRED_WALLET,
         "pool": pool_key,
@@ -744,6 +747,9 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "pool": pool_key,
             "mint": row["mint"],
             "min_out": route["min_out"],
+            "instruction_slippage_bps": parsed.get("slippage_bps"),
+            "quoted_out_amount": parsed.get("quoted_out_amount"),
+            "amm_est_out": est,
             "dex_fee_lamports": dex_lamports,
             "network_lamports": network["network_lamports"],
             "reserved_fee_usd": format(fee_usd, "f"),
@@ -768,7 +774,12 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             (json.dumps(fresh, sort_keys=True), moment, row["id"]),
         )
         _log(conn, row["id"], row["mint"], "risk", "pass", None, "exit_reserve", {"qty": qty, "message_sha256": digest}, moment)
-        return {"ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest, "live_ready": False, "send": False, "resend": False}
+        return {
+            "ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest,
+            "instruction_slippage_bps": parsed.get("slippage_bps"), "quoted_out_amount": parsed.get("quoted_out_amount"),
+            "min_out": route["min_out"], "amm_est_out": est,
+            "live_ready": False, "send": False, "resend": False,
+        }
 
     return db.exclusive(work)
 
@@ -1519,6 +1530,12 @@ def _reservation_view(case_id: str, reservation: dict, *, idempotent: bool) -> d
         "idempotent": idempotent,
         "message_sha256": reservation.get("message_sha256"),
         "input_lamports": reservation.get("input_lamports"),
+        "instruction_slippage_bps": reservation.get("instruction_slippage_bps"),
+        "quoted_out_amount": reservation.get("quoted_out_amount"),
+        "min_out": reservation.get("min_out"),
+        "owner_min_out": reservation.get("owner_min_out"),
+        "amm_est_out": reservation.get("amm_est_out"),
+        "max_slippage_bps": (reservation.get("policy") or {}).get("max_slippage_bps"),
         "exposure_usd": reservation.get("exposure_usd"),
         "reserved_fee_usd": reservation.get("reserved_fee_usd"),
         "wallet": reservation.get("wallet"),
