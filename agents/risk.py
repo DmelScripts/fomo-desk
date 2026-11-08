@@ -217,11 +217,10 @@ class Risk:
             "mode": mode, "status": status, "link": url,
         })
         if mode == "PAPER" and status == "closed":
-            try:
-                import phantom_runner
-                phantom_runner.on_scheduled_exit(outcome)
-            except Exception:
-                log.warning("phantom paper exit did not run")
+            import token_execution
+            outcome["chain"] = token_execution.supported_exit(row["mint"])
+            outcome["chain_send"] = False
+            outcome["loss_stop_blocks_exit"] = False
         return outcome
 
     def _remind(self, row, state, now, url, name) -> None:

@@ -1245,6 +1245,19 @@ def phantom_diagnostic_tick(request: Request, body: dict | None = None) -> JSONR
     return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
 
 
+@router.post("/api/agents/token-buy")
+def agents_token_buy(request: Request, body: dict | None = None) -> JSONResponse:
+    """A scanner mint through the strict buy gate. Unsupported markets do not send."""
+    require_app_token(request)
+    from phantom_runner import _reject_tree
+    _reject_tree(body)
+    if not isinstance(body, dict) or set(body) != {"mint"} or not isinstance(body.get("mint"), str):
+        raise HTTPException(status_code=400, detail="unexpected field")
+    import token_execution
+    result = token_execution.supported_buy(body["mint"])
+    return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/push")
 async def push(request: Request) -> dict:
     """Save one phone. The body is a JSON object even if the browser labeled it text."""
