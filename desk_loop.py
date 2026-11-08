@@ -2808,6 +2808,250 @@ def record_landed_evidence(case_id: str, signature: str, transport, now: float) 
     }
 
 
+def _u64_canon(value) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= 2**64:
+        return None
+    return str(value)
+
+
+def _account_context(result, tip: int) -> tuple[int | None, str | None]:
+    import jupiter_route_v2
+    if not isinstance(result, dict):
+        return None, "quantity_context_missing"
+    context = result.get("context")
+    if not isinstance(context, dict) or "slot" not in context:
+        return None, "quantity_context_missing"
+    slot = context.get("slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot <= 0:
+        return None, "quantity_context_malformed"
+    if slot < tip or slot > tip + jupiter_route_v2.SLOT_LAG_MAX:
+        return None, "quantity_context_stale" if slot < tip else "quantity_context_future"
+    return slot, None
+
+
+def _read_current_account(transport, address: str, purpose: str, tip: int) -> tuple[dict | None, str | None, int | None]:
+    try:
+        response = transport({
+            "method": "getAccountInfo", "purpose": purpose, "account": address,
+            "commitment": "confirmed", "minContextSlot": tip,
+        })
+    except Exception:
+        return None, "quantity_transport", None
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    slot, reason = _account_context(result, tip)
+    if reason is not None:
+        return None, reason, None
+    value = result.get("value")
+    if value is None:
+        return None, "quantity_account_missing", slot
+    if not isinstance(value, dict) or value.get("executable") is not False:
+        return None, "quantity_account_executable", slot
+    return value, None, slot
+
+
+def _classic_mint_decimals(value: dict) -> tuple[int | None, str | None]:
+    import solana_tx
+    if value.get("owner") == solana_tx.TOKEN_2022:
+        return None, "token_2022_unsupported"
+    if value.get("owner") != solana_tx.TOKEN_PROGRAM:
+        return None, "mint_owner"
+    raw = _decoded_account_data(value.get("data"))
+    if raw is None or len(raw) != 82 or raw[45] != 1:
+        return None, "mint_layout"
+    decimals = raw[44]
+    if not 0 <= decimals <= 18:
+        return None, "mint_decimals"
+    return decimals, None
+
+
+def _classic_token_identity(value: dict, mint: str, wallet: str) -> str | None:
+    import solana_tx
+    if value.get("owner") != solana_tx.TOKEN_PROGRAM:
+        return "token_owner"
+    raw = _decoded_account_data(value.get("data"))
+    if raw is None or len(raw) != solana_tx.TOKEN_ACCOUNT_SPACE or raw[108] != 1:
+        return "token_layout"
+    if solana_tx.b58encode(raw[0:32]) != mint or solana_tx.b58encode(raw[32:64]) != wallet:
+        return "token_identity"
+    return None
+
+
+def _historical_token_row(rows, index: int) -> tuple[dict | None, str | None]:
+    if rows is None:
+        return None, "historical_missing"
+    hits = []
+    if not isinstance(rows, list):
+        return None, "historical_untyped"
+    for item in rows:
+        if isinstance(item, dict) and item.get("accountIndex") == index:
+            hits.append(item)
+    if len(hits) > 1:
+        return None, "historical_duplicate"
+    if len(hits) == 0:
+        return None, "historical_missing"
+    item = hits[0]
+    shown = item.get("uiTokenAmount")
+    raw = shown.get("amount") if isinstance(shown, dict) else None
+    decimals = shown.get("decimals") if isinstance(shown, dict) else None
+    if not isinstance(raw, str) or not raw.isdigit() or (len(raw) > 1 and raw.startswith("0")):
+        return None, "historical_amount"
+    if isinstance(decimals, bool) or not isinstance(decimals, int):
+        return None, "historical_decimals"
+    try:
+        amount = int(raw)
+    except Exception:
+        return None, "historical_amount"
+    if amount < 0 or amount >= 2**64:
+        return None, "historical_amount"
+    if not isinstance(item.get("mint"), str) or not isinstance(item.get("owner"), str):
+        return None, "historical_untyped"
+    return {"amount": amount, "decimals": decimals, "mint": item["mint"], "owner": item["owner"]}, None
+
+
+def record_landed_quantity(case_id: str, signature: str, transport, now: float) -> dict:
+    """Quantity from the landed token metadata and the current mint and token account.
+
+    The current account read proves the mint decimals and the account identity now.
+    It is not the balance at the landed slot. A missing historical pre or post balance
+    is not zero. A failed transaction is not a fill.
+    """
+    import db
+    import memecoin_desk
+    import phantom_transport
+    import solana_tx
+    import sqlite3
+    evidence = record_landed_evidence(case_id, signature, transport, now)
+    if evidence.get("recorded") is not True:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False}
+    if evidence.get("failed") is True or evidence.get("meta_err") not in (None, "null"):
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "failed_not_a_fill", "holds": True, "resend": False}
+    if evidence.get("layout_supported") is not True:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "layout_unsupported", "holds": True, "resend": False}
+    try:
+        landed = transport({"method": "getTransaction", "signature": signature, "commitment": "confirmed"})
+        tip_response = transport({"method": "getSlot"})
+    except Exception:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_transport", "holds": True, "resend": False}
+    body = landed.get("body") if isinstance(landed, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    meta = result.get("meta") if isinstance(result, dict) else None
+    encoded = result.get("transaction") if isinstance(result, dict) else None
+    if not isinstance(meta, dict) or not isinstance(encoded, list) or not encoded:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_missing", "holds": True, "resend": False}
+    try:
+        import base64
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded[0], validate=True))
+    except Exception:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_missing", "holds": True, "resend": False}
+    import memecoin_exit
+    route = memecoin_exit._route(decoded)
+    case = db.query("SELECT mint FROM memecoin_cases WHERE id = ?", (case_id,))
+    case_mint = case[0]["mint"] if case else None
+    if route is None or not isinstance(case_mint, str):
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "route_unbound", "holds": True, "resend": False}
+    wallet = phantom_transport.REQUIRED_WALLET
+    if evidence["side"] == "entry":
+        account = route["keys"][2]
+        mint = route["destination_mint"]
+        direction = "bought"
+        if route["source_mint"] != solana_tx.NATIVE_MINT or mint != case_mint:
+            return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "route_unbound", "holds": True, "resend": False}
+    else:
+        account = route["keys"][1]
+        mint = route["source_mint"]
+        direction = "sold"
+        if route["destination_mint"] != solana_tx.NATIVE_MINT or mint != case_mint:
+            return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "route_unbound", "holds": True, "resend": False}
+    try:
+        canonical = solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "route_unbound", "holds": True, "resend": False}
+    if account != canonical or account not in decoded.static_keys:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "route_unbound", "holds": True, "resend": False}
+    index = decoded.static_keys.index(account)
+    pre, pre_reason = _historical_token_row(meta.get("preTokenBalances"), index)
+    post, post_reason = _historical_token_row(meta.get("postTokenBalances"), index)
+    if pre is None or post is None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": pre_reason if pre is None else post_reason, "holds": True, "resend": False}
+    if pre["mint"] != mint or post["mint"] != mint or pre["owner"] != wallet or post["owner"] != wallet:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_identity", "holds": True, "resend": False}
+    if pre["decimals"] != post["decimals"]:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_decimals", "holds": True, "resend": False}
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_context_missing", "holds": True, "resend": False}
+    mint_value, mint_reason, _mint_slot = _read_current_account(transport, mint, "mint_decimals", tip)
+    if mint_reason is not None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": mint_reason, "holds": True, "resend": False, "current_is_not_landed_balance": True}
+    decimals, decimal_reason = _classic_mint_decimals(mint_value)
+    if decimal_reason is not None or decimals != pre["decimals"]:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": decimal_reason or "mint_decimals", "holds": True, "resend": False, "current_is_not_landed_balance": True}
+    token_value, token_reason, _token_slot = _read_current_account(transport, account, "token_account", tip)
+    if token_reason is not None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": token_reason, "holds": True, "resend": False, "current_is_not_landed_balance": True}
+    identity = _classic_token_identity(token_value, mint, wallet)
+    if identity is not None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": identity, "holds": True, "resend": False, "current_is_not_landed_balance": True}
+    if direction == "bought":
+        if post["amount"] < pre["amount"]:
+            return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_sign", "holds": True, "resend": False}
+        delta = post["amount"] - pre["amount"]
+    else:
+        if pre["amount"] < post["amount"]:
+            return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_sign", "holds": True, "resend": False}
+        delta = pre["amount"] - post["amount"]
+    pre_text, post_text, qty_text = _u64_canon(pre["amount"]), _u64_canon(post["amount"]), _u64_canon(delta)
+    if pre_text is None or post_text is None or qty_text is None:
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "historical_amount", "holds": True, "resend": False}
+    prior = db.query(
+        "SELECT * FROM memecoin_landed_quantity WHERE signature = ? AND message_sha256 = ? AND account = ?",
+        (signature, evidence["message_sha256"], account),
+    )
+    if prior:
+        row = prior[0]
+        same = row["quantity_raw"] == qty_text and row["pre_amount"] == pre_text and row["post_amount"] == post_text and row["decimals"] == decimals and row["direction"] == direction
+        return evidence | {
+            "quantity_proven": same, "quantity_recorded": same, "idempotent": same,
+            "quantity_reason": None if same else "quantity_conflict",
+            "quantity_raw": qty_text if same else None, "direction": direction if same else None,
+            "decimals": decimals if same else None, "holds": True, "resend": False,
+            "fill_proven": False, "cost_basis_proven": False, "refund_proven": False,
+            "current_is_not_landed_balance": True,
+        }
+
+    def work(conn):
+        conn.execute(
+            """
+            INSERT INTO memecoin_landed_quantity (
+                signature, message_sha256, case_id, side, account, mint, wallet, decimals,
+                pre_amount, post_amount, quantity_raw, direction, landed_slot, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signature, evidence["message_sha256"], case_id, evidence["side"], account, mint, wallet, decimals,
+                pre_text, post_text, qty_text, direction, evidence["slot"], float(now),
+            ),
+        )
+
+    try:
+        db.exclusive(work)
+    except sqlite3.IntegrityError as exc:
+        if "landed_quantity" not in str(exc):
+            raise
+        return evidence | {"quantity_proven": False, "quantity_recorded": False, "quantity_reason": "quantity_conflict", "holds": True, "resend": False}
+    return evidence | {
+        "quantity_proven": True, "quantity_recorded": True, "idempotent": False, "quantity_reason": None,
+        "quantity_raw": qty_text, "direction": direction, "decimals": decimals, "account": account, "mint": mint,
+        "pre_amount": pre_text, "post_amount": post_text, "holds": True, "resend": False,
+        "fill_proven": False, "cost_basis_proven": False, "refund_proven": False, "deposit_proven": False,
+        "execution_eligible": False, "ticket_limit_proven": False, "allocation_proven": False,
+        "current_is_not_landed_balance": True,
+        "next_missing": "authoritative_receipt_lineage",
+    }
+
+
 def read_transaction(signature: str) -> dict:
     """Confirmed mainnet getTransaction plus the genesis hash. This is the only confirm reader."""
     import memecoin_exit
@@ -2855,7 +3099,7 @@ def public_reader(request: dict) -> dict:
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption"}:
+    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

@@ -3485,6 +3485,7 @@ def _replace_reservation_triggers(conn) -> None:
     _install_preflight_audit(conn)
     _install_deposit_liability(conn)
     _install_landed_evidence(conn)
+    _install_landed_quantity(conn)
 
 
 def _install_preflight_audit(conn) -> None:
@@ -4263,6 +4264,113 @@ def _install_landed_evidence(conn) -> None:
             FOR EACH ROW
             BEGIN
                 SELECT RAISE(ABORT, 'landed_evidence');
+            END
+            """
+        )
+
+
+def _install_landed_quantity(conn) -> None:
+    """Append-only quantity observation. It does not alter the landed fee row."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_quantity (
+            signature TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            account TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            decimals INTEGER NOT NULL,
+            pre_amount TEXT NOT NULL,
+            post_amount TEXT NOT NULL,
+            quantity_raw TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            landed_slot INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (signature, message_sha256, account)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_landed_quantity_pin (
+            signature TEXT NOT NULL,
+            message_sha256 TEXT NOT NULL,
+            account TEXT NOT NULL,
+            quantity_raw TEXT NOT NULL,
+            PRIMARY KEY (signature, message_sha256, account)
+        )
+        """
+    )
+    for name in (
+        "memecoin_landed_quantity_insert", "memecoin_landed_quantity_record",
+        "memecoin_landed_quantity_update", "memecoin_landed_quantity_delete",
+        "memecoin_landed_quantity_pin_update", "memecoin_landed_quantity_pin_delete",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute(
+        """
+        INSERT INTO memecoin_landed_quantity_pin (signature, message_sha256, account, quantity_raw)
+        SELECT signature, message_sha256, account, quantity_raw FROM memecoin_landed_quantity
+        WHERE (signature, message_sha256, account) NOT IN (
+            SELECT signature, message_sha256, account FROM memecoin_landed_quantity_pin
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_quantity_insert
+        BEFORE INSERT ON memecoin_landed_quantity
+        FOR EACH ROW
+        WHEN NEW.direction NOT IN ('bought', 'sold')
+        OR (NEW.side = 'entry' AND NEW.direction != 'bought')
+        OR (NEW.side = 'exit' AND NEW.direction != 'sold')
+        OR NEW.decimals < 0 OR NEW.decimals > 18
+        OR length(NEW.pre_amount) < 1 OR length(NEW.post_amount) < 1 OR length(NEW.quantity_raw) < 1
+        OR NEW.pre_amount GLOB '*[^0-9]*' OR NEW.post_amount GLOB '*[^0-9]*' OR NEW.quantity_raw GLOB '*[^0-9]*'
+        OR NEW.pre_amount GLOB '0?*' OR NEW.post_amount GLOB '0?*' OR NEW.quantity_raw GLOB '0?*'
+        OR length(NEW.quantity_raw) > 20
+        OR (length(NEW.quantity_raw) = 20 AND NEW.quantity_raw > '18446744073709551615')
+        OR EXISTS (
+            SELECT 1 FROM memecoin_landed_quantity_pin
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256 AND account = NEW.account
+        )
+        OR NOT EXISTS (
+            SELECT 1 FROM memecoin_landed_evidence
+            WHERE signature = NEW.signature AND message_sha256 = NEW.message_sha256
+              AND case_id = NEW.case_id AND side = NEW.side AND slot = NEW.landed_slot
+              AND meta_err = 'null'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'landed_quantity');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER memecoin_landed_quantity_record
+        AFTER INSERT ON memecoin_landed_quantity
+        FOR EACH ROW
+        BEGIN
+            INSERT INTO memecoin_landed_quantity_pin (signature, message_sha256, account, quantity_raw)
+            VALUES (NEW.signature, NEW.message_sha256, NEW.account, NEW.quantity_raw);
+        END
+        """
+    )
+    for name, table, kind in (
+        ("memecoin_landed_quantity_update", "memecoin_landed_quantity", "UPDATE"),
+        ("memecoin_landed_quantity_delete", "memecoin_landed_quantity", "DELETE"),
+        ("memecoin_landed_quantity_pin_update", "memecoin_landed_quantity_pin", "UPDATE"),
+        ("memecoin_landed_quantity_pin_delete", "memecoin_landed_quantity_pin", "DELETE"),
+    ):
+        conn.execute(
+            f"""
+            CREATE TRIGGER {name}
+            BEFORE {kind} ON {table}
+            FOR EACH ROW
+            BEGIN
+                SELECT RAISE(ABORT, 'landed_quantity');
             END
             """
         )

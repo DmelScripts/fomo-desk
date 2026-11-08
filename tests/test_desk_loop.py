@@ -353,11 +353,13 @@ class DeskLoopTests(unittest.TestCase):
             {"method": "getAccountInfo", "purpose": "whirlpool_pool", "account": MINT},
             {"method": "getAccountInfo", "purpose": "token_deposit", "account": MINT},
             {"method": "getMinimumBalanceForRentExemption", "purpose": "rent_exemption", "size": 165},
+            {"method": "getAccountInfo", "purpose": "mint_decimals", "account": MINT},
+            {"method": "getAccountInfo", "purpose": "token_account", "account": MINT},
         ):
             posted = len(posts)
             with self.assertRaises(RuntimeError) as refused:
                 desk_loop.public_reader(bad)
-            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption"}:
+            if bad.get("method") in {"simulateTransaction", "getFeeForMessage"} or bad.get("purpose") in {"whirlpool_pool", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
                 self.assertEqual(str(refused.exception), "method_refused")
                 self.assertEqual(len(posts), posted)
         observed = "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
@@ -4219,6 +4221,295 @@ conn.close()
         for thread in threads:
             thread.join()
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_evidence WHERE signature = ?", (signature,))[0]["n"], 1)
+
+    def test_landed_quantity_uses_historical_token_metadata_and_current_mint(self):
+        import base64
+        import hashlib
+        import db
+        import phantom_transport
+        import jupiter_route_v2
+        import solana_inspect
+        import solana_jupiter
+        from tests.test_jupiter_route_v2 import _route
+        wallet = phantom_transport.REQUIRED_WALLET
+        token = solana_tx.b58encode(b"\x71" * 32)
+        source = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+        dest = solana_tx.associated_token_address(wallet, token, solana_tx.TOKEN_PROGRAM)
+        ordered = [
+            wallet, source, dest, solana_tx.NATIVE_MINT, token, solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_PROGRAM,
+            jupiter_route_v2.EVENT, solana_jupiter.PROGRAM_ID, solana_tx.SYSTEM_PROGRAM, solana_tx.COMPUTE_BUDGET, solana_tx.ASSOCIATED_TOKEN,
+        ]
+        block = solana_tx.b58encode(b"\x44" * 32)
+        data = _route(1_000, 50, True, amount=1_000_000)
+        unsigned = solana_tx.encode_legacy(wallet, ordered, len(ordered) - 3, [(ordered.index(solana_jupiter.PROGRAM_ID), list(range(12)), data)], block)
+        raw = bytearray(base64.b64decode(unsigned))
+        raw[1:65] = b"\x31" * 64
+        buy = base64.b64encode(bytes(raw)).decode("ascii")
+        buy_sig = solana_tx.first_signature(buy)
+        buy_hash = hashlib.sha256(solana_tx.message_bytes(buy)).hexdigest()
+        sell_source = dest
+        sell_dest = source
+        sell_ordered = [
+            wallet, sell_source, sell_dest, token, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_PROGRAM,
+            jupiter_route_v2.EVENT, solana_jupiter.PROGRAM_ID, solana_tx.SYSTEM_PROGRAM, solana_tx.COMPUTE_BUDGET, solana_tx.ASSOCIATED_TOKEN,
+        ]
+        sell_data = _route(600, 50, False, amount=400)
+        sell_unsigned = solana_tx.encode_legacy(wallet, sell_ordered, len(sell_ordered) - 3, [(sell_ordered.index(solana_jupiter.PROGRAM_ID), list(range(12)), sell_data)], block)
+        sell_raw = bytearray(base64.b64decode(sell_unsigned))
+        sell_raw[1:65] = b"\x32" * 64
+        sell = base64.b64encode(bytes(sell_raw)).decode("ascii")
+        sell_sig = solana_tx.first_signature(sell)
+        sell_hash = hashlib.sha256(solana_tx.message_bytes(sell)).hexdigest()
+        memecoin_desk._ensure()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('qty-case', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (token, '{"reserved_usd": "8.00", "remaining_raw": 1000}'),
+        )
+        for digest, message, side in ((buy_hash, buy, "entry"), (sell_hash, sell, "exit")):
+            db.execute(
+                "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'qty-case', ?, ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+                (digest, side, message, block),
+            )
+        snap = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'qty-case'")[0]["snapshot_json"]
+
+        def mint_bytes(decimals):
+            raw_mint = bytearray(82)
+            raw_mint[44] = decimals
+            raw_mint[45] = 1
+            return bytes(raw_mint)
+
+        def token_bytes(mint_key):
+            raw_token = bytearray(165)
+            raw_token[0:32] = solana_tx.b58decode(mint_key)
+            raw_token[32:64] = solana_tx.b58decode(wallet)
+            raw_token[32:64] = solana_tx.b58decode(chain.get("account_owner") or wallet)
+            raw_token[64:72] = (999).to_bytes(8, "little")
+            raw_token[108] = 1
+            return bytes(raw_token)
+
+        chain = {
+            "tx": buy, "sig": buy_sig, "err": None, "fee": 5000, "slot": 20,
+            "decimals": 6, "mint_owner": solana_tx.TOKEN_PROGRAM, "executable": False,
+            "context": 30, "pre": "0", "post": "1000", "index": 2, "meta_mint": token, "meta_owner": wallet,
+            "duplicate": False, "drop_pre": False,
+        }
+
+        def row(amount, decimals=None):
+            return {
+                "accountIndex": chain["index"], "mint": chain["meta_mint"], "owner": chain["meta_owner"],
+                "uiTokenAmount": {"amount": amount, "decimals": chain["decimals"] if decimals is None else decimals},
+            }
+
+        def transport(request):
+            method = request.get("method")
+            if method == "getGenesisHash":
+                return {"status": 200, "body": {"result": solana_inspect.MAINNET_GENESIS}}
+            if method == "getSlot":
+                return {"status": 200, "body": {"result": 30}}
+            if method == "getSignatureStatuses":
+                return {"status": 200, "body": {"result": {"context": {"slot": chain["slot"]}, "value": [{
+                    "slot": chain["slot"], "err": chain["err"], "confirmationStatus": "confirmed",
+                }]}}}
+            if method == "getTransaction":
+                pre = [] if chain["drop_pre"] else [row(chain["pre"])]
+                post = [row(chain["post"], chain.get("post_decimals"))]
+                if chain["duplicate"]:
+                    pre.append(row(chain["pre"]))
+                if chain.get("bare"):
+                    pre, post = [], []
+                width = chain.get("width") or 12
+                return {"status": 200, "body": {"result": {
+                    "slot": chain["slot"], "transaction": [chain["tx"], "base64"],
+                    "meta": {
+                        "err": chain["err"], "fee": chain["fee"],
+                        "preBalances": [10] * width, "postBalances": [9] * width,
+                        "preTokenBalances": pre, "postTokenBalances": post,
+                    },
+                }}}
+            if method == "getAccountInfo" and request.get("purpose") == "mint_decimals":
+                payload = mint_bytes(chain["decimals"] if chain.get("mint_decimals") is None else chain["mint_decimals"])
+                if chain.get("extension"):
+                    payload += b"\x00"
+                value = None if chain.get("mint_missing") else {
+                    "owner": chain["mint_owner"], "executable": chain["executable"],
+                    "data": [base64.b64encode(payload).decode("ascii"), "base64"], "lamports": 1,
+                }
+                return {"status": 200, "body": {"result": {"context": {"slot": chain["context"]}, "value": value}}}
+            if method == "getAccountInfo" and request.get("purpose") == "token_account":
+                payload = token_bytes(token)
+                value = None if chain.get("closed") else {
+                    "owner": solana_tx.TOKEN_PROGRAM, "executable": False,
+                    "data": [base64.b64encode(payload).decode("ascii"), "base64"], "lamports": 1,
+                }
+                return {"status": 200, "body": {"result": {"context": {"slot": chain["context"]}, "value": value}}}
+            raise AssertionError(method)
+
+        bought = desk_loop.record_landed_quantity("qty-case", buy_sig, transport, 1)
+        self.assertTrue(bought["quantity_recorded"], bought)
+        self.assertEqual(bought["direction"], "bought")
+        self.assertEqual(bought["quantity_raw"], "1000")
+        self.assertEqual(bought["pre_amount"], "0")
+        self.assertEqual(bought["post_amount"], "1000")
+        self.assertEqual(bought["decimals"], 6)
+        self.assertFalse(bought["fill_proven"])
+        self.assertFalse(bought["cost_basis_proven"])
+        self.assertFalse(bought["refund_proven"])
+        self.assertTrue(bought["holds"])
+        self.assertFalse(bought["resend"])
+        self.assertFalse(bought["execution_eligible"])
+        self.assertTrue(bought["current_is_not_landed_balance"])
+        self.assertEqual(db.query("SELECT network_fee_lamports FROM memecoin_landed_evidence WHERE signature = ?", (buy_sig,))[0]["network_fee_lamports"], 5000)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'qty-case'")[0]["snapshot_json"], snap)
+        chain["tx"] = sell
+        chain["pre"] = "1000"
+        chain["post"] = "600"
+        chain["index"] = 1
+        sold = desk_loop.record_landed_quantity("qty-case", sell_sig, transport, 2)
+        self.assertTrue(sold["quantity_recorded"], sold)
+        self.assertEqual(sold["direction"], "sold")
+        self.assertEqual(sold["quantity_raw"], "400")
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'qty-case'")[0]["snapshot_json"], snap)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_exit_receipts")[0]["n"], 0)
+        chain["tx"] = buy
+        chain["index"] = 2
+        chain["pre"] = "0"
+        chain["post"] = "1000"
+        for label, change, reason in (
+            ("mint", {"meta_mint": solana_tx.NATIVE_MINT}, "historical_identity"),
+            ("wallet", {"meta_owner": token}, "historical_identity"),
+            ("index", {"index": 5}, "historical_missing"),
+            ("decimals", {"mint_decimals": 9}, "mint_decimals"),
+            ("owner", {"mint_owner": solana_tx.TOKEN_2022}, "token_2022_unsupported"),
+            ("executable", {"executable": True}, "quantity_account_executable"),
+            ("context", {"context": 1}, "quantity_context_stale"),
+            ("future", {"context": 400}, "quantity_context_future"),
+            ("missing", {"drop_pre": True}, "historical_missing"),
+            ("duplicate", {"duplicate": True}, "historical_duplicate"),
+            ("post_decimals", {"post_decimals": 9}, "historical_decimals"),
+            ("extension", {"extension": True}, "mint_layout"),
+            ("closed", {"closed": True}, "quantity_account_missing"),
+            ("later_owner", {"account_owner": token}, "token_identity"),
+            ("sign", {"pre": "5", "post": "1"}, "quantity_sign"),
+        ):
+            saved = {key: chain.get(key) for key in change}
+            chain.update(change)
+            bad = desk_loop.record_landed_quantity("qty-case", buy_sig, transport, 3)
+            for key, value in saved.items():
+                chain[key] = value
+            chain["drop_pre"] = False
+            chain["duplicate"] = False
+            chain["mint_decimals"] = None
+            chain["executable"] = False
+            chain["post_decimals"] = None
+            chain["extension"] = False
+            chain["closed"] = False
+            chain["account_owner"] = None
+            chain["pre"] = "0"
+            chain["post"] = "1000"
+            self.assertEqual(bad["quantity_reason"], reason, label)
+            if reason not in {"historical_identity", "historical_missing", "historical_duplicate", "historical_decimals", "quantity_sign"}:
+                self.assertTrue(bad["current_is_not_landed_balance"], label)
+            self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_quantity")[0]["n"], 2, label)
+            self.assertFalse(bad["quantity_recorded"], label)
+            self.assertFalse(bad["fill_proven"], label)
+        failed_block = solana_tx.b58encode(b"\x45" * 32)
+        failed_unsigned = solana_tx.encode_legacy(wallet, ordered, len(ordered) - 3, [(ordered.index(solana_jupiter.PROGRAM_ID), list(range(12)), data)], failed_block)
+        failed_raw = bytearray(base64.b64decode(failed_unsigned))
+        failed_raw[1:65] = b"\x33" * 64
+        failed_tx = base64.b64encode(bytes(failed_raw)).decode("ascii")
+        failed_sig = solana_tx.first_signature(failed_tx)
+        failed_hash = hashlib.sha256(solana_tx.message_bytes(failed_tx)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('qty-failed', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (token, snap),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'qty-failed', 'entry', ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+            (failed_hash, failed_tx, failed_block),
+        )
+        chain["tx"] = failed_tx
+        chain["err"] = {"InstructionError": [0, "Custom"]}
+        failed = desk_loop.record_landed_quantity("qty-failed", failed_sig, transport, 4)
+        self.assertEqual(failed["quantity_reason"], "failed_not_a_fill")
+        self.assertFalse(failed["quantity_recorded"])
+        self.assertTrue(failed["failed"])
+        forged = desk_loop.record_landed_quantity("qty-case", buy_sig, {"not": "callable"}, 5)
+        self.assertEqual(forged["reason"], "receipt_source")
+        self.assertFalse(forged["quantity_recorded"])
+        bare_block = solana_tx.b58encode(b"\x46" * 32)
+        bare_unsigned = solana_tx.encode_legacy(
+            wallet, [wallet, solana_tx.TOKEN_2022], 1,
+            [(1, [0], b"\x01")], bare_block,
+        )
+        bare_raw = bytearray(base64.b64decode(bare_unsigned))
+        bare_raw[1:65] = b"\x34" * 64
+        bare_tx = base64.b64encode(bytes(bare_raw)).decode("ascii")
+        bare_sig = solana_tx.first_signature(bare_tx)
+        bare_hash = hashlib.sha256(solana_tx.message_bytes(bare_tx)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('qty-bare', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (token, snap),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'qty-bare', 'entry', ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+            (bare_hash, bare_tx, bare_block),
+        )
+        chain["tx"] = bare_tx
+        chain["err"] = None
+        chain["width"] = 2
+        chain["bare"] = True
+        bare = desk_loop.record_landed_quantity("qty-bare", bare_sig, transport, 6)
+        self.assertEqual(bare["quantity_reason"], "layout_unsupported")
+        self.assertFalse(bare["quantity_recorded"])
+        self.assertFalse(bare["fill_proven"])
+        chain["tx"] = buy
+        chain["width"] = 12
+        chain["bare"] = False
+        chain["post"] = "1001"
+        conflict = desk_loop.record_landed_quantity("qty-case", buy_sig, transport, 7)
+        self.assertEqual(conflict["quantity_reason"], "quantity_conflict")
+        self.assertFalse(conflict["quantity_recorded"])
+        self.assertEqual(db.query("SELECT quantity_raw FROM memecoin_landed_quantity WHERE signature = ?", (buy_sig,))[0]["quantity_raw"], "1000")
+        chain["post"] = "1000"
+        again = desk_loop.record_landed_quantity("qty-case", buy_sig, transport, 8)
+        self.assertTrue(again["quantity_recorded"])
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(again["quantity_raw"], "1000")
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE memecoin_landed_quantity SET quantity_raw = '1' WHERE signature = ?", (buy_sig,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT OR REPLACE INTO memecoin_landed_quantity (signature, message_sha256, case_id, side, account, mint, wallet, decimals, pre_amount, post_amount, quantity_raw, direction, landed_slot, created_at) VALUES (?, ?, 'qty-case', 'entry', ?, ?, ?, 6, '0', '2', '2', 'bought', 20, 9)",
+                (buy_sig, buy_hash, dest, token, wallet),
+            )
+        self.assertEqual(db.query("SELECT quantity_raw FROM memecoin_landed_quantity WHERE signature = ?", (buy_sig,))[0]["quantity_raw"], "1000")
+        foreign = solana_tx.b58encode(b"\x72" * 32)
+        foreign_ordered = [wallet, source, foreign, *ordered[3:]]
+        foreign_unsigned = solana_tx.encode_legacy(wallet, foreign_ordered, len(foreign_ordered) - 3, [(foreign_ordered.index(solana_jupiter.PROGRAM_ID), list(range(12)), data)], block)
+        foreign_raw = bytearray(base64.b64decode(foreign_unsigned))
+        foreign_raw[1:65] = b"\x35" * 64
+        foreign_tx = base64.b64encode(bytes(foreign_raw)).decode("ascii")
+        foreign_sig = solana_tx.first_signature(foreign_tx)
+        foreign_hash = hashlib.sha256(solana_tx.message_bytes(foreign_tx)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('qty-foreign', ?, 'protected', ?, 1, 1, 'live', 'server')",
+            (token, snap),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservations (message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height, last_valid_provenance, ledger, ledger_provenance, created_at) VALUES (?, 'qty-foreign', 'entry', ?, 'metis', ?, 10, 'jupiter_order', 'live', 'server', 1)",
+            (foreign_hash, foreign_tx, block),
+        )
+        chain["tx"] = foreign_tx
+        unbound = desk_loop.record_landed_quantity("qty-foreign", foreign_sig, transport, 9)
+        self.assertEqual(unbound["quantity_reason"], "route_unbound")
+        self.assertFalse(unbound["quantity_recorded"])
+        self.assertFalse(unbound["fill_proven"])
+        self.assertEqual(db.query("SELECT network_fee_lamports FROM memecoin_landed_evidence WHERE signature = ?", (buy_sig,))[0]["network_fee_lamports"], 5000)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_entry_receipts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_landed_quantity")[0]["n"], 2)
+        self.assertEqual(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = 'qty-case'")[0]["snapshot_json"], snap)
 
     def test_predecessor_preflight_attempt_cannot_be_replaced(self):
         import shutil
