@@ -331,10 +331,21 @@ def harness_fill(case_id: str, receipt: dict) -> dict:
     fee = _money(route.get("fee_usd"))
     snap["fill"] = {
         "fixture": True,
+        "live_proof": False,
         "tokens_out": tokens,
         "cost_usd": snap["ticket_usd"],
         "fee_usd": format(fee, "f"),
         "fee_counted_once": True,
+        "fee_usd_is_live": False,
+        "qty_is_live": False,
+    }
+    snap["entry_funding"] = {
+        "proven": False,
+        "source": "paper_harness",
+        "live_proof": False,
+        "fee_usd_is_live": False,
+        "qty_is_live": False,
+        "accounts": None,
     }
     snap["remaining_raw"] = tokens
     snap["live_ledger"] = False
@@ -428,6 +439,13 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "sol_price": sol.get("price"),
             "sol_conf": sol.get("conf"),
             "sol_expo": sol.get("expo"),
+            "snapshot_slot": snapshot.slot,
+            "snapshot_tip_slot": snapshot.tip_slot,
+            "snapshot_fetched_at": snapshot.fetched_at,
+            "blockhash": decoded.blockhash,
+            "dex_fee_source": "reserved_pool_state",
+            "dex_fee_remeasured": False,
+            "quote_expiry_rule": "landed_slot_within_150_of_snapshot_slot",
             "status": "reserved",
             "signature": None,
         }
@@ -446,18 +464,18 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
     import desk_loop
     import memecoin_exit
     import pyth_sponsored
+    duplicate = _duplicate_exit(signature)
+    if duplicate is not None:
+        return duplicate
     row = _case(case_id)
     if row is None or row["stage"] not in {"filled", "partial", "exit_intent"}:
-        seen = db.query("SELECT signature FROM memecoin_exit_receipts WHERE signature = ?", (signature,))
-        if seen:
-            return {"ok": False, "reason": "exit_duplicate", "resend": False, "case_id": case_id, "send": False}
         return _kill(case_id, None, "risk", "stage", None)
     snap = _snapshot(row)
     inflight = snap.get("inflight")
     if not isinstance(inflight, dict):
-        return _note(row, "risk", "exit_not_reserved")
+        return _hold(row, "exit_not_reserved", status="held")
     if inflight.get("status") == "unknown" and inflight.get("signature") not in (None, signature):
-        return {"ok": False, "reason": "no_resend", "holds": True, "resend": False, "case_id": row["id"], "stage": row["stage"]}
+        return _hold(row, "no_resend", status="unknown")
     pulled = desk_loop.read_transaction(signature)
     moment = time.time() if now is None else now
     if pulled.get("ok") is not True:
@@ -469,94 +487,229 @@ def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict
                 "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ? AND stage = ?",
                 (json.dumps(snap, sort_keys=True), moment, row["id"], row["stage"]),
             )
-            _log(conn, row["id"], row["mint"], "risk", "kill", pulled.get("reason"), None, {"holds": True, "resend": False}, moment)
-            return {"ok": False, "reason": pulled.get("reason"), "holds": True, "resend": False, "case_id": row["id"], "stage": row["stage"]}
+            return _hold_conn(conn, row, pulled.get("reason") or "receipt_unknown", status="unknown", moment=moment)
 
         return db.exclusive(hold)
-    proven = memecoin_exit.match_landed(inflight, signature, pulled)
+    flight = dict(inflight)
+    if pulled.get("block_time") is not None:
+        flight["block_time"] = pulled.get("block_time")
+    proven = memecoin_exit.match_landed(flight, signature, pulled)
     if proven.get("ok") is not True:
-        return _note(row, "risk", proven.get("reason") or "receipt_unbound")
+        return _hold(
+            row, proven.get("reason") or "receipt_unbound", status="held",
+            snapshot_slot=proven.get("snapshot_slot"), slot=proven.get("slot"),
+            slot_distance=proven.get("slot_distance"), blockhash_window_slots=proven.get("blockhash_window_slots"),
+            blockhash_rechecked=False, dex_fee_remeasured=False,
+        )
     qty = inflight["qty"]
 
     def work(conn):
         _ensure_conn(conn)
         current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
         if current is None or current["stage"] not in {"filled", "partial", "exit_intent"}:
-            return {"ok": False, "reason": "stage", "case_id": row["id"]}
+            return {"ok": False, "reason": "stage", "case_id": row["id"], "holds": True, "resend": False, "recorded": False, "status": "held"}
         fresh = json.loads(current["snapshot_json"])
-        flight = fresh.get("inflight") or {}
-        if flight.get("message_sha256") != proven["message_sha256"]:
-            return {"ok": False, "reason": "message_mismatch", "case_id": row["id"], "resend": False, "holds": True}
+        stored = fresh.get("inflight") or {}
+        if stored.get("message_sha256") != proven["message_sha256"]:
+            return _hold_conn(conn, row, "message_mismatch", status="held", moment=moment, stage_now=current["stage"])
         seen = conn.execute("SELECT signature FROM memecoin_exit_receipts WHERE signature = ? OR (case_id = ? AND message_sha256 = ?)", (signature, row["id"], proven["message_sha256"])).fetchone()
         if seen is not None:
-            return {"ok": False, "reason": "exit_duplicate", "case_id": row["id"], "resend": False}
+            return _duplicate_conn(conn, signature, row["id"])
         remaining = int(fresh.get("remaining_raw") or 0) - qty
         if remaining < 0:
-            return {"ok": False, "reason": "quantity", "case_id": row["id"]}
-        leg = {"used": True, "fresh": True, "price": flight.get("sol_price"), "conf": flight.get("sol_conf"), "expo": flight.get("sol_expo")}
-        dex_lamports = int(flight.get("dex_fee_lamports") or 0)
+            return _hold_conn(conn, row, "quantity", status="held", moment=moment, stage_now=current["stage"])
+        dex_lamports = stored.get("dex_fee_lamports")
+        if isinstance(dex_lamports, bool) or not isinstance(dex_lamports, int) or dex_lamports < 0 or dex_lamports != proven.get("dex_fee_lamports"):
+            return _hold_conn(conn, row, "dex_fee_unbound", status="held", moment=moment, stage_now=current["stage"])
+        leg = {"used": True, "fresh": True, "price": stored.get("sol_price"), "conf": stored.get("sol_conf"), "expo": stored.get("sol_expo")}
         actual_network = int(proven["network_fee_lamports"])
         fee_usd = pyth_sponsored.lamports_usd(dex_lamports + actual_network, leg)
-        breach = fee_usd is None or fee_usd > MAX_FEE or actual_network > int(flight.get("network_lamports") or 0)
+        breach = fee_usd is None or fee_usd > MAX_FEE or actual_network > int(stored.get("network_lamports") or 0)
+        rent = proven.get("rent") if isinstance(proven.get("rent"), dict) else {}
         fresh["remaining_raw"] = remaining
         fresh.pop("inflight", None)
+        fresh["deposits"] = _remember_funding(fresh.get("deposits"), rent)
         receipts = list(fresh.get("live_receipts") or [])
-        receipts.append({
+        entry_live = _entry_live(fresh)
+        receipt = {
             "signature": signature,
             "qty": qty,
             "sol_proceeds": proven["sol_proceeds"],
             "network_fee_lamports": actual_network,
             "dex_fee_lamports": dex_lamports,
+            "dex_fee_source": "reserved_pool_state",
+            "dex_fee_remeasured": False,
             "fee_usd": None if fee_usd is None else format(fee_usd, "f"),
-            "rent_lamports": 0,
             "slot": proven["slot"],
+            "snapshot_slot": proven.get("snapshot_slot"),
+            "snapshot_not_after_landed": proven.get("snapshot_not_after_landed") is True,
+            "slot_distance": proven.get("slot_distance"),
+            "blockhash_rechecked": False,
+            "blockhash_window_slots": proven.get("blockhash_window_slots"),
+            "pool_matches_reservation": proven.get("pool_matches_reservation") is True,
+            "quote_clock_proven": False,
+            "wsol_rent_net_lamports": (rent.get("wsol") or {}).get("net_lamports"),
+            "wsol_rent_net_proven": (rent.get("wsol") or {}).get("net_proven") is True,
+            "mint_ata_rent_lamports": (rent.get("mint_ata") or {}).get("rent_lamports"),
+            "mint_refund_proven": False,
             "fee_policy_breach": breach,
-            "live_ledger": True,
-        })
+            "exit_chain_proven": True,
+            "entry_funding_proven": entry_live,
+            "live_ledger": False,
+        }
+        receipts.append(receipt)
         fresh["live_receipts"] = receipts
-        fresh["live_ledger"] = True
-        fresh["fill_fixture_is_not_live"] = fresh.get("fill", {}).get("fixture") is True
+        fresh["exit_chain_proven"] = True
+        fresh["entry_funding_proven"] = entry_live
+        fresh["live_ledger"] = False
+        fresh["pnl_live"] = False
+        fresh["fill_fixture_is_not_live"] = not entry_live
+        fresh.pop("realized_pnl", None)
         stage = "exited" if remaining == 0 else "partial"
         if remaining == 0:
-            fresh["reserved_usd"] = "0.00"
-            notional = _money(fresh.get("notional_usd"))
-            entry_fee = _money((fresh.get("fill") or {}).get("fee_usd")) or Decimal("0")
-            exit_fees = sum((_money(item.get("fee_usd")) or Decimal("0")) for item in receipts)
-            proceeds = pyth_sponsored.lamports_usd(sum(int(item["sol_proceeds"]) for item in receipts), leg)
-            if notional is not None and proceeds is not None:
-                fresh["realized_pnl"] = format(proceeds - notional - entry_fee - exit_fees, "f")
+            _keep_unrefunded_deposit(fresh, leg)
+        else:
+            fresh["deposit_refund_proven"] = False
+        _write_deposits(conn, row["id"], fresh.get("deposits") or {})
         if breach:
             conn.execute(
                 "INSERT INTO settings (key, value, updated_at) VALUES ('memecoin_entry_halt', '1', ?) ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
                 (moment,),
             )
         conn.execute(
-            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd) VALUES (?, ?, ?, ?, ?)",
-            (signature, row["id"], proven["message_sha256"], proven["slot"], "unpriced" if fee_usd is None else format(fee_usd, "f")),
+            "INSERT INTO memecoin_exit_receipts (signature, case_id, message_sha256, slot, fee_usd, snapshot_slot, provenance_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                signature, row["id"], proven["message_sha256"], proven["slot"],
+                "unpriced" if fee_usd is None else format(fee_usd, "f"),
+                proven.get("snapshot_slot"),
+                json.dumps({"dex_fee_source": "reserved_pool_state", "dex_fee_remeasured": False, "blockhash_rechecked": False, "quote_clock_proven": False, "pool": proven.get("pool")}, sort_keys=True),
+            ),
         )
         conn.execute(
             "UPDATE memecoin_cases SET stage = ?, snapshot_json = ?, updated_at = ? WHERE id = ?",
             (stage, json.dumps(fresh, sort_keys=True), moment, row["id"]),
         )
-        _log(conn, row["id"], row["mint"], "risk", "pass" if not breach else "kill", None if not breach else "fee_policy_breach", "exit_receipt", {"signature": signature, "qty": qty, "sol_proceeds": proven["sol_proceeds"], "fee_usd": None if fee_usd is None else format(fee_usd, "f"), "fee_policy_breach": breach}, moment)
+        _log(conn, row["id"], row["mint"], "risk", "pass" if not breach else "kill", None if not breach else "fee_policy_breach", "exit_receipt", receipt, moment)
+        holds = remaining > 0 or fresh.get("deposit_refund_proven") is not True
         return {
             "ok": not breach,
             "recorded": True,
             "reason": "fee_policy_breach" if breach else None,
             "case_id": row["id"],
             "stage": stage,
+            "status": "breach" if breach else "booked",
             "remaining_raw": remaining,
+            "reserved_usd": fresh.get("reserved_usd"),
             "sol_proceeds": proven["sol_proceeds"],
             "fee_usd": None if fee_usd is None else format(fee_usd, "f"),
             "network_fee_lamports": actual_network,
             "dex_fee_lamports": dex_lamports,
-            "rent_lamports": 0,
+            "dex_fee_source": "reserved_pool_state",
+            "dex_fee_remeasured": False,
+            "snapshot_slot": proven.get("snapshot_slot"),
+            "slot": proven["slot"],
+            "snapshot_not_after_landed": True,
+            "slot_distance": proven.get("slot_distance"),
+            "blockhash_rechecked": False,
+            "blockhash_window_slots": proven.get("blockhash_window_slots"),
+            "pool_matches_reservation": True,
+            "quote_clock_proven": False,
+            "wsol_rent_net_lamports": receipt["wsol_rent_net_lamports"],
+            "wsol_rent_net_proven": receipt["wsol_rent_net_proven"],
+            "position_rent_lamports": receipt["mint_ata_rent_lamports"],
+            "mint_refund_proven": False,
             "fee_policy_breach": breach,
             "entry_halt": breach,
-            "live_ledger": True,
+            "entry_funding_proven": False if not entry_live else True,
+            "exit_chain_proven": True,
+            "pnl_live": False,
+            "live_ledger": False,
+            "holds": holds,
             "send": False,
             "live_ready": False,
             "resend": False,
+        }
+
+    return db.exclusive(work)
+
+
+def confirm_deposit_refund(case_id: str, signature: str, now: float | None = None) -> dict:
+    """Release only the recorded mint-account rent after that exact balance reaches the wallet."""
+    import desk_loop
+    import memecoin_exit
+    row = _case(case_id)
+    if row is None:
+        return _kill(case_id, None, "risk", "stage", None)
+    snap = _snapshot(row)
+    if row["stage"] == "paper_exited":
+        return _hold(row, "paper_not_live", status="held")
+    if snap.get("deposit_refund_proven") is True:
+        return _hold(row, "deposit_duplicate", status="duplicate", holds=False)
+    remaining = snap.get("remaining_raw")
+    if not isinstance(remaining, int) or remaining > 0:
+        return _hold(row, "tokens_unsold", status="held")
+    if not isinstance(snap.get("deposits"), dict):
+        paper = (snap.get("entry_funding") or {}).get("source") == "paper_harness"
+        return _hold(row, "paper_not_live" if paper else "deposit_unobserved", status="held")
+    mint = snap.get("deposits", {}).get("mint_ata")
+    if not isinstance(mint, dict) or mint.get("preexisting") is True:
+        return _hold(row, "preexisting_account" if isinstance(mint, dict) and mint.get("preexisting") is True else "deposit_unobserved", status="held")
+    if mint.get("bot_funded") is not True:
+        return _hold(row, "deposit_unobserved", status="held")
+    pulled = desk_loop.read_transaction(signature)
+    moment = time.time() if now is None else now
+    proven = memecoin_exit.match_refund(mint, signature, pulled)
+    if proven.get("ok") is not True:
+        return _hold(row, proven.get("reason") or "refund_balance", status="unknown" if proven.get("reason") in {"receipt_unknown", "receipt_unconfirmed"} else "held")
+
+    def work(conn):
+        _ensure_conn(conn)
+        current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+        if current is None:
+            return {"ok": False, "reason": "stage", "holds": True, "recorded": False, "resend": False}
+        fresh = json.loads(current["snapshot_json"])
+        if fresh.get("deposit_refund_proven") is True:
+            return _hold_conn(conn, row, "deposit_duplicate", status="duplicate", moment=moment, stage_now=current["stage"], holds=False)
+        body = fresh.get("deposits") if isinstance(fresh.get("deposits"), dict) else {}
+        account = (body.get("mint_ata") or {}).get("account")
+        rent = (body.get("mint_ata") or {}).get("rent_lamports")
+        if account != proven["account"] or rent != proven["rent_lamports"]:
+            return _hold_conn(conn, row, "refund_balance", status="held", moment=moment, stage_now=current["stage"])
+        fresh["deposit_refund_proven"] = True
+        fresh["reserved_usd"] = "0.00"
+        fresh["deposits"]["mint_ata"]["refund_proven"] = True
+        fresh["deposits"]["mint_ata"]["refund_signature"] = signature
+        fresh["deposits"]["mint_ata"]["refund_slot"] = proven["slot"]
+        fresh["pnl_live"] = False
+        fresh.pop("realized_pnl", None)
+        conn.execute(
+            "UPDATE memecoin_deposits SET refunded = 1, refund_signature = ? WHERE case_id = ? AND kind = 'mint_ata' AND account = ?",
+            (signature, row["id"], account),
+        )
+        conn.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(fresh, sort_keys=True), moment, row["id"]),
+        )
+        _log(conn, row["id"], row["mint"], "risk", "pass", None, "deposit_refund", {"account": account, "rent_lamports": rent, "signature": signature, "wallet": proven["wallet"]}, moment)
+        return {
+            "ok": True,
+            "reason": None,
+            "recorded": True,
+            "refunded": True,
+            "holds": False,
+            "resend": False,
+            "status": "refunded",
+            "case_id": row["id"],
+            "stage": current["stage"],
+            "remaining_raw": fresh.get("remaining_raw"),
+            "reserved_usd": "0.00",
+            "rent_lamports": rent,
+            "account": account,
+            "wallet": proven["wallet"],
+            "pnl_live": False,
+            "entry_funding_proven": False,
+            "send": False,
+            "live_ready": False,
         }
 
     return db.exclusive(work)
@@ -743,19 +896,166 @@ _OPEN_CAPITAL = ("protected", "entry_ready", "filled", "partial", "exit_intent",
 
 
 def _held_conn(conn) -> Decimal:
-    """Full ticket stays reserved until a confirmed exit has sold every raw token."""
+    """Full ticket stays reserved while tokens or an unrefunded deposit remain."""
     total = Decimal("0")
     for item in conn.execute("SELECT stage, snapshot_json FROM memecoin_cases"):
         body = json.loads(item["snapshot_json"])
         remaining = body.get("remaining_raw")
-        unresolved = isinstance(remaining, int) and remaining > 0 or isinstance(body.get("inflight"), dict)
+        deposit_open = body.get("deposit_refund_proven") is not True and (isinstance(remaining, int) and remaining == 0 and (body.get("deposits") or body.get("live_receipts")))
+        unresolved = (isinstance(remaining, int) and remaining > 0) or isinstance(body.get("inflight"), dict) or deposit_open
         if item["stage"] not in _OPEN_CAPITAL and not unresolved:
             continue
         if item["stage"] == "exited" and not unresolved:
             continue
-        reserved = _money(body.get("reserved_usd"))
+        reserved = _reserved_amount(body.get("reserved_usd"))
         total += TICKET if reserved is None else reserved
     return total
+
+
+def _reserved_amount(value) -> Decimal | None:
+    """A stored zero is released capital. A missing figure is still the whole ticket."""
+    if value is None:
+        return None
+    number = _num(value)
+    if number is None or not number.is_finite() or number < 0:
+        return None
+    return number
+
+
+def _entry_live(snap: dict) -> bool:
+    funding = snap.get("entry_funding") if isinstance(snap.get("entry_funding"), dict) else {}
+    return funding.get("proven") is True and funding.get("live_proof") is True and funding.get("source") != "paper_harness"
+
+
+def _remember_funding(prior, rent: dict) -> dict:
+    """A later slice must not relabel an account this desk already funded as a user's account."""
+    body = dict(rent) if isinstance(rent, dict) else {}
+    previous = prior if isinstance(prior, dict) else {}
+    for name in ("mint_ata", "position_account", "wsol"):
+        old = previous.get(name) if isinstance(previous.get(name), dict) else {}
+        new = body.get(name) if isinstance(body.get(name), dict) else {}
+        if old.get("bot_funded") is True and new:
+            new = dict(new)
+            new["bot_funded"] = True
+            new["preexisting"] = False
+            new["funder"] = old.get("funder")
+            new["provenance"] = old.get("provenance")
+            body[name] = new
+    return body
+
+
+def _keep_unrefunded_deposit(fresh: dict, leg: dict) -> None:
+    """Token quantity zero does not refund a mint account the exit left funded."""
+    import pyth_sponsored
+    fresh["deposit_refund_proven"] = False
+    fresh["pnl_live"] = False
+    fresh.pop("realized_pnl", None)
+    mint = (fresh.get("deposits") or {}).get("mint_ata") if isinstance(fresh.get("deposits"), dict) else None
+    if not isinstance(mint, dict) or mint.get("observed") is not True or mint.get("preexisting") is True:
+        fresh["deposit_hold_reason"] = "preexisting_mint_account" if isinstance(mint, dict) and mint.get("preexisting") is True else "mint_ata_unobserved"
+        return
+    rent = mint.get("rent_lamports")
+    if isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0 or mint.get("bot_funded") is not True:
+        fresh["deposit_hold_reason"] = "mint_rent_unproven"
+        return
+    usd = pyth_sponsored.lamports_usd(rent, leg)
+    if usd is None:
+        fresh["deposit_hold_reason"] = "deposit_unpriced"
+        return
+    current = _reserved_amount(fresh.get("reserved_usd"))
+    if current is None:
+        current = TICKET
+    fresh["reserved_usd"] = format(usd if usd <= current else current, "f")
+    fresh["deposit_hold_lamports"] = rent
+    fresh["deposit_hold_reason"] = "mint_ata_still_funded"
+
+
+def _write_deposits(conn, case_id: str, deposits: dict) -> None:
+    for name in ("wsol", "mint_ata", "position_account"):
+        row = deposits.get(name) if isinstance(deposits.get(name), dict) else None
+        if row is None or not isinstance(row.get("account"), str):
+            continue
+        conn.execute(
+            """
+            INSERT INTO memecoin_deposits (case_id, account, kind, rent_lamports, funder, provenance, preexisting, bot_funded, refund_signature, refunded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+            ON CONFLICT(case_id, kind) DO UPDATE SET
+                account = excluded.account,
+                rent_lamports = excluded.rent_lamports,
+                funder = excluded.funder,
+                provenance = excluded.provenance,
+                preexisting = excluded.preexisting,
+                bot_funded = excluded.bot_funded
+            """,
+            (
+                case_id, row["account"], name, row.get("rent_lamports"), row.get("funder"), row.get("provenance") or "unproven",
+                1 if row.get("preexisting") is True else 0,
+                None if row.get("bot_funded") is None else (1 if row.get("bot_funded") is True else 0),
+            ),
+        )
+
+
+def _duplicate_exit(signature: str) -> dict | None:
+    _ensure()
+    rows = db.query("SELECT case_id FROM memecoin_exit_receipts WHERE signature = ?", (signature,))
+    if not rows:
+        return None
+    return db.exclusive(lambda conn: _duplicate_conn(conn, signature, rows[0]["case_id"]))
+
+
+def _duplicate_conn(conn, signature: str, case_id: str) -> dict:
+    row = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
+    snap = {} if row is None else json.loads(row["snapshot_json"])
+    remaining = snap.get("remaining_raw")
+    holds = (isinstance(remaining, int) and remaining > 0) or snap.get("deposit_refund_proven") is not True
+    return {
+        "ok": False,
+        "reason": "exit_duplicate",
+        "already_recorded": True,
+        "recorded": False,
+        "holds": holds,
+        "resend": False,
+        "remaining_raw": remaining,
+        "reserved_usd": snap.get("reserved_usd"),
+        "stage": None if row is None else row["stage"],
+        "case_id": case_id,
+        "status": "duplicate",
+        "signature": signature,
+        "send": False,
+        "live_ready": False,
+    }
+
+
+def _hold(row, reason: str, *, status: str, holds: bool = True, **extra) -> dict:
+    moment = time.time()
+
+    def work(conn):
+        return _hold_conn(conn, row, reason, status=status, moment=moment, holds=holds, **extra)
+
+    return db.exclusive(work)
+
+
+def _hold_conn(conn, row, reason: str, *, status: str, moment: float, stage_now: str | None = None, holds: bool = True, **extra) -> dict:
+    current = conn.execute("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+    snap = {} if current is None else json.loads(current["snapshot_json"])
+    stage = current["stage"] if stage_now is None and current is not None else stage_now
+    _log(conn, row["id"], row["mint"], "risk", "kill", reason, None, {"reason": reason, "holds": holds, "resend": False, "status": status}, moment)
+    return {
+        "ok": False,
+        "reason": reason,
+        "holds": holds,
+        "resend": False,
+        "recorded": False,
+        "remaining_raw": snap.get("remaining_raw"),
+        "reserved_usd": snap.get("reserved_usd"),
+        "case_id": row["id"],
+        "stage": stage if stage is not None else (None if current is None else current["stage"]),
+        "mint": row["mint"],
+        "status": status,
+        "send": False,
+        "live_ready": False,
+        **{key: value for key, value in extra.items() if value is not None},
+    }
 
 
 def _loss_conn(conn) -> Decimal:
@@ -845,7 +1145,34 @@ def _ensure_conn(conn) -> None:
             case_id TEXT NOT NULL,
             message_sha256 TEXT NOT NULL,
             slot INTEGER NOT NULL,
-            fee_usd TEXT NOT NULL
+            fee_usd TEXT NOT NULL,
+            snapshot_slot INTEGER,
+            provenance_json TEXT
+        )
+        """
+    )
+    for statement in (
+        "ALTER TABLE memecoin_exit_receipts ADD COLUMN snapshot_slot INTEGER",
+        "ALTER TABLE memecoin_exit_receipts ADD COLUMN provenance_json TEXT",
+    ):
+        try:
+            conn.execute(statement)
+        except Exception:
+            pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_deposits (
+            case_id TEXT NOT NULL,
+            account TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            rent_lamports INTEGER,
+            funder TEXT,
+            provenance TEXT NOT NULL,
+            preexisting INTEGER NOT NULL,
+            bot_funded INTEGER,
+            refund_signature TEXT,
+            refunded INTEGER NOT NULL,
+            PRIMARY KEY (case_id, kind)
         )
         """
     )

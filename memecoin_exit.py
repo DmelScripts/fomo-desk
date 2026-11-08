@@ -47,7 +47,16 @@ def pull_response(response: dict) -> dict:
     slot = result.get("slot")
     if isinstance(slot, bool) or not isinstance(slot, int):
         return refused | {"reason": "slot_unproven"}
-    return {"ok": True, "transaction": encoded[0], "meta": meta, "slot": slot, "holds": False, "resend": False}
+    block_time = result.get("blockTime")
+    return {
+        "ok": True,
+        "transaction": encoded[0],
+        "meta": meta,
+        "slot": slot,
+        "block_time": block_time if isinstance(block_time, int) and not isinstance(block_time, bool) else None,
+        "holds": False,
+        "resend": False,
+    }
 
 
 def pull(signature: str, transport) -> dict:
@@ -82,7 +91,16 @@ def pull(signature: str, transport) -> dict:
     slot = result.get("slot")
     if isinstance(slot, bool) or not isinstance(slot, int):
         return refused | {"reason": "slot_unproven"}
-    return {"ok": True, "transaction": encoded[0], "meta": meta, "slot": slot, "holds": False, "resend": False}
+    block_time = result.get("blockTime")
+    return {
+        "ok": True,
+        "transaction": encoded[0],
+        "meta": meta,
+        "slot": slot,
+        "block_time": block_time if isinstance(block_time, int) and not isinstance(block_time, bool) else None,
+        "holds": False,
+        "resend": False,
+    }
 
 
 def match_landed(reserved: dict, signature: str, pulled: dict) -> dict:
@@ -119,6 +137,10 @@ def match_landed(reserved: dict, signature: str, pulled: dict) -> dict:
         return refused | {"reason": native.get("reason")}
     if native["proceeds"] < route["min_out"]:
         return refused | {"reason": "proceeds_below_min"}
+    bound = _provenance(reserved, decoded, pulled["slot"], route)
+    if bound.get("ok") is not True:
+        return refused | {key: value for key, value in bound.items() if key != "ok"}
+    rent = rent_ledger(decoded, pulled["meta"], reserved["mint"])
     return {
         "ok": True,
         "reason": None,
@@ -134,6 +156,8 @@ def match_landed(reserved: dict, signature: str, pulled: dict) -> dict:
         "live_ready": False,
         "send": False,
         "live_ledger": True,
+        "rent": rent,
+        **bound,
     }
 
 
@@ -172,6 +196,240 @@ def plan_slices(raw: int, sqrt_price: int, token_is_a: bool, sol_leg: dict, cap:
         if len(slices) > 64:
             return {"ok": False, "reason": "too_many_slices", "slices": slices}
     return {"ok": True, "reason": None, "slices": slices, "cap": cap, "whole_raw": raw}
+
+
+def _provenance(reserved: dict, decoded, landed_slot: int, route: dict) -> dict:
+    """The receipt matches the reserved message. It does not remeasure the pool fee.
+
+    The snapshot account slot has to be at or before the landed slot, and the
+    landed slot has to fall inside the 150-slot recent-blockhash window measured
+    from that snapshot. The message hash already covers the blockhash bytes.
+    This does not call isBlockhashValid, and a missing block time is not a clock
+    proof. The DEX fee stays the figure stored from the snapshot pool state.
+    """
+    import jupiter_route_v2
+    snapshot_slot = reserved.get("snapshot_slot")
+    tip = reserved.get("snapshot_tip_slot")
+    if isinstance(snapshot_slot, bool) or not isinstance(snapshot_slot, int):
+        return {"ok": False, "reason": "slot_unbound"}
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip < snapshot_slot:
+        return {"ok": False, "reason": "slot_unbound"}
+    if snapshot_slot > landed_slot:
+        return {"ok": False, "reason": "snapshot_after_landed", "snapshot_slot": snapshot_slot, "slot": landed_slot}
+    distance = landed_slot - snapshot_slot
+    if distance > jupiter_route_v2.SLOT_LAG_MAX:
+        return {"ok": False, "reason": "blockhash_window", "slot_distance": distance, "blockhash_window_slots": jupiter_route_v2.SLOT_LAG_MAX}
+    if not isinstance(reserved.get("blockhash"), str) or reserved.get("blockhash") == "":
+        return {"ok": False, "reason": "blockhash_unbound"}
+    if decoded.blockhash != reserved["blockhash"]:
+        return {"ok": False, "reason": "blockhash_mismatch"}
+    if route.get("pool") != reserved.get("pool") and reserved.get("pool") not in route.get("keys", []):
+        return {"ok": False, "reason": "pool_unbound"}
+    dex = reserved.get("dex_fee_lamports")
+    if isinstance(dex, bool) or not isinstance(dex, int) or dex < 0:
+        return {"ok": False, "reason": "dex_fee_unbound"}
+    block_time = reserved.get("block_time")
+    fetched = reserved.get("snapshot_fetched_at")
+    clock = isinstance(block_time, int) and not isinstance(block_time, bool) and isinstance(fetched, (int, float)) and not isinstance(fetched, bool)
+    if clock and fetched > block_time + 5:
+        return {"ok": False, "reason": "snapshot_after_landed"}
+    return {
+        "ok": True,
+        "snapshot_slot": snapshot_slot,
+        "snapshot_tip_slot": tip,
+        "snapshot_not_after_landed": True,
+        "slot_distance": distance,
+        "blockhash": decoded.blockhash,
+        "blockhash_matches_reservation": True,
+        "blockhash_rechecked": False,
+        "blockhash_window_slots": jupiter_route_v2.SLOT_LAG_MAX,
+        "quote_clock_proven": False,
+        "pool": reserved.get("pool"),
+        "pool_matches_reservation": True,
+        "dex_fee_lamports": dex,
+        "dex_fee_source": "reserved_pool_state",
+        "dex_fee_remeasured": False,
+    }
+
+
+def rent_ledger(decoded, meta, mint: str) -> dict:
+    """Separate the wrapped-SOL close from the mint account that an exit leaves open.
+
+    A wrapped-SOL account that is absent before the transaction and absent after
+    a close back to the wallet has net rent zero for that account only. The mint
+    associated-token account is a different account. A zero written without a
+    close, and a preexisting account, are not a refund.
+    """
+    wallet = phantom_transport.REQUIRED_WALLET
+    wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    canonical = solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM)
+    route = _route(decoded)
+    source = None if route is None else route["keys"][1]
+    created, closed = _account_actions(decoded)
+    return {
+        "wsol": _account_row(decoded, meta, wsol, "wsol", created, closed, wallet),
+        "mint_ata": _account_row(decoded, meta, canonical, "mint_ata", created, closed, wallet),
+        "position_account": _account_row(decoded, meta, source, "position_account", created, closed, wallet),
+        "mint_ata_is_position_account": source == canonical,
+    }
+
+
+def match_refund(recorded: dict, signature: str, pulled: dict) -> dict:
+    """A refund is the recorded account reaching zero and that exact lamport count arriving in the wallet."""
+    refused = {"ok": False, "holds": True, "resend": False, "refunded": False, "live_ready": False, "send": False}
+    if not isinstance(recorded, dict) or recorded.get("preexisting") is True:
+        return refused | {"reason": "preexisting_account"}
+    rent = recorded.get("rent_lamports")
+    account = recorded.get("account")
+    if not isinstance(account, str) or isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0:
+        return refused | {"reason": "deposit_unobserved"}
+    if not isinstance(pulled, dict) or pulled.get("ok") is not True:
+        return refused | {"reason": pulled.get("reason") if isinstance(pulled, dict) else "receipt_unknown"}
+    try:
+        landed = solana_tx.first_signature(pulled["transaction"])
+        decoded = solana_tx.decode_transaction(base64.b64decode(pulled["transaction"], validate=True))
+    except Exception:
+        return refused | {"reason": "receipt_unsigned"}
+    if landed != signature:
+        return refused | {"reason": "signature_mismatch"}
+    created, closed = _account_actions(decoded)
+    if closed.get(account) != phantom_transport.REQUIRED_WALLET:
+        return refused | {"reason": "refund_not_to_wallet"}
+    if account in created:
+        return refused | {"reason": "refund_balance"}
+    balances = _lamports(decoded, pulled.get("meta"), account)
+    wallet = _lamports(decoded, pulled.get("meta"), phantom_transport.REQUIRED_WALLET)
+    fee = pulled["meta"].get("fee") if isinstance(pulled.get("meta"), dict) else None
+    if balances is None or wallet is None or isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
+        return refused | {"reason": "refund_balance"}
+    if balances[0] != rent or balances[1] != 0 or wallet[1] - wallet[0] != rent - fee:
+        return refused | {"reason": "refund_balance"}
+    meta = pulled["meta"]
+    keys = decoded.static_keys
+    for index, key in enumerate(keys):
+        if key in {account, phantom_transport.REQUIRED_WALLET}:
+            continue
+        if meta["preBalances"][index] != meta["postBalances"][index]:
+            return refused | {"reason": "refund_balance"}
+    return {
+        "ok": True,
+        "reason": None,
+        "refunded": True,
+        "holds": False,
+        "resend": False,
+        "account": account,
+        "rent_lamports": rent,
+        "wallet": phantom_transport.REQUIRED_WALLET,
+        "slot": pulled["slot"],
+        "signature": signature,
+        "send": False,
+        "live_ready": False,
+    }
+
+
+def _account_actions(decoded) -> tuple[dict, dict]:
+    wallet = phantom_transport.REQUIRED_WALLET
+    created = {}
+    closed = {}
+    for instruction in decoded.instructions:
+        program = decoded.static_keys[instruction.program_index]
+        keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        data = bytes(instruction.data)
+        if program == solana_tx.ASSOCIATED_TOKEN and data == bytes([1]) and len(keys) == 6:
+            payer, ata, owner, created_mint, system, token_program = keys
+            if payer == wallet and owner == wallet and system == solana_tx.SYSTEM_PROGRAM and token_program == solana_tx.TOKEN_PROGRAM:
+                created[ata] = {"funder": payer, "mint": created_mint}
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and len(keys) == 3:
+            account, destination, authority = keys
+            if authority == wallet:
+                closed[account] = destination
+    return created, closed
+
+
+def _lamports(decoded, meta, account: str):
+    if not isinstance(account, str) or account not in decoded.static_keys or not isinstance(meta, dict):
+        return None
+    pre = meta.get("preBalances")
+    post = meta.get("postBalances")
+    if not isinstance(pre, list) or not isinstance(post, list) or len(pre) != len(decoded.static_keys) or len(post) != len(pre):
+        return None
+    index = decoded.static_keys.index(account)
+    before, after = pre[index], post[index]
+    if isinstance(before, bool) or isinstance(after, bool) or not isinstance(before, int) or not isinstance(after, int):
+        return None
+    if before < 0 or after < 0:
+        return None
+    return before, after
+
+
+def _account_row(decoded, meta, account, kind: str, created: dict, closed: dict, wallet: str) -> dict:
+    blank = {
+        "account": account,
+        "kind": kind,
+        "observed": False,
+        "pre_lamports": None,
+        "post_lamports": None,
+        "rent_lamports": None,
+        "created_in_message": False,
+        "closed_in_message": False,
+        "close_destination": None,
+        "preexisting": None,
+        "bot_funded": None,
+        "funder": None,
+        "provenance": "unobserved",
+        "refund_proven": False,
+        "net_proven": False,
+        "net_lamports": None,
+        "user_account_closed": False,
+    }
+    if not isinstance(account, str):
+        return blank
+    balances = _lamports(decoded, meta, account)
+    if balances is None:
+        return blank
+    pre, post = balances
+    create = created.get(account)
+    destination = closed.get(account)
+    closed_here = account in closed
+    preexisting = pre > 0 and create is None
+    bot_funded = create is not None and pre == 0
+    net_proven = kind == "wsol" and pre == 0 and post == 0 and destination == wallet
+    if net_proven and create is not None:
+        provenance = "created_and_closed_same_transaction"
+    elif net_proven:
+        provenance = "closed_empty_or_created_inside_transaction"
+    elif preexisting:
+        provenance = "preexisting"
+    elif bot_funded and post > 0:
+        provenance = "bot_created_this_transaction"
+    elif pre == 0 and post > 0:
+        provenance = "funded_funder_unproven"
+    elif pre == 0 and post == 0 and not closed_here:
+        provenance = "lamports_zero_without_close"
+    elif closed_here and post == 0 and pre > 0:
+        provenance = "closed_to_wallet" if destination == wallet else "closed_elsewhere"
+    else:
+        provenance = "unproven"
+    rent = post if post > 0 else None
+    return {
+        "account": account,
+        "kind": kind,
+        "observed": True,
+        "pre_lamports": pre,
+        "post_lamports": post,
+        "rent_lamports": 0 if net_proven else rent,
+        "created_in_message": create is not None,
+        "closed_in_message": closed_here,
+        "close_destination": destination,
+        "preexisting": preexisting,
+        "bot_funded": bot_funded,
+        "funder": wallet if bot_funded else ("preexisting" if preexisting else None),
+        "provenance": provenance,
+        "refund_proven": False,
+        "net_proven": net_proven,
+        "net_lamports": 0 if net_proven else None,
+        "user_account_closed": preexisting and closed_here,
+    }
 
 
 def _route(decoded) -> dict | None:

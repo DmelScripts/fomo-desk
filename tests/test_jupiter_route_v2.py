@@ -106,7 +106,7 @@ def _canonical() -> bytes:
     )
 
 
-def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None, signers: int = 1) -> str:
+def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None, signers: int = 1, fund_mint: str | None = None) -> str:
     ordered = []
     def add(pubkey: str) -> None:
         if pubkey not in ordered:
@@ -136,10 +136,14 @@ def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000
     limit_ix = (budget, [], bytes([2]) + limit.to_bytes(4, "little"))
     price_ix = (budget, [], bytes([3]) + price.to_bytes(8, "little"))
     head = [price_ix] if omit_limit else [limit_ix, price_ix]
+    mint_create = None
+    if fund_mint is not None:
+        mint_ata = solana_tx.associated_token_address(WALLET, fund_mint, solana_tx.TOKEN_PROGRAM)
+        mint_create = (index[solana_tx.ASSOCIATED_TOKEN], [index[WALLET], index[mint_ata], index[WALLET], index[fund_mint], index[solana_tx.SYSTEM_PROGRAM], index[solana_tx.TOKEN_PROGRAM]], bytes([1]))
     if side == "buy":
         instructions = head + [create, transfer, sync, swap_ix, close]
     else:
-        instructions = head + [swap_ix, close]
+        instructions = head + ([mint_create] if mint_create is not None else []) + [swap_ix, close]
     if extra_transfer is not None:
         if extra_transfer not in index:
             raise AssertionError("extra")
