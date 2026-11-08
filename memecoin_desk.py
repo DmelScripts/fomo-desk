@@ -715,7 +715,7 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
     network = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
     if dex is None or network.get("ok") is not True:
         return _note(row, "executor", "exit_dimension" if network.get("ok") is True else network.get("reason"))
-    fee_usd = pyth_sponsored.lamports_usd(dex + network["network_lamports"], sol)
+    fee_usd = pyth_sponsored.lamports_usd(dex + network["requested_priority_lamports"] + jupiter_route_v2.BASE_FEE_LAMPORTS, sol)
     exposure = pyth_sponsored.lamports_usd(route["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT, sol)
     if fee_usd is None or exposure is None:
         return _note(row, "executor", "usd_source_unbound")
@@ -753,7 +753,9 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         "account_keys": list(decoded.static_keys),
         "dex_fee_lamports": dex,
         "dex_fee_counted_in_input": True,
-        "network_lamports": network["network_lamports"],
+        "network_lamports": network["requested_priority_lamports"] + jupiter_route_v2.BASE_FEE_LAMPORTS,
+        "network_fee_proven": False,
+        "base_fee_proven": False,
         "network_fee_added_once": True,
         "reserved_fee_usd": format(fee_usd, "f"),
         "exposure_usd": format(exposure, "f"),
@@ -1070,7 +1072,7 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
     network = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
     if dex_lamports is None or notional is None or network.get("ok") is not True:
         return _note(row, "risk", "exit_dimension" if network.get("ok") is True else network.get("reason"))
-    fee_usd = pyth_sponsored.lamports_usd(dex_lamports + network["network_lamports"], sol)
+    fee_usd = pyth_sponsored.lamports_usd(dex_lamports + network["requested_priority_lamports"] + jupiter_route_v2.BASE_FEE_LAMPORTS, sol)
     exposure = pyth_sponsored.lamports_usd(notional, sol)
     if fee_usd is None or exposure is None:
         return _note(row, "risk", "usd_source_unbound")
@@ -1134,7 +1136,9 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "quoted_out_amount": parsed.get("quoted_out_amount"),
             "amm_est_out": est,
             "dex_fee_lamports": dex_lamports,
-            "network_lamports": network["network_lamports"],
+            "network_lamports": network["requested_priority_lamports"] + jupiter_route_v2.BASE_FEE_LAMPORTS,
+            "network_fee_proven": False,
+            "base_fee_proven": False,
             "reserved_fee_usd": format(fee_usd, "f"),
             "sol_price": sol.get("price"),
             "sol_conf": sol.get("conf"),

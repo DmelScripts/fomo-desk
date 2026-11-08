@@ -374,37 +374,62 @@ def _wsol_amount(record) -> int | None:
 
 
 def network_fee(instructions: list[bytes], signatures: int = 1) -> dict:
-    """Priority fee from the two compute-budget instructions, plus one signature."""
-    limit = None
-    price = None
+    """Requested compute-budget fields. Not an observed network fee.
+
+    Solana's published formula for a legacy or v0 message is
+    ceil(requested_cu_limit * micro_lamports_per_cu / 1_000_000). It uses the
+    requested limit, not units consumed. The base fee is
+    signature_count * lamports_per_signature at execution, and that rate is
+    not in the message. Neither figure is getFeeForMessage or a receipt.
+    """
+    refused = {
+        "ok": False, "network_fee_proven": False, "base_fee_proven": False,
+        "priority_fee_observed": False, "priority_uses_consumed_units": False,
+        "requested_priority_formula": "ceil(requested_cu_limit * micro_lamports_per_cu / 1000000)",
+    }
     if not isinstance(instructions, list):
-        return {"ok": False, "reason": "compute_budget", "network_fee_proven": False}
+        return refused | {"reason": "compute_budget"}
+    limits = []
+    prices = []
     for raw in instructions:
         if not isinstance(raw, (bytes, bytearray)) or not raw:
-            return {"ok": False, "reason": "compute_budget", "network_fee_proven": False}
-        tag = raw[0]
-        if tag == 2 and len(raw) == 5:
-            limit = int.from_bytes(raw[1:5], "little")
-        elif tag == 3 and len(raw) == 9:
-            price = int.from_bytes(raw[1:9], "little")
+            return refused | {"reason": "compute_budget"}
+        if raw[0] == 2 and len(raw) == 5:
+            limits.append(int.from_bytes(raw[1:5], "little"))
+        elif raw[0] == 3 and len(raw) == 9:
+            prices.append(int.from_bytes(raw[1:9], "little"))
         else:
-            return {"ok": False, "reason": "compute_budget", "network_fee_proven": False}
-    if limit is None or price is None or limit <= 0:
-        return {"ok": False, "reason": "compute_unit_limit_missing", "network_fee_proven": False}
+            return refused | {"reason": "compute_budget"}
+    if len(limits) == 0:
+        return refused | {"reason": "compute_unit_limit_missing"}
+    if len(prices) == 0:
+        return refused | {"reason": "compute_unit_price_missing"}
+    if len(limits) != 1 or len(prices) != 1:
+        return refused | {"reason": "compute_budget_duplicate"}
+    limit = limits[0]
+    price = prices[0]
+    if limit <= 0 or limit > 1_400_000:
+        return refused | {"reason": "compute_unit_limit_missing"}
     if isinstance(signatures, bool) or not isinstance(signatures, int) or signatures < 1:
-        return {"ok": False, "reason": "extra_signer", "network_fee_proven": False}
-    priority = (price * limit + 999_999) // 1_000_000
-    base = BASE_FEE_LAMPORTS * signatures
+        return refused | {"reason": "extra_signer"}
+    requested = (price * limit + 999_999) // 1_000_000
     return {
         "ok": True,
         "reason": None,
-        "network_fee_proven": True,
+        "network_fee_proven": False,
+        "base_fee_proven": False,
+        "base_fee_source": "unobserved",
+        "priority_fee_observed": False,
+        "priority_uses_consumed_units": False,
+        "requested_priority_formula": "ceil(requested_cu_limit * micro_lamports_per_cu / 1000000)",
+        "requested_compute_unit_limit": limit,
+        "requested_micro_lamports_per_cu": price,
+        "requested_priority_lamports": requested,
         "compute_unit_limit": limit,
         "micro_lamports_per_cu": price,
-        "priority_lamports": priority,
-        "base_lamports": base,
+        "priority_lamports": requested,
         "signatures": signatures,
-        "network_lamports": priority + base,
+        "network_lamports": requested,
     }
 
 
@@ -765,7 +790,7 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
     prices = pyth_sponsored.public_fetch(moment) if price_transport is None else pyth_sponsored.read_accounts(price_transport, moment)
     sol = prices.get("sol") if isinstance(prices, dict) else None
     if not isinstance(sol, dict) or prices.get("sol_used") is not True or sol.get("fresh") is not True:
-        return result | {"reason": prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "pool_priced_sol": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": True}
+        return result | {"reason": prices.get("reason") if isinstance(prices, dict) and prices.get("reason") else "usd_source_unbound", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "pool_priced_sol": False, "min_out": parsed["min_out"], "min_out_proven": True, "dex_fee_proven": True, "network_fee_proven": False}
     if side == "buy":
         dex_lamports = fee
         notional = parsed["in_amount"] + solana_tx.TOKEN_ACCOUNT_RENT * 2
@@ -783,11 +808,11 @@ def decode(accounts: list[dict], data: bytes, *, side: str, mint: str, account_d
         result["token_raw_counted_as_lamports"] = False
         result["rent_added_to_token_raw"] = False
     result["dex_fee_lamports"] = dex_lamports
-    ceiling = pyth_sponsored.lamports_usd(dex_lamports + priced["network_lamports"], sol)
+    ceiling = pyth_sponsored.lamports_usd(dex_lamports + priced["requested_priority_lamports"] + BASE_FEE_LAMPORTS, sol)
     if ceiling is None:
         return result | {"reason": "usd_unpriced", "usd_live": False, "usd_origin": "sol_usd", "exposure_usd": None, "min_out": parsed["min_out"]}
     result["combined_fee_usd"] = format(ceiling, "f")
-    result["combined_fee_usd_proven"] = True
+    result["combined_fee_usd_proven"] = False
     result["usd_live"] = True
     result["usd_origin"] = "sol_usd"
     result["pool_priced_sol"] = False

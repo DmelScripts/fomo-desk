@@ -604,7 +604,11 @@ def _preflight_report(**extra) -> dict:
         "fee_usd_proven": False, "fee_lamports_match": False, "fee_composition_proven": False,
         "rent_bound_proven": False, "rent_unproven": True, "ticket_limit_proven": False,
         "account_validated": False, "observed_lamport_delta": None,
-        "network_fee_arithmetic_match": False, "rent_constant_arithmetic_match": False,
+        "network_fee_arithmetic_match": False, "requested_priority_arithmetic_match": False,
+        "rent_constant_arithmetic_match": False, "requested_compute_unit_limit": None,
+        "requested_micro_lamports_per_cu": None, "requested_priority_lamports": None,
+        "requested_priority_formula": None, "priority_fee_observed": False,
+        "priority_uses_consumed_units": False, "base_fee_proven": False,
         "instruction_slippage_within_cap": False, "instruction_slippage_bps": None,
         "quoted_out_amount": None, "candidate_min_out": None, "api_sample_min_out": None,
         "min_out_bound_proven": False, "program_rounding_proven": False,
@@ -716,31 +720,46 @@ def _exact_message_economics(decoded) -> dict:
         "allocation_proven": False, "rent_bound_proven": False,
         "lookup_unresolved": False, "instruction_unproven": True,
         "economic_reason": "instruction_unproven",
+        "requested_compute_unit_limit": None, "requested_micro_lamports_per_cu": None,
+        "requested_priority_lamports": None, "requested_priority_formula": None,
+        "priority_fee_observed": False, "priority_uses_consumed_units": False,
+        "base_fee_proven": False,
     }
     if getattr(decoded, "lookups", None):
         return blank | {"lookup_unresolved": True, "economic_reason": "lookup_unresolved"}
-    known = set(solana_tx.ALLOWED_PROGRAMS) | {solana_jupiter.PROGRAM_ID}
-    jupiter = []
-    compute = []
+    routes = []
+    limits = []
+    prices = []
     for item in decoded.instructions:
         try:
             program = decoded.static_keys[item.program_index]
         except (IndexError, TypeError):
-            return blank
-        if program not in known:
-            return blank
+            return blank | {"economic_reason": "instruction_unsupported"}
+        data = bytes(item.data)
         if program == solana_jupiter.PROGRAM_ID:
-            jupiter.append(item)
-        elif program == solana_tx.COMPUTE_BUDGET:
-            compute.append(bytes(item.data))
-    if len(jupiter) != 1:
-        return blank
-    priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
-    network_ok = priced.get("ok") is True and priced.get("network_fee_proven") is True
-    parsed = jupiter_route_v2.parse(bytes(jupiter[0].data))
+            routes.append(data)
+        elif program == solana_tx.COMPUTE_BUDGET and len(data) == 5 and data[0] == 2:
+            limits.append(data)
+        elif program == solana_tx.COMPUTE_BUDGET and len(data) == 9 and data[0] == 3:
+            prices.append(data)
+        else:
+            return blank | {"economic_reason": "instruction_unsupported"}
+    if len(routes) != 1 or len(limits) != 1 or len(prices) != 1:
+        return blank | {"economic_reason": "instruction_unsupported"}
+    priced = jupiter_route_v2.network_fee(limits + prices, decoded.required_signatures)
+    if priced.get("ok") is not True:
+        return blank | {"economic_reason": priced.get("reason") or "instruction_unsupported"}
+    parsed = jupiter_route_v2.parse(routes[0])
     found = blank | {
-        "network_fee_instruction_proven": network_ok,
-        "network_lamports_instruction": priced.get("network_lamports") if network_ok else None,
+        "network_fee_instruction_proven": False,
+        "network_lamports_instruction": None,
+        "base_fee_proven": False,
+        "priority_fee_observed": False,
+        "priority_uses_consumed_units": False,
+        "requested_priority_formula": priced.get("requested_priority_formula"),
+        "requested_compute_unit_limit": priced.get("requested_compute_unit_limit"),
+        "requested_micro_lamports_per_cu": priced.get("requested_micro_lamports_per_cu"),
+        "requested_priority_lamports": priced.get("requested_priority_lamports"),
     }
     if parsed.get("ok") is not True or parsed.get("hop") != "Whirlpool" or parsed.get("bytes_consumed") is not True:
         return found | {"economic_reason": parsed.get("reason") or "instruction_unproven"}
@@ -813,7 +832,7 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     pre = _account_lamports(transport({"method": "getAccountInfo", "account": payer, "purpose": "fee_payer"}), tip)
     compute = [bytes(item.data) for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
     priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
-    network = priced.get("network_lamports") if priced.get("ok") is True else None
+    requested = priced.get("requested_priority_lamports") if priced.get("ok") is True else None
     response = transport({
         "method": "simulateTransaction",
         "transaction": encoded,
@@ -840,13 +859,13 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
     post = _system_account_lamports(post_value)
     account_ok = pre is not None and post is not None
     observed = None
-    network_match = False
+    priority_match = False
     rent_constant = False
-    if account_ok and isinstance(network, int) and network >= 0:
+    if account_ok and isinstance(requested, int) and requested >= 0:
         observed = pre - post
-        if observed == network:
-            network_match = True
-        elif observed == network + solana_tx.TOKEN_ACCOUNT_RENT:
+        if observed == requested:
+            priority_match = True
+        elif observed == requested + solana_tx.TOKEN_ACCOUNT_RENT:
             rent_constant = True
     # A fee-payer delta still mixes the swap, wrapped SOL, rent, and any refund.
     # Matching the network fee, or that fee plus the constant token-account rent,
@@ -861,7 +880,8 @@ def preflight_reserved(case_id: str, message_sha256: str, transport, now: float)
         attempted=True, simulate=True, simulation_clear=True, preflight_ready=False,
         reason=reason,
         account_validated=account_ok, observed_lamport_delta=observed,
-        network_fee_arithmetic_match=network_match, rent_constant_arithmetic_match=rent_constant,
+        network_fee_arithmetic_match=False, requested_priority_arithmetic_match=priority_match,
+        rent_constant_arithmetic_match=rent_constant,
         fee_lamports_match=False, fee_composition_proven=False, rent_unproven=True, fee_usd_proven=False,
         case_id=case_id, message_sha256=message_sha256, side=proof["side"], blockhash=proof["blockhash"],
         context_slot=parsed["slot"], lookups_resolved=False, signature_validated=False,
