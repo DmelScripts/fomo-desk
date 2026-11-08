@@ -39,12 +39,21 @@ def pull_response(response: dict) -> dict:
     meta = result.get("meta")
     if not isinstance(meta, dict):
         return refused | {"reason": "receipt_unknown"}
-    if meta.get("err") is not None:
-        return refused | {"reason": "receipt_failed"}
     encoded = result.get("transaction")
+    slot = result.get("slot")
+    if meta.get("err") is not None:
+        failed = refused | {
+            "reason": "receipt_failed",
+            "meta": meta,
+            "network_fee_lamports": meta.get("fee") if isinstance(meta.get("fee"), int) and not isinstance(meta.get("fee"), bool) else None,
+        }
+        if isinstance(encoded, list) and encoded and isinstance(encoded[0], str):
+            failed["transaction"] = encoded[0]
+        if isinstance(slot, int) and not isinstance(slot, bool):
+            failed["slot"] = slot
+        return failed
     if not isinstance(encoded, list) or not encoded or not isinstance(encoded[0], str):
         return refused | {"reason": "receipt_unknown"}
-    slot = result.get("slot")
     if isinstance(slot, bool) or not isinstance(slot, int):
         return refused | {"reason": "slot_unproven"}
     block_time = result.get("blockTime")
@@ -201,11 +210,13 @@ def plan_slices(raw: int, sqrt_price: int, token_is_a: bool, sol_leg: dict, cap:
 def _provenance(reserved: dict, decoded, landed_slot: int, route: dict) -> dict:
     """The receipt matches the reserved message. It does not remeasure the pool fee.
 
-    The snapshot account slot has to be at or before the landed slot, and the
-    landed slot has to fall inside the 150-slot recent-blockhash window measured
-    from that snapshot. The message hash already covers the blockhash bytes.
-    This does not call isBlockhashValid, and a missing block time is not a clock
-    proof. The DEX fee stays the figure stored from the snapshot pool state.
+    The snapshot account slot has to be at or before the landed slot. A landed
+    slot more than 150 slots after that snapshot is refused as a conservative
+    slot-distance guard. That distance is not a block height, and skipped slots
+    mean it is not proof the recent blockhash was still valid. The message hash
+    covers the blockhash bytes. This does not call isBlockhashValid or
+    getBlockHeight. A missing block time is not a fresh quote. The DEX fee stays
+    the figure stored from the snapshot pool state.
     """
     import jupiter_route_v2
     snapshot_slot = reserved.get("snapshot_slot")
@@ -218,7 +229,16 @@ def _provenance(reserved: dict, decoded, landed_slot: int, route: dict) -> dict:
         return {"ok": False, "reason": "snapshot_after_landed", "snapshot_slot": snapshot_slot, "slot": landed_slot}
     distance = landed_slot - snapshot_slot
     if distance > jupiter_route_v2.SLOT_LAG_MAX:
-        return {"ok": False, "reason": "blockhash_window", "slot_distance": distance, "blockhash_window_slots": jupiter_route_v2.SLOT_LAG_MAX}
+        return {
+            "ok": False,
+            "reason": "slot_distance_guard",
+            "slot_distance": distance,
+            "slot_distance_cap": jupiter_route_v2.SLOT_LAG_MAX,
+            "slot_distance_is_blockhash_proof": False,
+            "blockhash_expiry_needs_block_height": True,
+            "quote_expiry_proven": False,
+            "quote_clock_proven": False,
+        }
     if not isinstance(reserved.get("blockhash"), str) or reserved.get("blockhash") == "":
         return {"ok": False, "reason": "blockhash_unbound"}
     if decoded.blockhash != reserved["blockhash"]:
@@ -242,14 +262,149 @@ def _provenance(reserved: dict, decoded, landed_slot: int, route: dict) -> dict:
         "blockhash": decoded.blockhash,
         "blockhash_matches_reservation": True,
         "blockhash_rechecked": False,
-        "blockhash_window_slots": jupiter_route_v2.SLOT_LAG_MAX,
+        "slot_distance_cap": jupiter_route_v2.SLOT_LAG_MAX,
+        "slot_distance_is_blockhash_proof": False,
+        "blockhash_expiry_needs_block_height": True,
         "quote_clock_proven": False,
+        "quote_expiry_proven": False,
         "pool": reserved.get("pool"),
         "pool_matches_reservation": True,
         "dex_fee_lamports": dex,
         "dex_fee_source": "reserved_pool_state",
         "dex_fee_remeasured": False,
     }
+
+
+def quote_clock(block_time, block_height, last_valid_block_height) -> dict:
+    """Quote expiry. A slot distance is not a block height and is not this check.
+
+    Missing block time stays unproven. A block time without a block height does
+    not become a fresh quote. Nothing here invents either figure.
+    """
+    missing = {"quote_clock_proven": False, "quote_expiry_proven": False, "blockhash_proof": False}
+    if isinstance(block_time, bool) or not isinstance(block_time, int):
+        return missing | {"reason": "block_time_missing"}
+    if isinstance(block_height, bool) or not isinstance(block_height, int) or isinstance(last_valid_block_height, bool) or not isinstance(last_valid_block_height, int):
+        return missing | {"reason": "block_height_missing"}
+    if block_height > last_valid_block_height:
+        return {"quote_clock_proven": True, "quote_expiry_proven": False, "blockhash_proof": False, "reason": "blockhash_expired"}
+    return {"quote_clock_proven": True, "quote_expiry_proven": True, "blockhash_proof": False, "reason": None}
+
+
+def match_entry(reserved: dict, signature: str, pulled: dict) -> dict:
+    """A buy receipt is the reserved message, the token increase, and the lamports that actually left the wallet."""
+    refused = {"ok": False, "live_ready": False, "send": False, "sign": False, "holds": True, "resend": False, "proceeds": None}
+    if not isinstance(reserved, dict) or not isinstance(pulled, dict) or pulled.get("ok") is not True:
+        return refused | {"reason": pulled.get("reason") if isinstance(pulled, dict) else "receipt_unknown"}
+    try:
+        landed = solana_tx.first_signature(pulled["transaction"])
+        decoded = solana_tx.decode_transaction(base64.b64decode(pulled["transaction"], validate=True))
+        digest = hashlib.sha256(solana_tx.message_bytes(pulled["transaction"])).hexdigest()
+    except Exception:
+        return refused | {"reason": "receipt_unsigned"}
+    if landed != signature:
+        return refused | {"reason": "signature_mismatch"}
+    if digest != reserved.get("message_sha256"):
+        return refused | {"reason": "message_mismatch"}
+    if list(decoded.static_keys) != list(reserved.get("account_keys") or []):
+        return refused | {"reason": "account_index"}
+    route = _route(decoded)
+    if route is None or route["destination_mint"] != reserved.get("mint") or route["source_mint"] != solana_tx.NATIVE_MINT:
+        return refused | {"reason": "entry_mint"}
+    if route["in_amount"] != reserved.get("input_lamports"):
+        return refused | {"reason": "entry_amount"}
+    destination = route["keys"][2]
+    index = reserved.get("destination_index")
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(decoded.static_keys):
+        return refused | {"reason": "account_index"}
+    if destination != reserved.get("destination_account") or decoded.static_keys[index] != destination:
+        return refused | {"reason": "account_index"}
+    bound = _provenance(reserved, decoded, pulled["slot"], route)
+    if bound.get("ok") is not True:
+        return refused | {key: value for key, value in bound.items() if key != "ok"}
+    clock = quote_clock(pulled.get("block_time"), None, None)
+    rent = rent_ledger(decoded, pulled["meta"], reserved["mint"])
+    mint_row = rent.get("mint_ata") or {}
+    pre_lamports = mint_row.get("pre_lamports")
+    created, _closed = _account_actions(decoded)
+    received = _received(pulled["meta"], reserved["mint"], phantom_transport.REQUIRED_WALLET, created.get(destination) is not None, pre_lamports)
+    if received.get("ok") is not True:
+        return refused | {"reason": received.get("reason")}
+    if received["qty"] < int(reserved.get("min_out") or 0):
+        return refused | {"reason": "fill_below_min", "qty": received["qty"]}
+    fee = pulled["meta"].get("fee")
+    if isinstance(fee, bool) or not isinstance(fee, int) or fee < 0:
+        return refused | {"reason": "network_fee_missing"}
+    wallet = _lamports(decoded, pulled["meta"], phantom_transport.REQUIRED_WALLET)
+    if wallet is None or wallet[0] < wallet[1]:
+        return refused | {"reason": "cost_missing"}
+    spent = wallet[0] - wallet[1]
+    if mint_row.get("bot_funded") is True and isinstance(mint_row.get("rent_lamports"), int):
+        deposit = mint_row["rent_lamports"]
+    elif mint_row.get("preexisting") is True or mint_row.get("provenance") == "lamports_zero_without_close":
+        deposit = 0
+    elif mint_row.get("observed") is True and mint_row.get("post_lamports") == 0 and mint_row.get("pre_lamports") == 0:
+        deposit = 0
+    else:
+        return refused | {"reason": "deposit_unobserved"}
+    wsol = rent.get("wsol") or {}
+    if wsol.get("net_proven") is not True:
+        return refused | {"reason": "rent_unproven"}
+    if spent != int(reserved["input_lamports"]) + fee + deposit:
+        return refused | {"reason": "cost_unsplit", "spent_lamports": spent}
+    return {
+        "ok": True,
+        "reason": None,
+        "signature": signature,
+        "slot": pulled["slot"],
+        "message_sha256": digest,
+        "qty": received["qty"],
+        "token_pre": received["pre"],
+        "token_pre_source": received["pre_source"],
+        "input_lamports": int(reserved["input_lamports"]),
+        "cost_basis_lamports": int(reserved["input_lamports"]) + fee,
+        "network_fee_lamports": fee,
+        "dex_fee_lamports": bound["dex_fee_lamports"],
+        "dex_fee_counted_in_input": True,
+        "network_fee_added_once": True,
+        "deposit_lamports": deposit,
+        "wallet_spent_lamports": spent,
+        "proceeds": None,
+        "rent": rent,
+        "quote_clock_proven": clock["quote_clock_proven"],
+        "quote_expiry_proven": clock["quote_expiry_proven"],
+        "quote_clock_reason": clock["reason"],
+        "holds": False,
+        "resend": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+        **{key: bound[key] for key in ("snapshot_slot", "snapshot_not_after_landed", "slot_distance", "slot_distance_cap", "slot_distance_is_blockhash_proof", "blockhash_expiry_needs_block_height", "dex_fee_source", "dex_fee_remeasured", "pool_matches_reservation")},
+    }
+
+
+def _received(meta, mint: str, owner: str, created: bool, pre_lamports) -> dict:
+    """Token increase. An explicit zero is zero. A missing row is zero only when the account was created from nothing."""
+    post_rows = [row for row in _rows(meta.get("postTokenBalances")) if isinstance(row, dict) and row.get("mint") == mint and row.get("owner") == owner]
+    pre_rows = [row for row in _rows(meta.get("preTokenBalances")) if isinstance(row, dict) and row.get("mint") == mint and row.get("owner") == owner]
+    post = _amount(post_rows, mint, owner)
+    if post is None or len(post_rows) != 1:
+        return {"ok": False, "reason": "token_delta_missing"}
+    if len(pre_rows) > 1:
+        return {"ok": False, "reason": "token_prebalance_unknown"}
+    if len(pre_rows) == 1:
+        pre = _amount(pre_rows, mint, owner)
+        if pre is None:
+            return {"ok": False, "reason": "token_prebalance_unknown"}
+        source = "explicit_zero" if pre == 0 else "explicit"
+    elif created is True and pre_lamports == 0:
+        pre = 0
+        source = "account_absent"
+    else:
+        return {"ok": False, "reason": "token_prebalance_unknown"}
+    if post < pre:
+        return {"ok": False, "reason": "token_delta"}
+    return {"ok": True, "qty": post - pre, "pre": pre, "pre_source": source}
 
 
 def rent_ledger(decoded, meta, mint: str) -> dict:
