@@ -619,6 +619,7 @@ def _preflight_report(**extra) -> dict:
         "network_fee_instruction_proven": False, "network_lamports_instruction": None,
         "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
         "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
+        "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": None,
         "combined_fee_usd_proven": False, "allocation_proven": False,
@@ -896,10 +897,13 @@ def _hop_pool(decoded) -> dict | None:
 def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     """Static Whirlpool fee rate on the reserved hop's pool account.
 
-    The ceiling is ceil(input * fee_rate / 1_000_000) in input-mint raw units.
-    It is a pretrade bound from the published static rate. An adaptive fee or a
-    Token-2022 transfer fee is not that amount, and nothing here is the fee a
-    landed swap charged.
+    programs/whirlpool/src/math/swap_math.rs compute_swap charges each step
+    separately. A step that reaches the next tick uses
+    ceil(amount_in * rate / (1_000_000 - rate)). A step that does not uses
+    amount_remaining - amount_in. Those amounts add across the loop. The
+    one-shot ceil(input * rate / 1_000_000) is recorded and is not that sum.
+    An adaptive fee or a Token-2022 transfer fee is a different amount. Nothing
+    here is the fee a landed swap charged.
     """
     import base64
     import jupiter_route_v2
@@ -908,6 +912,7 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     blank = {
         "dex_fee_proven": False, "dex_fee_rate_observed": False, "dex_fee_rate": None,
         "dex_fee_estimate_raw": None, "dex_fee_estimate_proven": False,
+        "dex_fee_one_shot_raw": None, "dex_fee_one_shot_is_bound": False,
         "dex_fee_charged_proven": False, "adaptive_fee_unsupported": False,
         "input_transfer_fee_unsupported": False, "pool_fee_reason": "pool_fee_unobserved",
     }
@@ -950,6 +955,8 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
         return blank | {"pool_fee_reason": "pool_account_missing"}
     if not isinstance(value, dict) or value.get("owner") != solana_whirlpool.PROGRAM_ID:
         return blank | {"pool_fee_reason": "pool_owner"}
+    if value.get("executable") is not False:
+        return blank | {"pool_fee_reason": "pool_executable"}
     raw = _decoded_account_data(value.get("data"))
     if raw is None or solana_whirlpool.pool_fields(raw) is None or solana_whirlpool.pool_state(raw) is None:
         return blank | {"pool_fee_reason": "pool_layout"}
@@ -966,16 +973,15 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     rate = state.get("fee_rate")
     if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0 or rate > 65535:
         return blank | {"pool_fee_reason": "pool_layout"}
-    observed = blank | {"dex_fee_rate_observed": True, "dex_fee_rate": rate, "dex_fee_charged_proven": False, "dex_fee_proven": False}
+    observed = blank | {"dex_fee_rate_observed": True, "dex_fee_rate": rate, "dex_fee_charged_proven": False, "dex_fee_proven": False, "dex_fee_estimate_proven": False, "dex_fee_one_shot_is_bound": False}
     if state.get("adaptive_fee") is True:
         return observed | {"adaptive_fee_unsupported": True, "pool_fee_reason": "adaptive_fee_unsupported"}
-    estimate = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
-    if estimate is None or estimate >= 2**64 or estimate > hop["in_amount"]:
-        return observed | {"pool_fee_reason": "pool_fee_overflow"}
+    one_shot = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
+    if one_shot is None or one_shot >= 2**64:
+        one_shot = None
     return observed | {
-        "dex_fee_estimate_raw": estimate,
-        "dex_fee_estimate_proven": True,
-        "pool_fee_reason": None,
+        "dex_fee_one_shot_raw": one_shot,
+        "pool_fee_reason": "pool_fee_step_bound_unproven",
     }
 
 

@@ -2008,7 +2008,14 @@ conn.close()
                     elif mode == "adaptive":
                         at = solana_whirlpool._TICK_SPACING + 2
                         raw[at] ^= 0xFF
-                    value = {"owner": owner, "data": [__import__("base64").b64encode(bytes(raw)).decode("ascii"), "base64"], "executable": False, "lamports": 1, "rentEpoch": 0}
+                    executable = False
+                    if mode == "executable_true":
+                        executable = True
+                    elif mode == "executable_type":
+                        executable = "false"
+                    value = {"owner": owner, "data": [__import__("base64").b64encode(bytes(raw)).decode("ascii"), "base64"], "lamports": 1, "rentEpoch": 0}
+                    if mode != "executable_missing":
+                        value["executable"] = executable
                 return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": value, "blockhash": echoed}, "blockhash": echoed}}
             if method == "getAccountInfo" and request.get("purpose") == "fee_payer":
                 shape = chain.get("fee_payer_shape")
@@ -2160,14 +2167,15 @@ conn.close()
         self.assertFalse(solana_whirlpool.pool_state(accounts[pool][1])["adaptive_fee"])
         self.assertTrue(entry_preflight["dex_fee_rate_observed"], entry_preflight)
         self.assertEqual(entry_preflight["dex_fee_rate"], entry_rate)
-        self.assertEqual(entry_preflight["dex_fee_estimate_raw"], jupiter_route_v2.whirlpool_fee(entry_route["in_amount"], entry_rate))
-        self.assertLessEqual(entry_preflight["dex_fee_estimate_raw"], entry_route["in_amount"])
-        self.assertTrue(entry_preflight["dex_fee_estimate_proven"], entry_preflight)
+        self.assertEqual(entry_preflight["dex_fee_one_shot_raw"], jupiter_route_v2.whirlpool_fee(entry_route["in_amount"], entry_rate))
+        self.assertFalse(entry_preflight["dex_fee_one_shot_is_bound"])
+        self.assertIsNone(entry_preflight["dex_fee_estimate_raw"])
+        self.assertFalse(entry_preflight["dex_fee_estimate_proven"], entry_preflight)
+        self.assertEqual(entry_preflight["pool_fee_reason"], "pool_fee_step_bound_unproven")
         self.assertFalse(entry_preflight["dex_fee_charged_proven"])
         self.assertFalse(entry_preflight["dex_fee_proven"])
         self.assertFalse(entry_preflight["adaptive_fee_unsupported"])
-        self.assertIsNone(entry_preflight["pool_fee_reason"])
-        self.assertNotIn("dex_fee_estimate_raw", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
+        self.assertNotIn("dex_fee_one_shot_raw", json.dumps(memecoin_desk.view(case_id)["snapshot"]))
         self.assertNotEqual(chain["fee_messages"][-1], db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])
         self.assertEqual(chain["fee_messages"][-1], __import__("base64").b64encode(solana_tx.message_bytes(db.query("SELECT message_b64 FROM memecoin_reservations WHERE case_id = ? AND side = 'entry'", (case_id,))[0]["message_b64"])).decode("ascii"))
         self.assertFalse(entry_preflight["min_out_bound_proven"])
@@ -2243,6 +2251,9 @@ conn.close()
             ("context", "pool_context_stale"),
             ("hash", "pool_hash_mismatch"),
             ("missing", "pool_account_missing"),
+            ("executable_true", "pool_executable"),
+            ("executable_missing", "pool_executable"),
+            ("executable_type", "pool_executable"),
         ):
             chain["pool_mode"] = mode
             pooled = desk_loop.preflight_reserved(case_id, entry_hash["message_sha256"], transport, WHEN)
@@ -2272,6 +2283,22 @@ conn.close()
         self.assertFalse(adaptive_fee["dex_fee_charged_proven"])
         self.assertEqual(adaptive_fee["pool_fee_reason"], "adaptive_fee_unsupported")
         self.assertIsNone(jupiter_route_v2.whirlpool_fee(entry_route["in_amount"], 1_000_001))
+        denominator = 1_000_000
+        rate = 3000
+
+        def next_tick_fee(amount_in):
+            return (amount_in * rate + (denominator - rate) - 1) // (denominator - rate)
+
+        def partial_fee(amount_remaining):
+            amount_in = amount_remaining * (denominator - rate) // denominator
+            return amount_remaining - amount_in
+
+        self.assertEqual(next_tick_fee(1), 1)
+        self.assertEqual(1 + next_tick_fee(1), 2)
+        self.assertGreater(next_tick_fee(1) * 2, jupiter_route_v2.whirlpool_fee(4, rate))
+        self.assertEqual(next_tick_fee(1) * 10, 10)
+        self.assertGreater(10, jupiter_route_v2.whirlpool_fee(20, rate))
+        self.assertGreater(partial_fee(334), jupiter_route_v2.whirlpool_fee(332, rate))
         attempt = db.query("SELECT id, blockhash, case_id FROM memecoin_preflight_attempts WHERE message_sha256 = ? ORDER BY id DESC LIMIT 1", (entry_hash["message_sha256"],))[0]
         self.assertEqual(attempt["case_id"], case_id)
         self.assertEqual(attempt["blockhash"], entry_hash["blockhash"])
@@ -3152,8 +3179,11 @@ conn.close()
         exit_route = __import__("memecoin_exit")._route(solana_tx.decode_transaction(__import__("base64").b64decode(db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (stored["message_sha256"],))[0]["message_b64"])))
         self.assertTrue(exit_preflight["dex_fee_rate_observed"], exit_preflight)
         self.assertEqual(exit_preflight["dex_fee_rate"], entry_rate)
-        self.assertEqual(exit_preflight["dex_fee_estimate_raw"], jupiter_route_v2.whirlpool_fee(exit_route["in_amount"], entry_rate))
-        self.assertTrue(exit_preflight["dex_fee_estimate_proven"], exit_preflight)
+        self.assertEqual(exit_preflight["dex_fee_one_shot_raw"], jupiter_route_v2.whirlpool_fee(exit_route["in_amount"], entry_rate))
+        self.assertFalse(exit_preflight["dex_fee_one_shot_is_bound"])
+        self.assertIsNone(exit_preflight["dex_fee_estimate_raw"])
+        self.assertFalse(exit_preflight["dex_fee_estimate_proven"], exit_preflight)
+        self.assertEqual(exit_preflight["pool_fee_reason"], "pool_fee_step_bound_unproven")
         self.assertFalse(exit_preflight["dex_fee_charged_proven"])
         self.assertFalse(exit_preflight["dex_fee_proven"])
         self.assertFalse(exit_preflight["fee_usd_proven"])
