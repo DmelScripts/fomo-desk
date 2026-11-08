@@ -59,12 +59,22 @@ def assess_order(body: dict) -> dict:
     base = _refused("order")
     if not isinstance(body, dict):
         return base | {"reason": "order_shape"}
+    height = _published_height(body.get("lastValidBlockHeight"))
+    expire_at = _published_time(body.get("expireAt"))
+    transaction_present = isinstance(body.get("transaction"), str) and body.get("transaction") != ""
+    transaction = body.get("transaction") if transaction_present else None
     base.update({
         "router": body.get("router") if isinstance(body.get("router"), str) else None,
+        "request_id": body.get("requestId") if isinstance(body.get("requestId"), str) else None,
+        "transaction_b64": transaction,
+        "last_valid_block_height": height,
+        "expire_at": expire_at,
+        "provider_expiry_field": "expireAt" if expire_at is not None else ("lastValidBlockHeight" if height is not None else None),
+        "provider_expiry_malformed": _expiry_malformed(body),
         "in_amount": body.get("inAmount") if isinstance(body.get("inAmount"), str) else None,
         "out_amount": body.get("outAmount") if isinstance(body.get("outAmount"), str) else None,
         "fee_bps": body.get("feeBps") if isinstance(body.get("feeBps"), int) and not isinstance(body.get("feeBps"), bool) else None,
-        "transaction_present": bool(body.get("transaction")),
+        "transaction_present": transaction_present,
         "reason": "transaction_not_decodable" if body.get("transaction") else "quote_is_not_an_instruction",
     })
     return base
@@ -114,6 +124,36 @@ def assess_build(body: dict) -> dict:
         "reason": parsed.get("reason") or ("hop_accounts_unpublished" if parsed.get("min_out_proven") else "route_v2_bytes"),
     })
     return base
+
+
+def _published_height(value):
+    """Jupiter publishes lastValidBlockHeight as a string. A slot is not this number."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _published_time(value):
+    """RFQ expireAt. Absent means the provider did not publish a quote timestamp."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _expiry_malformed(body: dict) -> bool:
+    if "lastValidBlockHeight" in body and body.get("lastValidBlockHeight") not in (None, "") and _published_height(body.get("lastValidBlockHeight")) is None:
+        return True
+    if "expireAt" in body and body.get("expireAt") not in (None, "") and _published_time(body.get("expireAt")) is None:
+        return True
+    return False
 
 
 def _refused(kind: str) -> dict:

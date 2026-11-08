@@ -625,7 +625,28 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
     slip = owner_slippage.check_route(parsed.get("slippage_bps"), parsed.get("min_out"), quoted.get("est_out"))
     if slip.get("ok") is not True:
         return _note(row, "executor", slip.get("reason") or "slippage_exceeds")
-    clock = memecoin_exit.quote_clock(None, None, None)
+    chain = getattr(snapshot, "server_chain", None)
+    if isinstance(chain, dict):
+        if chain.get("quote_expiry_proven") is not True or decoded.blockhash != chain.get("blockhash"):
+            reason = "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing")
+
+            def refuse(conn):
+                _ensure_conn(conn)
+                current = conn.execute("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (row["id"],)).fetchone()
+                fresh = json.loads(current["snapshot_json"]) if current is not None else {}
+                existing = fresh.get("entry_inflight") if isinstance(fresh.get("entry_inflight"), dict) else None
+                if isinstance(existing, dict) and existing.get("message_sha256") != digest:
+                    return {"ok": False, "reason": "entry_inflight", "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False, "live_ready": False}
+                return {"ok": False, "reason": reason, "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "message_sha256": None if existing is None else existing.get("message_sha256"), "send": False, "live_ready": False, "quote_expiry_proven": False}
+
+            return db.exclusive(refuse)
+        clock = {
+            "quote_clock_proven": True,
+            "quote_expiry_proven": True,
+            "reason": None,
+        }
+    else:
+        clock = memecoin_exit.quote_clock(None, None, None)
     dex = jupiter_route_v2.whirlpool_fee(route["in_amount"], state["fee_rate"])
     compute = [bytes(item.data) for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_tx.COMPUTE_BUDGET]
     network = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
@@ -682,9 +703,16 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
         "snapshot_tip_slot": snapshot.tip_slot,
         "snapshot_fetched_at": snapshot.fetched_at,
         "blockhash": decoded.blockhash,
+        "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
+        "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),
+        "expire_at": None if not isinstance(chain, dict) else chain.get("expire_at"),
+        "quote_observed_at": None if not isinstance(chain, dict) else chain.get("observed_at"),
+        "quote_expiry_source": None if not isinstance(chain, dict) else chain.get("quote_expiry_source"),
+        "provider_quote_expiry_published": isinstance(chain, dict) and chain.get("provider_quote_expiry_published") is True,
+        "internal_time_limit": None,
         "dex_fee_source": "reserved_pool_state",
         "dex_fee_remeasured": False,
-        "quote_expiry_rule": "slot_distance_guard_not_block_height",
+        "quote_expiry_rule": "getBlockHeight_le_lastValidBlockHeight" if isinstance(chain, dict) else "slot_distance_guard_not_block_height",
         "slot_distance_is_blockhash_proof": False,
         "quote_clock_proven": clock["quote_clock_proven"],
         "quote_expiry_proven": clock["quote_expiry_proven"],
@@ -998,8 +1026,13 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
         if current is None or current["stage"] not in {"filled", "partial", "exit_intent"}:
             return {"ok": False, "reason": "stage", "case_id": row["id"]}
         fresh = json.loads(current["snapshot_json"])
+        chain = getattr(snapshot, "server_chain", None)
+        if isinstance(chain, dict) and (chain.get("quote_expiry_proven") is not True or decoded.blockhash != chain.get("blockhash")):
+            if fresh.get("inflight"):
+                return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
+            return {"ok": False, "reason": "blockhash_mismatch" if decoded.blockhash != chain.get("blockhash") else (chain.get("reason") or "block_height_missing"), "case_id": row["id"], "holds": True, "resend": False, "rewritten": False, "send": False}
         if fresh.get("inflight"):
-            return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True}
+            return {"ok": False, "reason": "exit_inflight", "case_id": row["id"], "resend": False, "holds": True, "rewritten": False}
         remaining = fresh.get("remaining_raw")
         if not isinstance(remaining, int) or remaining < qty:
             return {"ok": False, "reason": "quantity", "case_id": row["id"]}
@@ -1024,12 +1057,19 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "snapshot_tip_slot": snapshot.tip_slot,
             "snapshot_fetched_at": snapshot.fetched_at,
             "blockhash": decoded.blockhash,
+            "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
+            "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),
+            "expire_at": None if not isinstance(chain, dict) else chain.get("expire_at"),
+            "quote_observed_at": None if not isinstance(chain, dict) else chain.get("observed_at"),
+            "quote_expiry_source": None if not isinstance(chain, dict) else chain.get("quote_expiry_source"),
+            "provider_quote_expiry_published": isinstance(chain, dict) and chain.get("provider_quote_expiry_published") is True,
+            "internal_time_limit": None,
             "dex_fee_source": "reserved_pool_state",
             "dex_fee_remeasured": False,
-            "quote_expiry_rule": "slot_distance_guard_not_block_height",
+            "quote_expiry_rule": "getBlockHeight_le_lastValidBlockHeight" if isinstance(chain, dict) else "slot_distance_guard_not_block_height",
             "slot_distance_is_blockhash_proof": False,
-            "quote_clock_proven": False,
-            "quote_expiry_proven": False,
+            "quote_clock_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
+            "quote_expiry_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
             "status": "reserved",
             "signature": None,
         }
@@ -1047,7 +1087,12 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "ok": True, "reason": None, "case_id": row["id"], "qty": qty, "message_sha256": digest,
             "instruction_slippage_bps": parsed.get("slippage_bps"), "quoted_out_amount": parsed.get("quoted_out_amount"),
             "min_out": route["min_out"], "amm_est_out": est,
-            "live_ready": False, "send": False, "resend": False,
+            "quote_clock_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
+            "quote_expiry_proven": isinstance(chain, dict) and chain.get("quote_expiry_proven") is True,
+            "blockhash": decoded.blockhash,
+            "last_valid_block_height": None if not isinstance(chain, dict) else chain.get("last_valid_block_height"),
+            "block_height": None if not isinstance(chain, dict) else chain.get("block_height"),
+            "live_ready": False, "send": False, "resend": False, "rewritten": False,
         }
 
     return db.exclusive(work)
@@ -2127,8 +2172,11 @@ def _reservation_view(case_id: str, reservation: dict, *, idempotent: bool) -> d
         "test_consent_is_owner_consent": False,
         "effectual_entry": False,
         "effectual_blocked_by": reservation.get("effectual_blocked_by"),
-        "quote_clock_proven": False,
-        "quote_expiry_proven": False,
+        "quote_clock_proven": reservation.get("quote_clock_proven") is True,
+        "quote_expiry_proven": reservation.get("quote_expiry_proven") is True,
+        "blockhash": reservation.get("blockhash"),
+        "last_valid_block_height": reservation.get("last_valid_block_height"),
+        "block_height": reservation.get("block_height"),
         "oracle_fresh": reservation.get("oracle_fresh") is True,
         "slot_distance_is_blockhash_proof": False,
         "send": False,

@@ -1408,3 +1408,324 @@ conn.close()
         self.assertEqual(db.query("SELECT cost_basis_lamports FROM memecoin_entry_receipts WHERE signature = 'entry-new'")[0]["cost_basis_lamports"], 21)
         with self.assertRaises(sqlite3.IntegrityError):
             db.execute("UPDATE memecoin_entry_receipts SET ledger_provenance = 'server' WHERE signature = 'entry-legacy'")
+
+    def test_the_server_loop_binds_quote_expiry_to_the_reserved_message(self):
+        import base64
+        import json
+        import threading
+        from tests.test_jupiter_route_v2 import WHEN, _metas, _pool, _prices, _route, _tx
+        import db
+        import jupiter_route_v2
+        import pyth_sponsored
+        import solana_inspect
+        import solana_whirlpool
+        import solana_whirlpool_quote
+        mint = solana_tx.b58encode(bytes([96]) * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        raw_pool = bytearray(accounts[values["pool"]][1])
+        config = b"\x45" * 32
+        raw_pool[8:40] = config
+        fields = solana_whirlpool.pool_fields(bytes(raw_pool))
+        seed = bytes(raw_pool[solana_whirlpool._TICK_SPACING + 2:solana_whirlpool._TICK_SPACING + 4])
+        derived, bump = solana_tx.find_program_address(
+            [b"whirlpool", config, solana_tx.b58decode(fields[0]), solana_tx.b58decode(fields[2]), seed],
+            solana_tx.b58decode(solana_whirlpool.PROGRAM_ID),
+        )
+        raw_pool[40] = bump
+        pool = solana_tx.b58encode(derived)
+        accounts.pop(values["pool"])
+        accounts[pool] = (solana_whirlpool.PROGRAM_ID, bytes(raw_pool))
+        for key in list(values["ticks"]):
+            accounts.pop(key, None)
+        state = solana_whirlpool.pool_state(bytes(raw_pool))
+        base = solana_whirlpool.start_tick_index(state["tick_current_index"], state["tick_spacing"])
+        step = solana_whirlpool.TICK_ARRAY_SIZE * state["tick_spacing"]
+        tick_addresses = []
+        for start in [base - i * step for i in range(3)] + [base + i * step for i in range(3)]:
+            address = solana_whirlpool.tick_array_address(pool, start)
+            accounts[address] = (solana_whirlpool.PROGRAM_ID, solana_whirlpool.reference_tick_array(pool, start))
+            tick_addresses.append(address)
+        values["ticks"] = tick_addresses[:3]
+        values["pool"] = pool
+        values["oracle"] = solana_whirlpool.oracle_address(pool)
+        for vault, token_mint in ((fields[1], fields[0]), (fields[3], fields[2])):
+            token = bytearray(solana_whirlpool.reference_token_account(token_mint, pool))
+            token[108] = 1
+            accounts[vault] = (solana_tx.TOKEN_PROGRAM, bytes(token))
+        accounts[solana_whirlpool.oracle_address(pool)] = (solana_whirlpool.PROGRAM_ID, solana_whirlpool.oracle_account(pool))
+        wallet = __import__("phantom_transport").REQUIRED_WALLET
+        accounts.pop(solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM), None)
+        accounts.pop(solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM), None)
+        chain = {
+            "genesis": solana_inspect.MAINNET_GENESIS,
+            "blockhash": solana_tx.b58encode(b"\x46" * 32),
+            "last_valid": 1_000_000,
+            "height": 999_000,
+            "malformed": False,
+            "publish_expiry": True,
+            "expire_at": None,
+            "side": "buy",
+        }
+        opened = memecoin_desk.scout({
+            "mint": mint, "source": "dexscreener", "fetched_at": WHEN,
+            "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
+            "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+        }, now=WHEN)
+        case_id = opened["case_id"]
+        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (case_id,))
+        previous = pyth_sponsored.sol_leg
+        pyth_sponsored.sol_leg = lambda now: {"fresh": True, "used": True, "price": 15_000_000_000, "conf": 1, "expo": -8}
+        try:
+            protected = memecoin_desk.protect(case_id, now=WHEN, rent_proof={"ok": True, "lamports": solana_tx.TOKEN_ACCOUNT_RENT, "count": 1, "slot": 2_000_000, "tip_slot": 2_000_028, "genesis": solana_inspect.MAINNET_GENESIS, "mint_program": solana_tx.TOKEN_PROGRAM})
+        finally:
+            pyth_sponsored.sol_leg = previous
+        self.assertEqual(protected["stage"], "protected", protected)
+        db.set_setting("memecoin_scheduler_authorized", "1", "test")
+        db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+
+        def message(side: str, amount: int, blockhash: str):
+            a_to_b = side == "buy"
+            starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
+            arrays = []
+            for start in starts:
+                parsed = solana_whirlpool.tick_array_state(accounts[solana_whirlpool.tick_array_address(pool, start)][1])
+                arrays.append({"start_tick_index": parsed["start_tick_index"], "ticks": parsed["ticks"]})
+            estimate = solana_whirlpool_quote.quote_exact_in(state, arrays, amount, a_to_b, 0, 0, 2_000_000)["token_est_out"]
+            declared = jupiter_route_v2.encoded_slippage(estimate)["slippage_bps"]
+            source = solana_tx.NATIVE_MINT if a_to_b else mint
+            dest = mint if a_to_b else solana_tx.NATIVE_MINT
+            saved_ticks = values["ticks"]
+            values["ticks"] = tick_addresses[:3] if a_to_b else tick_addresses[3:]
+            try:
+                built = _tx(_metas(source, dest, values), _route(estimate, declared, a_to_b, amount=amount), side=side, blockhash=blockhash)
+            finally:
+                values["ticks"] = saved_ticks
+            return built, declared, estimate
+
+        def transport(request):
+            method = request.get("method")
+            if request.get("kind") == "http":
+                url = request.get("url") or ""
+                if url.endswith("/token-boosts/latest/v1"):
+                    return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": mint}]}
+                if "/token-pairs/" in url:
+                    return {"status": 200, "body": [{
+                        "chainId": "solana", "dexId": "whirlpool", "pairAddress": pool,
+                        "baseToken": {"address": mint}, "priceUsd": "1", "marketCap": 1_000_000,
+                        "liquidity": {"usd": 250_000}, "pairCreatedAt": int((WHEN - 3600) * 1000),
+                        "priceChange": {"h1": 1},
+                    }]}
+                if "/swap/v2/order" in url:
+                    amount = int(url.split("amount=")[1].split("&")[0])
+                    side = "buy" if "outputMint=%s" % mint in url or url.split("outputMint=")[1].split("&")[0] == mint else "exit"
+                    if chain["side"] == "exit":
+                        side = "exit"
+                    tx, _declared, _estimate = message(side, amount if side == "exit" else 1_000_000, chain.get("message_blockhash") or chain["blockhash"])
+                    body = {"router": "metis", "inAmount": str(amount), "outAmount": "1", "transaction": None if chain.get("omit_tx") else tx}
+                    if chain["publish_expiry"] and not chain["malformed"]:
+                        body["lastValidBlockHeight"] = str(chain["last_valid"])
+                    if chain["malformed"]:
+                        body["lastValidBlockHeight"] = "soon"
+                    if chain["expire_at"] is not None:
+                        body["expireAt"] = str(chain["expire_at"])
+                    return {"status": 200, "body": body}
+                if "/swap/v2/build" in url:
+                    amount = int(url.split("amount=")[1].split("&")[0])
+                    declared = int(url.split("slippageBps=")[1].split("&")[0])
+                    output = url.split("outputMint=")[1].split("&")[0]
+                    a_to_b = output == mint
+                    starts = [base - i * step for i in range(3)] if a_to_b else [base + i * step for i in range(3)]
+                    arrays = []
+                    for start in starts:
+                        parsed = solana_whirlpool.tick_array_state(accounts[solana_whirlpool.tick_array_address(pool, start)][1])
+                        arrays.append({"start_tick_index": parsed["start_tick_index"], "ticks": parsed["ticks"]})
+                    estimate = solana_whirlpool_quote.quote_exact_in(state, arrays, amount, a_to_b, 0, 0, 2_000_000)["token_est_out"]
+                    data = _route(estimate, declared, a_to_b, amount=amount)
+                    return {"status": 200, "body": {"otherAmountThreshold": str(estimate), "routePlan": [], "swapInstruction": {
+                        "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                        "accounts": [],
+                        "data": base64.b64encode(data).decode("ascii"),
+                    }}}
+                return {"status": 200, "body": []}
+            if method == "getGenesisHash":
+                return {"status": 200, "body": {"result": chain["genesis"]}}
+            if method == "getLatestBlockhash":
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": {"blockhash": chain["blockhash"], "lastValidBlockHeight": chain["last_valid"]}}}}
+            if method == "getBlockHeight":
+                result = "soon" if chain["malformed"] else chain["height"]
+                return {"status": 200, "body": {"result": result}}
+            if method == "getSlot":
+                return {"status": 200, "body": {"result": 2_000_028}}
+            if method == "getMinimumBalanceForRentExemption":
+                return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
+            if method == "getAccountInfo":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}}
+            if method == "getMultipleAccounts":
+                keys = request.get("accounts") or []
+                if keys == [pyth_sponsored.SOL_ACCOUNT, pyth_sponsored.USDC_ACCOUNT]:
+                    return _prices()(request)
+                value = []
+                for key in keys:
+                    if key not in accounts:
+                        value.append(None)
+                        continue
+                    owner, blob = accounts[key]
+                    value.append({"owner": owner, "data": [base64.b64encode(blob).decode(), "base64"]})
+                return {"status": 200, "body": {"result": {"context": {"slot": 2_000_000}, "value": value}}}
+            raise AssertionError(method)
+
+        evidence = {"dex_id": "whirlpool", "pair_address": pool}
+        chain["omit_tx"] = True
+        missing = desk_loop._screen_quote(transport, WHEN, mint, evidence)
+        self.assertEqual(missing["reason"], None, missing)
+        self.assertFalse(missing["quote_expiry_proven"])
+        self.assertFalse(missing["reserved"])
+        self.assertEqual(missing["reserve_reason"], "provider_transaction_unpublished")
+        self.assertIsNone(missing["internal_time_limit"])
+        self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("entry_inflight"))
+        chain["omit_tx"] = False
+        chain["publish_expiry"] = False
+        unpublished = desk_loop._screen_quote(transport, WHEN, mint, evidence)
+        self.assertEqual(unpublished["reserve_reason"], "provider_expiry_unpublished")
+        self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("entry_inflight"))
+        chain["publish_expiry"] = True
+        chain["malformed"] = True
+        malformed = desk_loop._screen_quote(transport, WHEN, mint, evidence)
+        self.assertEqual(malformed["reserve_reason"], "block_height_malformed")
+        chain["malformed"] = False
+        chain["genesis"] = "not-mainnet"
+        wrong_genesis = desk_loop._screen_quote(transport, WHEN, mint, evidence)
+        self.assertEqual(wrong_genesis["reason"], "genesis")
+        self.assertFalse(wrong_genesis.get("reserved") is True)
+        chain["genesis"] = solana_inspect.MAINNET_GENESIS
+        chain["height"] = 1_000_001
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_expired")
+        chain["height"] = 999_000
+        saved_hash = chain["blockhash"]
+        chain["message_blockhash"] = solana_tx.b58encode(b"\x47" * 32)
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "blockhash_mismatch")
+        chain.pop("message_blockhash")
+        chain["expire_at"] = int(WHEN) - 10
+        self.assertEqual(desk_loop._screen_quote(transport, WHEN, mint, evidence)["reserve_reason"], "quote_expired")
+        chain["expire_at"] = None
+        self.assertIsNone(memecoin_desk.view(case_id)["snapshot"].get("entry_inflight"))
+        booked = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        quote = next(item["quote"] for item in booked["discovery"]["screened"] if item.get("mint") == mint)
+        self.assertTrue(quote["quote_expiry_proven"], quote)
+        self.assertTrue(quote["reserved"], quote)
+        self.assertFalse(quote["block_height_missing"])
+        self.assertEqual(quote["quote_expiry_source"], "getLatestBlockhash.lastValidBlockHeight")
+        self.assertIsNone(quote["internal_time_limit"])
+        self.assertFalse(quote["send"])
+        self.assertFalse(quote["sign"])
+        flight = memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]
+        self.assertEqual(flight["blockhash"], saved_hash)
+        self.assertEqual(flight["last_valid_block_height"], 1_000_000)
+        self.assertEqual(flight["block_height"], 999_000)
+        self.assertLessEqual(flight["instruction_slippage_bps"], 50)
+        self.assertIsNone(flight.get("resend"))
+        reserved_usd = memecoin_desk.view(case_id)["snapshot"]["reserved_usd"]
+        digest = flight["message_sha256"]
+        chain["height"] = 999_100
+        again = desk_loop._screen_quote(transport, WHEN + 5, mint, evidence)
+        self.assertEqual(again["reason"], "intent_inflight", again)
+        self.assertFalse(again.get("reserved") is True)
+        held = desk_loop.recheck_bound(case_id, transport, WHEN + 5)
+        self.assertTrue(held["holds"], held)
+        self.assertFalse(held["resend"])
+        self.assertFalse(held["rewritten"])
+        self.assertEqual(held["message_sha256"], digest)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        chain["height"] = 1_000_050
+        expired = desk_loop.recheck_bound(case_id, transport, WHEN + 40)
+        self.assertEqual(expired["reason"], "blockhash_expired")
+        self.assertTrue(expired["holds"])
+        self.assertFalse(expired["resend"])
+        self.assertFalse(expired["rewritten"])
+        self.assertEqual(expired["message_sha256"], digest)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        db.init_db()
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        import urllib.request
+        def urlopen(req, timeout=8):
+            payload = json.loads(req.data.decode())
+            if payload["method"] == "getGenesisHash":
+                body = {"jsonrpc": "2.0", "result": solana_inspect.MAINNET_GENESIS}
+            else:
+                body = {"jsonrpc": "2.0", "result": None}
+            class _Response:
+                status = 200
+                def read(self):
+                    return json.dumps(body).encode()
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+            return _Response()
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        unknown = memecoin_desk.confirm_entry(case_id, "sig-unknown", WHEN + 50)
+        self.assertEqual(unknown["reason"], "receipt_unconfirmed")
+        self.assertTrue(unknown["holds"])
+        self.assertFalse(unknown["resend"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        chain["height"] = 999_000
+        results = []
+
+        def once():
+            quoted = desk_loop._screen_quote(transport, WHEN + 60, mint, evidence)
+            results.append(quoted.get("reserve_reason") or quoted.get("reason"))
+
+        threads = [threading.Thread(target=once) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(results), 4, results)
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["entry_inflight"]["message_sha256"], digest)
+        snap = memecoin_desk.view(case_id)["snapshot"]
+        snap.pop("entry_inflight", None)
+        snap["remaining_raw"] = 1_000
+        snap["exit_intent"] = {"source": "server_pool_pyth", "live": True, "action": "stop"}
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'exit_intent', snapshot_json = ? WHERE id = ?",
+            (json.dumps(snap), case_id),
+        )
+        db.execute(
+            "INSERT INTO memecoin_entry_receipts (signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports, dex_fee_lamports, fee_usd, failed, ledger, pool, ledger_provenance) VALUES ('entry-bound', ?, ?, 1, 1000, 1000, 1, 1, '0.01', 0, 'live', ?, 'server')",
+            (case_id, digest, pool),
+        )
+        db.execute(
+            """
+            INSERT INTO memecoin_risk_intents (
+                id, case_id, ledger, ledger_provenance, entry_signature, action, pool, slot, mark_price_usd,
+                entry_price_usd, stop_price_usd, qty, basis_cost_lamports, basis_decimals, evidence_json, created_at
+            ) VALUES ('intent-bound', ?, 'live', 'server', 'entry-bound', 'stop', ?, 1, '0.90', '1', '0.94', 1000, 1000, 6, '{}', ?)
+            """,
+            (case_id, pool, WHEN),
+        )
+        chain["side"] = "exit"
+        chain["height"] = 999_000
+        chain["publish_expiry"] = True
+        chain["expire_at"] = None
+        chain["malformed"] = False
+        exited = desk_loop.run_supervised(transport, WHEN, rounds=1)
+        self.assertTrue(exited.get("discovery"), exited)
+        position = next(item for item in exited["discovery"]["positions"] if item.get("mint") == mint)
+        self.assertTrue(position["quote"]["quote_expiry_proven"], position)
+        self.assertTrue(position["quote"]["reserved"], position)
+        self.assertEqual(position["quote"]["pool"], pool)
+        self.assertLessEqual(position["quote"]["requested_slippage_bps"], 50)
+        self.assertFalse(position["quote"]["send"])
+        stored = memecoin_desk.view(case_id)["snapshot"]["inflight"]
+        self.assertEqual(stored["qty"], 1_000)
+        self.assertEqual(stored["pool"], pool)
+        self.assertEqual(stored["blockhash"], chain["blockhash"])
+        self.assertEqual(memecoin_desk.view(case_id)["snapshot"]["reserved_usd"], reserved_usd)
+        self.assertFalse(desk_loop.scheduler_status()["armed"])
