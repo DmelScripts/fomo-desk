@@ -7,6 +7,7 @@ from pathlib import Path
 
 import db
 import desk_loop
+import jupiter_route_v2
 import memecoin_desk
 import phantom_transport
 import pyth_sponsored
@@ -128,9 +129,9 @@ class FeeEstimateTests(unittest.TestCase):
 
         return transport
 
-    def _message(self, values, source, dest, tip, *, side="buy", amount=4):
+    def _message(self, values, source, dest, tip, *, side="buy", amount=4, quoted=100, slippage=50):
         return _tx(
-            _metas(source, dest, values), _route(100, 50, True, amount=amount),
+            _metas(source, dest, values), _route(quoted, slippage, True, amount=amount),
             limit=200_000, price=0, side=side, extra_transfer=TIP_ACCOUNT, tip_lamports=tip,
             blockhash=solana_tx.b58encode(b"\x44" * 32),
         )
@@ -205,6 +206,73 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertEqual(checked["estimated_fee_usd"], "0.05")
         self.assertNotEqual(checked["dex_fee_quote_raw"] + checked["network_lamports"], int(float(checked["estimated_fee_usd"]) * 100))
 
+    def test_supervised_retry_and_exit_booking_use_a_fresh_gate(self):
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        encoded = self._message(values, solana_tx.NATIVE_MINT, mint, 395_001)
+        self._store(encoded, values["pool"], "entry", "supervised-case")
+        reads = {"pool": 0}
+
+        def transport(request):
+            if request.get("method") == "getAccountInfo" and request.get("purpose") == "whirlpool_pool":
+                reads["pool"] += 1
+            if request.get("kind") == "http":
+                return {"status": 500, "body": None}
+            return self._transport(accounts)(request)
+
+        first = desk_loop.run_supervised(transport, NOW, rounds=1)
+        item = next(row for row in first["discovery"]["reservations"] if row["case_id"] == "supervised-case")
+        self.assertTrue(item["pre_sign"]["fee_estimate_blocked"], item["pre_sign"])
+        self.assertFalse(item["pre_sign"]["signer_reached"])
+        self.assertFalse(item["sign"])
+        self.assertFalse(item["pre_sign"]["sign"])
+        self.assertEqual(item["pre_sign"]["reason"], "fee_estimate_above_0.05")
+        self.assertGreaterEqual(reads["pool"], 1)
+        seen = reads["pool"]
+        accounts[values["pool"]] = (accounts[values["pool"]][0], bytearray(accounts[values["pool"]][1]))
+        accounts[values["pool"]][1][solana_whirlpool._TICK_CURRENT - 32:solana_whirlpool._TICK_CURRENT - 16] = (10**24).to_bytes(16, "little")
+        second = desk_loop.run_supervised(transport, NOW, rounds=1)
+        retry = next(row for row in second["discovery"]["reservations"] if row["case_id"] == "supervised-case")
+        self.assertGreater(reads["pool"], seen)
+        self.assertEqual(retry["pre_sign"]["fee_estimate"]["attempt"], item["pre_sign"]["fee_estimate"]["attempt"] + 1)
+        self.assertNotEqual(retry["pre_sign"]["fee_estimate"]["dex_fee_quote_raw"], item["pre_sign"]["fee_estimate"]["dex_fee_quote_raw"])
+        self.assertFalse(retry["pre_sign"]["signer_reached"])
+        blind = desk_loop.run_supervised(lambda request: {"status": 500, "body": None} if request.get("kind") == "http" else self._transport(accounts, priced=False)(request), NOW, rounds=1)
+        missing = next(row for row in blind["discovery"]["reservations"] if row["case_id"] == "supervised-case")
+        self.assertTrue(missing["pre_sign"]["fee_estimate_blocked"], missing["pre_sign"])
+        self.assertFalse(missing["pre_sign"]["signer_reached"])
+        self.assertNotEqual(missing["pre_sign"]["reason"], "signer_unimplemented")
+
+        exit_values, exit_accounts = _pool(mint, solana_tx.NATIVE_MINT, liquidity=10**18)
+        exit_state = solana_whirlpool.pool_state(bytes(exit_accounts[exit_values["pool"]][1]))
+        exit_arrays = []
+        for address in exit_values["ticks"]:
+            parsed = solana_whirlpool.tick_array_state(bytes(exit_accounts[address][1]))
+            exit_arrays.append({"start_tick_index": parsed["start_tick_index"], "ticks": parsed["ticks"]})
+        exit_est = quote.quote_exact_in(exit_state, exit_arrays, 4, True, 0, 0, 1)["token_est_out"]
+        exit_message = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 395_001, side="exit", quoted=exit_est, slippage=0)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('exit-book', ?, 'partial', ?, ?, ?, 'paper', 'server')",
+            (mint, '{"remaining_raw": 4}', NOW, NOW),
+        )
+        snapshot = jupiter_route_v2.Snapshot(exit_accounts, SLOT, SLOT, NOW)
+        snapshot.server_chain = {
+            "bind_ok": True,
+            "blockhash": solana_tx.b58encode(b"\x44" * 32),
+            "router": "metis",
+            "last_valid_block_height": 100,
+            "last_valid_provenance": "test",
+        }
+        booked = memecoin_desk.reserve_exit("exit-book", exit_message, 4, snapshot, self._transport(exit_accounts), NOW)
+        self.assertTrue(booked.get("ok"), booked)
+        self.assertTrue(booked["pre_sign"]["fee_estimate_blocked"], booked["pre_sign"])
+        self.assertFalse(booked["pre_sign"]["signer_reached"])
+        self.assertFalse(booked["sign"])
+        self.assertEqual(booked["pre_sign"]["reason"], "fee_estimate_above_0.05", booked["pre_sign"])
+        self.assertEqual(booked["pre_sign"]["fee_estimate"]["pool_read_slot"], SLOT, booked["pre_sign"]["fee_estimate"])
+        self.assertEqual(booked["pre_sign"]["fee_estimate"]["pool_sqrt_price"], quote.sqrt_price_from_tick(0))
+        self.assertIsNotNone(booked["pre_sign"]["fee_estimate"]["pool_snapshot_sha256"])
+
     def test_an_adaptive_pool_is_not_signed(self):
         mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, mint, adaptive=True)
@@ -260,12 +328,17 @@ class FeeEstimateTests(unittest.TestCase):
             """,
             (signature, digest, values["pool"], str(quote.sqrt_price_from_tick(0)), str(quote.sqrt_price_from_tick(0)), NOW),
         )
-        compared = desk_loop.log_landed_fee_against_estimate("landed-case", signature, self._transport(accounts), NOW)
+        def refuse_price(request):
+            raise AssertionError(request.get("method"))
+
+        compared = desk_loop.log_landed_fee_against_estimate("landed-case", signature, refuse_price, NOW)
         self.assertTrue(compared["logged"], compared)
         self.assertTrue(compared["overrun"], compared)
         self.assertEqual(compared["label"], "estimate, not guaranteed")
         self.assertFalse(compared["hard_cap"])
-        self.assertGreater(compared["landed_fee_usd"], estimate["estimated_fee_usd"])
+        self.assertFalse(compared["repriced"])
+        self.assertGreater(compared["landed_dex_raw"], compared["estimate_dex_raw"])
+        self.assertEqual(compared["landed_network_lamports"], compared["estimate_network_lamports"])
         row = db.query("SELECT source, evidence_json FROM memecoin_log WHERE case_id = 'landed-case' AND verdict = 'landed'")[0]
         self.assertEqual(row["source"], "estimate, not guaranteed")
-        self.assertIn("overrun", row["evidence_json"])
+        self.assertIn('"overrun": true', row["evidence_json"])

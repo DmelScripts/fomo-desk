@@ -1196,7 +1196,15 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
             "live_ready": False, "send": False, "resend": False, "rewritten": False,
         }
 
-    return db.exclusive(work)
+    stored = db.exclusive(work)
+    if isinstance(stored, dict) and stored.get("ok") is True and isinstance(stored.get("message_sha256"), str):
+        import desk_loop
+        pre_sign = desk_loop.approach_signer(row["id"], stored["message_sha256"], price_transport, moment)
+        stored = dict(stored)
+        stored["pre_sign"] = pre_sign
+        stored["sign"] = False
+        stored["send"] = False
+    return stored
 
 
 def confirm_exit(case_id: str, signature: str, now: float | None = None) -> dict:

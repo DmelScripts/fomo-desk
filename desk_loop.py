@@ -1108,7 +1108,9 @@ def execution_permission(case_id: str, message_sha256: str, transport, now: floa
     }
     if gate.get("reservation_valid") is not True:
         return gate | refused
-    return gate | _deposit_permission(gate, operation=refused["operation"]) | {"reservation_valid": True, "holds": True, "resend": False}
+    permitted = gate | _deposit_permission(gate, operation=refused["operation"]) | {"reservation_valid": True, "holds": True, "resend": False}
+    pre_sign = approach_signer(case_id, message_sha256, transport, now)
+    return permitted | {"pre_sign": pre_sign, "sign": False, "send": False}
 
 
 def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> dict:
@@ -1696,7 +1698,6 @@ def fee_estimate_before_sign(case_id: str, message_sha256: str, transport, now: 
     import memecoin_desk
     import pyth_sponsored
     import solana_tx
-    import solana_whirlpool
     body = {
         "sign": False, "send": False, "simulate": False, "execution_eligible": False,
         "preflight_ready": False, "gate_complete": False, "combined_fee_usd_proven": False,
@@ -1758,25 +1759,16 @@ def fee_estimate_before_sign(case_id: str, message_sha256: str, transport, now: 
     if not isinstance(sol, dict) or sol.get("fresh") is not True or sol.get("used") is not True:
         missing = prices.get("reason") if isinstance(prices, dict) else None
         return _log_fee_estimate(detail | {"reason": missing or "usd_unpriced"}, now)
-    try:
-        pool_response = transport({
-            "method": "getAccountInfo", "purpose": "whirlpool_pool", "account": hop["pool"],
-            "commitment": "confirmed", "minContextSlot": tip, "blockhash": proof["blockhash"],
-        })
-        pool_value = pool_response["body"]["result"]["value"]
-        raw = _decoded_account_data(pool_value.get("data"))
-        state = solana_whirlpool.pool_state(raw)
-        fields = solana_whirlpool.pool_fields(raw)
-    except Exception:
-        state, fields = None, None
-    if state is None or fields is None:
+    sqrt_price = quoted.get("pool_sqrt_price")
+    read_slot = quoted.get("pool_read_slot")
+    if not isinstance(sqrt_price, int) or isinstance(sqrt_price, bool) or not isinstance(read_slot, int) or isinstance(read_slot, bool) or read_slot < tip:
         return _log_fee_estimate(detail | {"reason": "quote_missing"}, now)
     unit = "lamports" if hop["source_mint"] == solana_tx.NATIVE_MINT else "token_raw"
     if quoted.get("dex_fee_input_ceiling_unit") != unit:
         return _log_fee_estimate(detail | {"reason": "fee_unit"}, now)
-    token_is_a = hop["source_mint"] == fields[0]
-    dex_usd = _raw_to_usd(quoted["dex_fee_quote_raw"], unit, sol, state["sqrt_price"], token_is_a)
-    network_usd = _raw_to_usd(network["network_lamports"], "lamports", sol, state["sqrt_price"], token_is_a)
+    token_is_a = quoted.get("pool_source_is_mint_a") is True
+    dex_usd = _raw_to_usd(quoted["dex_fee_quote_raw"], unit, sol, sqrt_price, token_is_a)
+    network_usd = _raw_to_usd(network["network_lamports"], "lamports", sol, sqrt_price, token_is_a)
     if dex_usd is None or network_usd is None:
         return _log_fee_estimate(detail | {"reason": "usd_unpriced"}, now)
     total = dex_usd + network_usd
@@ -1787,6 +1779,12 @@ def fee_estimate_before_sign(case_id: str, message_sha256: str, transport, now: 
         "dex_fee_quote_unit": unit,
         "price_source": "pyth_sponsored_sol_usd",
         "token_converted_through_pool_sqrt": unit == "token_raw",
+        "sol_price": sol.get("price"),
+        "sol_conf": sol.get("conf"),
+        "sol_expo": sol.get("expo"),
+        "pool_sqrt_price": sqrt_price,
+        "pool_read_slot": read_slot,
+        "pool_snapshot_sha256": quoted.get("pool_snapshot_sha256"),
     }
     if total > memecoin_desk.MAX_FEE:
         return _log_fee_estimate(detail | {"reason": "fee_estimate_above_0.05"}, now)
@@ -1812,6 +1810,12 @@ def _log_fee_estimate(body: dict, now: float) -> dict:
         "priority_lamports": body.get("priority_lamports"),
         "tip_lamports": body.get("tip_lamports"),
         "network_lamports": body.get("network_lamports"),
+        "sol_price": body.get("sol_price"),
+        "sol_conf": body.get("sol_conf"),
+        "sol_expo": body.get("sol_expo"),
+        "pool_sqrt_price": body.get("pool_sqrt_price"),
+        "pool_read_slot": body.get("pool_read_slot"),
+        "pool_snapshot_sha256": body.get("pool_snapshot_sha256"),
         "message_sha256": body.get("message_sha256"),
         "sign": False,
     }
@@ -1836,10 +1840,14 @@ def _safe_landed_fee_log(case_id: str, signature: str, transport, now: float) ->
 
 
 def log_landed_fee_against_estimate(case_id: str, signature: str, transport, now: float) -> dict:
-    """Write the pre-sign estimate beside the landed fee. Neither number is a cap."""
+    """Compare the landed fee with the estimate in the estimate's own units.
+
+    A later SOL/USD print is not used. The pool sqrt price from a later read
+    is not used. transport is unused so a price move cannot set the flag.
+    """
     import memecoin_desk
     import db
-    import pyth_sponsored
+    del transport
     blank = {
         "logged": False, "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False,
         "hard_cap": False, "overrun": None, "sign": False,
@@ -1859,49 +1867,83 @@ def log_landed_fee_against_estimate(case_id: str, signature: str, transport, now
             parsed = __import__("json").loads(row["evidence_json"])
         except Exception:
             continue
-        if parsed.get("message_sha256") == landed["message_sha256"] and parsed.get("estimated_fee_usd"):
+        if parsed.get("message_sha256") == landed["message_sha256"] and isinstance(parsed.get("dex_fee_quote_raw"), int):
             estimate = parsed
             break
     if estimate is None:
         return blank | {"reason": "estimate_missing"}
-    prices = pyth_sponsored.read_accounts(transport, now)
-    sol = prices.get("sol") if isinstance(prices, dict) else None
-    if not isinstance(sol, dict) or sol.get("fresh") is not True:
+    try:
+        landed_dex = int(landed["lp_fee"]) + int(landed["protocol_fee"])
+        landed_network = int(landed["network_fee_lamports"])
+        estimate_dex = int(estimate["dex_fee_quote_raw"])
+        estimate_network = int(estimate["network_lamports"])
+    except (KeyError, TypeError, ValueError):
+        return blank | {"reason": "landed_fee_missing"}
+    if landed["fee_unit"] != estimate.get("dex_fee_quote_unit"):
         evidence = {
             "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False, "hard_cap": False,
+            "overrun": None, "reason": "unit_mismatch",
             "estimated_fee_usd": estimate.get("estimated_fee_usd"),
-            "landed_lp_fee": landed["lp_fee"], "landed_protocol_fee": landed["protocol_fee"],
-            "landed_fee_unit": landed["fee_unit"], "landed_network_lamports": landed["network_fee_lamports"],
-            "overrun": None, "reason": "usd_unpriced",
+            "estimate_dex_raw": estimate_dex, "landed_dex_raw": landed_dex,
+            "message_sha256": landed["message_sha256"], "signature": signature,
         }
         _write_overrun_log(case_id, evidence, now)
         return blank | evidence | {"logged": True}
-    try:
-        dex_raw = int(landed["lp_fee"]) + int(landed["protocol_fee"])
-        sqrt_price = int(landed["pre_sqrt_price"])
-    except (TypeError, ValueError):
-        return blank | {"reason": "landed_fee_missing"}
-    token_is_a = landed["a_to_b"] == 1
-    dex_usd = _raw_to_usd(dex_raw, landed["fee_unit"], sol, sqrt_price, token_is_a)
-    network_usd = _raw_to_usd(int(landed["network_fee_lamports"]), "lamports", sol, sqrt_price, token_is_a)
-    if dex_usd is None or network_usd is None:
-        return blank | {"reason": "usd_unpriced"}
-    landed_usd = dex_usd + network_usd
-    estimated = memecoin_desk._money(estimate.get("estimated_fee_usd"))
-    overrun = estimated is not None and landed_usd > estimated
+    overrun = landed_dex > estimate_dex or landed_network > estimate_network
     evidence = {
         "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False, "hard_cap": False,
         "estimated_fee_usd": estimate.get("estimated_fee_usd"),
-        "landed_fee_usd": format(landed_usd, "f"),
-        "landed_dex_usd": format(dex_usd, "f"),
-        "landed_network_usd": format(network_usd, "f"),
-        "landed_fee_unit": landed["fee_unit"],
-        "overrun": overrun,
-        "message_sha256": landed["message_sha256"],
-        "signature": signature,
+        "estimate_dex_raw": estimate_dex, "estimate_dex_unit": estimate.get("dex_fee_quote_unit"),
+        "estimate_network_lamports": estimate_network,
+        "landed_dex_raw": landed_dex, "landed_fee_unit": landed["fee_unit"],
+        "landed_network_lamports": landed_network,
+        "frozen_sol_price": estimate.get("sol_price"),
+        "frozen_pool_sqrt_price": estimate.get("pool_sqrt_price"),
+        "overrun": overrun, "repriced": False,
+        "message_sha256": landed["message_sha256"], "signature": signature,
     }
     _write_overrun_log(case_id, evidence, now)
     return blank | evidence | {"logged": True, "reason": "landed_above_estimate" if overrun else None}
+
+
+def _next_fee_attempt(message_sha256: str) -> int:
+    import db
+    import json
+    try:
+        rows = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'fee_estimate'")
+    except Exception:
+        return 1
+    seen = 0
+    for row in rows:
+        try:
+            parsed = json.loads(row["evidence_json"])
+        except Exception:
+            continue
+        if parsed.get("message_sha256") == message_sha256 and parsed.get("attempt") is not None:
+            seen += 1
+    return seen + 1
+
+
+def _unimplemented_signer(case_id: str, message_sha256: str) -> dict:
+    return {
+        "sign": False, "send": False, "implemented": False,
+        "reason": "signer_unimplemented", "case_id": case_id, "message_sha256": message_sha256,
+    }
+
+
+def approach_signer(case_id: str, message_sha256: str, transport, now: float) -> dict:
+    """The only step before the signer. A skipped estimate does not reach it."""
+    estimate = fee_estimate_before_sign(case_id, message_sha256, transport, now, _next_fee_attempt(message_sha256))
+    blocked = estimate.get("fee_estimate_skip") is not False
+    signer = None if blocked else _unimplemented_signer(case_id, message_sha256)
+    return {
+        "sign": False, "send": False, "simulate": False, "execution_eligible": False,
+        "preflight_ready": False, "gate_complete": False, "combined_fee_usd_proven": False,
+        "fee_estimate_is_hard_cap": False, "fee_estimate_label": FEE_ESTIMATE_LABEL,
+        "fee_estimate_blocked": blocked, "signer_reached": signer is not None,
+        "signer_implemented": False, "fee_estimate": estimate, "signer": signer,
+        "reason": estimate.get("reason") if blocked else signer.get("reason"),
+    }
 
 
 def _write_overrun_log(case_id: str, evidence: dict, now: float) -> None:
@@ -1999,7 +2041,14 @@ def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     rate = state.get("fee_rate")
     if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0 or rate > 65535:
         return blank | {"pool_fee_reason": "pool_layout"}
-    observed = blank | {"dex_fee_rate_observed": True, "dex_fee_rate": rate, "dex_fee_charged_proven": False, "dex_fee_proven": False, "dex_fee_estimate_proven": False, "dex_fee_one_shot_is_bound": False}
+    import hashlib
+    observed = blank | {
+        "dex_fee_rate_observed": True, "dex_fee_rate": rate, "dex_fee_charged_proven": False,
+        "dex_fee_proven": False, "dex_fee_estimate_proven": False, "dex_fee_one_shot_is_bound": False,
+        "pool_sqrt_price": state["sqrt_price"], "pool_read_slot": slot,
+        "pool_snapshot_sha256": hashlib.sha256(bytes(raw)).hexdigest(),
+        "pool_source_is_mint_a": hop["source_mint"] == mint_a,
+    }
     if state.get("adaptive_fee") is True:
         return observed | {"adaptive_fee_unsupported": True, "pool_fee_reason": "adaptive_fee_unsupported"}
     one_shot = jupiter_route_v2.whirlpool_fee(hop["in_amount"], rate)
@@ -2582,6 +2631,14 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthe
     else:
         reserved = memecoin_desk.reserve_entry(intent["case_id"], message, fetched["snapshot"], transport, now)
     gate = execution_gate(intent["case_id"], reserved.get("message_sha256"), transport, now) if reserved.get("ok") is True else {"execution_eligible": False, "operation": "unimplemented", "sign": False, "send": False, "simulate": False, "gate_complete": False, "price_freshness_proven": False}
+    pre_sign = None
+    if reserved.get("ok") is True and isinstance(reserved.get("message_sha256"), str):
+        if intent["side"] == "exit" and isinstance(reserved.get("pre_sign"), dict):
+            pre_sign = reserved["pre_sign"]
+        else:
+            pre_sign = approach_signer(intent["case_id"], reserved["message_sha256"], transport, now)
+        if isinstance(pre_sign, dict) and pre_sign.get("fee_estimate_blocked") is True:
+            gate = dict(gate) | {"sign": False, "send": False, "execution_eligible": False}
     return result | {
         "reserved": reserved.get("ok") is True,
         "reserve_reason": reserved.get("reason"),
@@ -2606,6 +2663,7 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthe
         "idempotent": reserved.get("idempotent") is True,
         "execution_eligible": gate.get("execution_eligible") is True,
         "execution": gate,
+        "pre_sign": pre_sign,
         "operation": "unimplemented",
         "resend": False,
     }
@@ -2839,6 +2897,10 @@ def _supervise_reservations(transport, now: float) -> list:
             continue
         seen.add((proof["case_id"], proof["message_sha256"]))
         try:
+            pre_sign = approach_signer(proof["case_id"], proof["message_sha256"], transport, now)
+        except Exception:
+            pre_sign = {"sign": False, "fee_estimate_blocked": True, "signer_reached": False, "reason": "fee_estimate_unreadable"}
+        try:
             decision = execution_gate(proof["case_id"], proof["message_sha256"], transport, now)
         except Exception:
             decision = {
@@ -2859,6 +2921,8 @@ def _supervise_reservations(transport, now: float) -> list:
             "case_id": proof["case_id"], "mint": None if case is None else case["mint"], "side": proof["side"],
             "jupiter_called": False, "requoted": False, "supervised": True, "execution": decision,
             "preflight": preflight,
+            "pre_sign": pre_sign,
+            "sign": False,
             "message_sha256": proof["message_sha256"],
         })
     try:
