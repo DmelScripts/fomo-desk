@@ -290,6 +290,7 @@ class FeeEstimateTests(unittest.TestCase):
 
         wide = self._message(values, solana_tx.NATIVE_MINT, mint, 0, slippage=51)
         wide_digest = self._store(wide, values["pool"], "entry", "gate-slip")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'gate-slip'", ('{"reserved_usd": "8.00"}',))
         slipped = desk_loop.approach_signer("gate-slip", wide_digest, self._transport(accounts), NOW, auth)
         self.assertFalse(slipped["fee_estimate_blocked"], slipped)
         self.assertEqual(slipped["reason"], "slippage_exceeds")
@@ -303,6 +304,7 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertEqual(halted["reason"], "entry_halt", halted)
         self.assertIsNone(halted["signer"])
         db.set_setting("memecoin_entry_halt", "0", "test")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'gate-halt'", ('{"reserved_usd": "8.00"}',))
 
         wrong = dict(auth)
         wrong["wallet_id"] = "not-the-server-wallet"
@@ -325,6 +327,86 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertFalse(passed["live_ready"])
         self.assertFalse(desk_loop.readiness()["sign"])
         self.assertFalse(desk_loop.scheduler_status()["send"])
+
+    def test_an_unknown_signature_hold_never_reaches_the_signer(self):
+        import phantom_transport
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"mock": True, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        encoded = self._message(values, solana_tx.NATIVE_MINT, mint, 0)
+        digest = self._store(encoded, values["pool"], "entry", "unknown-live")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'unknown-live'", ('{"reserved_usd": "8.00"}',))
+        db.execute(
+            "INSERT INTO memecoin_reservation_signatures (signature, message_sha256, case_id, kind, created_at) VALUES ('sig-unknown', ?, 'unknown-live', 'unknown', ?)",
+            (digest, NOW),
+        )
+        held = desk_loop.approach_signer("unknown-live", digest, self._transport(accounts), NOW, auth)
+        self.assertEqual(held["reason"], "unknown_signature_hold", held)
+        self.assertFalse(held["signer_reached"])
+        self.assertIsNone(held["signer"])
+        self.assertIsNone(held["sender"])
+        self.assertFalse(held["sign"])
+        self.assertFalse(held["send"])
+
+        paper = self._message(values, solana_tx.NATIVE_MINT, mint, 0, slippage=0, quoted=100)
+        paper_digest = hashlib.sha256(solana_tx.message_bytes(paper)).hexdigest()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('unknown-paper', ?, 'protected', ?, ?, ?, 'paper', 'server')",
+            (mint, '{"reserved_usd": "8.00"}', NOW, NOW),
+        )
+        db.execute(
+            """
+            INSERT INTO memecoin_reservations (
+                message_sha256, case_id, side, message_b64, router, blockhash,
+                last_valid_block_height, last_valid_provenance, pool, ledger, ledger_provenance, created_at
+            ) VALUES (?, 'unknown-paper', 'entry', ?, 'metis', ?, 100, 'test', ?, 'paper', 'server', ?)
+            """,
+            (paper_digest, paper, solana_tx.b58encode(b"\x44" * 32), values["pool"], NOW),
+        )
+        db.execute(
+            "INSERT INTO memecoin_reservation_signatures (signature, message_sha256, case_id, kind, created_at) VALUES ('sig-paper-unknown', ?, 'unknown-paper', 'unknown', ?)",
+            (paper_digest, NOW),
+        )
+        self.assertEqual(db.exclusive(lambda conn: memecoin_desk._reservation_status(conn, db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (paper_digest,))[0])), "active")
+        paper_held = desk_loop.approach_signer("unknown-paper", paper_digest, self._transport(accounts), NOW, auth)
+        self.assertEqual(paper_held["reason"], "unknown_signature_hold", paper_held)
+        self.assertIsNone(paper_held["signer"])
+        self.assertIsNone(paper_held["sender"])
+
+    def test_the_reservation_ticket_and_allocation_bound_the_signer(self):
+        import phantom_transport
+        mint = solana_tx.b58encode(b"\x74" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"mock": True, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        encoded = self._message(values, solana_tx.NATIVE_MINT, mint, 0)
+        digest = self._store(encoded, values["pool"], "entry", "ticket-case")
+        transport = self._transport(accounts)
+
+        def at(amount):
+            db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'ticket-case'", ('{"reserved_usd": "%s"}' % amount,))
+            return desk_loop.approach_signer("ticket-case", digest, transport, NOW, auth)
+
+        passed = at("8.00")
+        self.assertTrue(passed["signer_reached"], passed)
+        self.assertIsNotNone(passed["sender"])
+        over_cent = at("8.01")
+        self.assertEqual(over_cent["reason"], "ticket", over_cent)
+        self.assertIsNone(over_cent["signer"])
+        self.assertIsNone(over_cent["sender"])
+        large = at("50.00")
+        self.assertEqual(large["reason"], "ticket")
+        self.assertIsNone(large["signer"])
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('other-hold', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (mint, '{"reserved_usd": "92.00"}', NOW, NOW),
+        )
+        boundary = at("8.00")
+        self.assertTrue(boundary["signer_reached"], boundary)
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'other-hold'", ('{"reserved_usd": "92.01"}',))
+        crowded = at("8.00")
+        self.assertEqual(crowded["reason"], "allocation", crowded)
+        self.assertIsNone(crowded["signer"])
+        self.assertIsNone(crowded["sender"])
 
     def test_an_adaptive_pool_is_not_signed(self):
         mint = solana_tx.b58encode(b"\x73" * 32)

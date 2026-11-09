@@ -1941,10 +1941,11 @@ def _server_auth(mock_auth) -> dict:
     return body | {"ok": True, "mock": True, "reason": None}
 
 
-def _entry_room(case_id: str) -> bool:
+def _entry_room(case_id: str, reserved) -> bool:
+    """Other holds plus this reservation's own reserved dollars, not a fresh $8."""
     import memecoin_desk
     def work(conn):
-        return memecoin_desk._room_for(conn, case_id, memecoin_desk.TICKET)
+        return memecoin_desk._room_for(conn, case_id, reserved)
     import db
     return db.exclusive(work) is True
 
@@ -1962,8 +1963,16 @@ def _gates_after_fee(case_id: str, message_sha256: str) -> dict:
     if len(rows) != 1 or rows[0]["case_id"] != case_id:
         return {"ok": False, "reason": "reservation_missing"}
     proof = rows[0]
+    notes = db.query(
+        "SELECT kind FROM memecoin_reservation_signatures WHERE message_sha256 = ? AND case_id = ?",
+        (message_sha256, case_id),
+    )
+    if any(item["kind"] == "unknown" for item in notes):
+        return {"ok": False, "reason": "unknown_signature_hold"}
     status = db.exclusive(lambda conn: memecoin_desk._reservation_status(conn, proof))
-    if status not in {"active", "unknown"}:
+    if status == "unknown":
+        return {"ok": False, "reason": "unknown_signature_hold"}
+    if status != "active":
         return {"ok": False, "reason": "reservation_closed"}
     side = proof["side"]
     if side == "entry":
@@ -1971,7 +1980,11 @@ def _gates_after_fee(case_id: str, message_sha256: str) -> dict:
             return {"ok": False, "reason": "entry_halt"}
         if memecoin_desk.loss_totals().get("live_halts_new_entries") is True:
             return {"ok": False, "reason": "loss_halt"}
-        if not _entry_room(case_id):
+        case = memecoin_desk._case(case_id)
+        reserved = None if case is None else memecoin_desk._reserved_amount(__import__("json").loads(case["snapshot_json"]).get("reserved_usd"))
+        if reserved is None or reserved > memecoin_desk.TICKET:
+            return {"ok": False, "reason": "ticket_unpriced" if reserved is None else "ticket"}
+        if not _entry_room(case_id, reserved):
             return {"ok": False, "reason": "allocation"}
     try:
         decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
