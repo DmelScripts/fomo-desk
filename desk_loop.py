@@ -43,8 +43,6 @@ def _ready_reasons() -> list[str]:
         reasons.append("lp_fields_unpublished")
         reasons.append("rug_history_unpublished")
     reasons.append("holder_growth_unproven")
-    if memecoin_desk.analyst_decision()["owner_approved"] is not True:
-        reasons.append("analyst_weights_unapproved")
     if db_setting("memecoin_entry_halt") == "1":
         reasons.append("entry_halt")
     return reasons
@@ -1924,25 +1922,129 @@ def _next_fee_attempt(message_sha256: str) -> int:
     return seen + 1
 
 
-def _unimplemented_signer(case_id: str, message_sha256: str) -> dict:
+def _server_auth(mock_auth) -> dict:
+    """The pinned server wallet. A mock session is not a Phantom login."""
+    import phantom_transport
+    pinned = phantom_transport.status()
+    body = {
+        "ok": False, "network_called": False, "live": False,
+        "wallet_id": phantom_transport.REQUIRED_WALLET_ID,
+        "wallet": phantom_transport.REQUIRED_WALLET,
+        "auth": pinned.get("auth"), "transport": pinned.get("transport"),
+    }
+    if mock_auth is None:
+        return body | {"reason": "phantom_auth_not_started"}
+    if not isinstance(mock_auth, dict) or mock_auth.get("mock") is not True:
+        return body | {"reason": "live_auth_refused"}
+    if mock_auth.get("wallet_id") != phantom_transport.REQUIRED_WALLET_ID or mock_auth.get("wallet") != phantom_transport.REQUIRED_WALLET:
+        return body | {"reason": "wallet_mismatch"}
+    return body | {"ok": True, "mock": True, "reason": None}
+
+
+def _entry_room(case_id: str) -> bool:
+    import memecoin_desk
+    def work(conn):
+        return memecoin_desk._room_for(conn, case_id, memecoin_desk.TICKET)
+    import db
+    return db.exclusive(work) is True
+
+
+def _gates_after_fee(case_id: str, message_sha256: str) -> dict:
+    """Reservation, ticket, loss halt, and slippage. No network read."""
+    import base64
+    import memecoin_desk
+    import owner_slippage
+    import solana_jupiter
+    import solana_tx
+    import jupiter_route_v2
+    import db
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1 or rows[0]["case_id"] != case_id:
+        return {"ok": False, "reason": "reservation_missing"}
+    proof = rows[0]
+    status = db.exclusive(lambda conn: memecoin_desk._reservation_status(conn, proof))
+    if status not in {"active", "unknown"}:
+        return {"ok": False, "reason": "reservation_closed"}
+    side = proof["side"]
+    if side == "entry":
+        if db_setting("memecoin_entry_halt") == "1":
+            return {"ok": False, "reason": "entry_halt"}
+        if memecoin_desk.loss_totals().get("live_halts_new_entries") is True:
+            return {"ok": False, "reason": "loss_halt"}
+        if not _entry_room(case_id):
+            return {"ok": False, "reason": "allocation"}
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
+    except Exception:
+        return {"ok": False, "reason": "slippage_unparsed"}
+    parsed = None
+    for instruction in decoded.instructions:
+        if decoded.static_keys[instruction.program_index] == solana_jupiter.PROGRAM_ID:
+            parsed = jupiter_route_v2.parse(bytes(instruction.data))
+            break
+    if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+        return {"ok": False, "reason": "slippage_unparsed"}
+    bps = parsed.get("slippage_bps")
+    if isinstance(bps, bool) or not isinstance(bps, int) or bps < 0 or bps > owner_slippage.BPS:
+        return {"ok": False, "reason": "slippage_exceeds"}
+    if owner_slippage.ceiling_bps() != owner_slippage.BPS:
+        return {"ok": False, "reason": "slippage_unapproved"}
+    return {"ok": True, "reason": None, "side": side, "slippage_bps": bps}
+
+
+def mock_phantom_sign(message_sha256: str, auth: dict) -> dict:
+    """A labeled stand-in. It does not call Phantom or the network."""
+    import hashlib
+    if not isinstance(auth, dict) or auth.get("ok") is not True or auth.get("mock") is not True or auth.get("network_called") is not False:
+        return {"signed": False, "mock": True, "network_called": False, "live": False, "reason": "auth_refused"}
+    digest = hashlib.sha256(b"mock-sign:" + str(message_sha256).encode()).hexdigest()
     return {
-        "sign": False, "send": False, "implemented": False,
-        "reason": "signer_unimplemented", "case_id": case_id, "message_sha256": message_sha256,
+        "signed": True, "mock": True, "network_called": False, "live": False,
+        "signature": "mock:" + digest[:32],
+        "wallet_id": auth.get("wallet_id"), "wallet": auth.get("wallet"),
+        "reason": None,
     }
 
 
-def approach_signer(case_id: str, message_sha256: str, transport, now: float) -> dict:
-    """The only step before the signer. A skipped estimate does not reach it."""
-    estimate = fee_estimate_before_sign(case_id, message_sha256, transport, now, _next_fee_attempt(message_sha256))
-    blocked = estimate.get("fee_estimate_skip") is not False
-    signer = None if blocked else _unimplemented_signer(case_id, message_sha256)
+def mock_phantom_send(signed: dict) -> dict:
+    """Accepts only a mock signature and does not broadcast it."""
+    if not isinstance(signed, dict) or signed.get("signed") is not True or signed.get("mock") is not True or signed.get("network_called") is not False:
+        return {"sent": False, "accepted": False, "mock": True, "network_called": False, "broadcast": False, "reason": "unsigned"}
     return {
+        "sent": False, "accepted": True, "mock": True, "network_called": False,
+        "broadcast": False, "reason": "mock_not_broadcast", "signature": signed.get("signature"),
+    }
+
+
+def approach_signer(case_id: str, message_sha256: str, transport, now: float, mock_auth=None) -> dict:
+    """Fee, reservation, ticket, loss, and slippage, then a mock sign and send.
+
+    A failed gate does not reach the mock signer. The mock does not touch the
+    network, and it is not a live signature.
+    """
+    estimate = fee_estimate_before_sign(case_id, message_sha256, transport, now, _next_fee_attempt(message_sha256))
+    base = {
         "sign": False, "send": False, "simulate": False, "execution_eligible": False,
         "preflight_ready": False, "gate_complete": False, "combined_fee_usd_proven": False,
-        "fee_estimate_is_hard_cap": False, "fee_estimate_label": FEE_ESTIMATE_LABEL,
-        "fee_estimate_blocked": blocked, "signer_reached": signer is not None,
-        "signer_implemented": False, "fee_estimate": estimate, "signer": signer,
-        "reason": estimate.get("reason") if blocked else signer.get("reason"),
+        "live_ready": False, "fee_estimate_is_hard_cap": False, "fee_estimate_label": FEE_ESTIMATE_LABEL,
+        "signer_implemented": True, "sender_implemented": True, "signer_is_mock": True,
+        "network_called": False, "fee_estimate": estimate, "signer": None, "sender": None,
+    }
+    if estimate.get("fee_estimate_skip") is not False:
+        return base | {"fee_estimate_blocked": True, "signer_reached": False, "reason": estimate.get("reason")}
+    gates = _gates_after_fee(case_id, message_sha256)
+    if gates.get("ok") is not True:
+        return base | {"fee_estimate_blocked": False, "signer_reached": False, "reason": gates.get("reason")}
+    auth = _server_auth(mock_auth)
+    if auth.get("ok") is not True:
+        return base | {"fee_estimate_blocked": False, "signer_reached": False, "reason": auth.get("reason"), "auth": auth}
+    signed = mock_phantom_sign(message_sha256, auth)
+    if signed.get("signed") is not True:
+        return base | {"fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "reason": signed.get("reason")}
+    sent = mock_phantom_send(signed)
+    return base | {
+        "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "sender": sent,
+        "mock_signed": True, "broadcast": False, "reason": sent.get("reason"),
     }
 
 
@@ -4409,7 +4511,7 @@ def public_reader(request: dict) -> dict:
 
 def _readiness_blocks(pyth: dict) -> list[str]:
     import owner_slippage
-    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished", "analyst_weights_unapproved"]
+    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished"]
     if owner_slippage.ceiling_bps() != owner_slippage.BPS:
         blocks.append("owner_slippage_unapproved")
     blocks.append(pyth["reason"] or "pyth_sponsored_not_fresh")

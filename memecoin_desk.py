@@ -1,10 +1,10 @@
 """Six-stage memecoin desk. A caller cannot mark a stage passed.
 
 Scout reads a DexScreener-shaped snapshot and does not treat it as mint, freeze,
-LP, developer, or bundle proof. Filter facts need their own source. Analyst
-weights are engineering defaults, not approved risk numbers. The approved risk
-numbers are the 6% stop, the 12% trail arm, the 12% drop from the peak, and
-liquidity of at least 25% of market cap.
+LP, developer, or bundle proof. Filter facts need their own source. The
+20/20/15/15/15/15 weights and the inclusive score of 70 were approved by Thành
+on 2026-11-10. The other approved risk numbers are the 6% stop, the 12% trail
+arm, the 12% drop from the peak, and liquidity of at least 25% of market cap.
 
 The trail does not lock a profit. A peak that only just arms, times a 12% drop,
 is 0.9856 of entry. Entry is not sent. A fixture route is not a live provider.
@@ -36,7 +36,8 @@ LIQ_OF_MCAP = Decimal("0.25")
 DEV_HOLDING_MAX = Decimal("3")
 BUNDLE_MAX = Decimal("10")
 ALREADY_UP_1H = Decimal("80")
-# Engineering defaults. They are not the approved stop, trail, fee, or loss numbers.
+# Approved by Thành on 2026-11-10 as these engineering-default weights.
+# The stop, trail, fee, ticket, allocation, and loss numbers are separate.
 WEIGHTS = {
     "momentum": Decimal("20"),
     "unique_buyers": Decimal("20"),
@@ -47,15 +48,24 @@ WEIGHTS = {
 }
 COMPONENTS = tuple(WEIGHTS)
 FRESH_S = 30
+ANALYST_APPROVED_AT = "2026-11-10T06:19:00+07:00"
+ANALYST_APPROVED_BY = "Thành"
+ANALYST_APPROVAL_SOURCE = "owner decision 2026-11-10 06:19 Asia/Saigon"
 
 
 def analyst_decision() -> dict:
-    """The score floor is coded. The component weights are not an owner rule."""
+    """The approved formula is these weights, divided by 100, passing at 70."""
     return {
         "score_floor": 70,
+        "score_floor_inclusive": True,
         "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
+        "weights_sum": format(sum(WEIGHTS.values(), Decimal("0")), "f"),
         "weights_are": "engineering_default",
-        "owner_approved": False,
+        "normalization": "sum(weight * value) / 100",
+        "owner_approved": True,
+        "approved_at": ANALYST_APPROVED_AT,
+        "approved_by": ANALYST_APPROVED_BY,
+        "approval_source": ANALYST_APPROVAL_SOURCE,
         "approved_numbers": {
             "stop_pct": format(STOP, "f"),
             "trail_arm_pct": format(TRAIL_ARM, "f"),
@@ -67,7 +77,7 @@ def analyst_decision() -> dict:
             "max_loss_usd": format(MAX_LOSS, "f"),
             "slippage_bps": 50,
         },
-        "decision_needed": "Component weights are engineering defaults. A score of 70 from those weights is not an owner-approved formula.",
+        "decision_needed": None,
         "required_inputs": [
             {
                 "name": name,
@@ -219,7 +229,12 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     if not isinstance(components, dict):
         return _fail(row, "analyst", "components_missing")
     weighted = Decimal("0")
-    evidence = {"weights": {key: format(value, "f") for key, value in WEIGHTS.items()}, "weights_are": "engineering_default"}
+    evidence = {
+        "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
+        "weights_are": "engineering_default",
+        "owner_approved": True,
+        "approval_source": ANALYST_APPROVAL_SOURCE,
+    }
     for name in COMPONENTS:
         item = components.get(name)
         if not isinstance(item, dict):

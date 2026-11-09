@@ -29,6 +29,35 @@ def _pair():
 
 
 class DeskLoopTests(unittest.TestCase):
+    def test_the_approved_weights_sum_to_100_and_70_passes(self):
+        from decimal import Decimal
+        weights = memecoin_desk.WEIGHTS
+        self.assertEqual(sum(weights.values(), Decimal("0")), Decimal("100"))
+        self.assertEqual(
+            [format(weights[name], "f") for name in memecoin_desk.COMPONENTS],
+            ["20", "20", "15", "15", "15", "15"],
+        )
+        decision = memecoin_desk.analyst_decision()
+        self.assertEqual(decision["score_floor"], 70)
+        self.assertTrue(decision["score_floor_inclusive"])
+        self.assertEqual(decision["normalization"], "sum(weight * value) / 100")
+        self.assertTrue(decision["owner_approved"])
+        import db
+        memecoin_desk._ensure()
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('score-line', ?, 'filter_passed', '{}', ?, ?, 'paper', 'server')",
+            (MINT, NOW, NOW),
+        )
+        fresh = {name: {"value": "70", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+        passed = memecoin_desk.analyze("score-line", fresh, NOW)
+        self.assertTrue(passed["ok"], passed)
+        self.assertEqual(memecoin_desk.view("score-line")["snapshot"]["score"], "70")
+        db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = 'score-line'")
+        short = {name: {"value": "69", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+        failed = memecoin_desk.analyze("score-line", short, NOW)
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["reason"], "score")
+
     def setUp(self):
         _tmp, restore = temp_desk_env()
         self.addCleanup(restore)
@@ -53,7 +82,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(result["capability"]["transport"], "unconfigured")
         self.assertEqual(result["capability"]["lp"], "unproven")
         self.assertEqual(result["capability"]["score"], "unapproved")
-        self.assertEqual(result["capability"]["analyst_formula"], "UNAPPROVED")
+        self.assertEqual(result["capability"]["analyst_formula"], "approved")
         self.assertFalse(result["stalkchain"]["called"])
         self.assertIn("dev_rugs", result["stalkchain"]["unproven"])
         self.assertIn("holder_growth", result["stalkchain"]["unproven"])
@@ -204,10 +233,12 @@ class DeskLoopTests(unittest.TestCase):
             self.assertIn("nov8-observed-mcp-field-mapping.json", fields[name]["observation_files"])
         self.assertNotIn("sc_fixture_not_a_real_key", __import__("json").dumps(found))
         formula = memecoin_desk.analyst_decision()
-        self.assertFalse(formula["owner_approved"])
+        self.assertTrue(formula["owner_approved"])
+        self.assertEqual(formula["approved_by"], "Thành")
+        self.assertEqual(formula["approved_at"], "2026-11-10T06:19:00+07:00")
         self.assertEqual(formula["approved_numbers"]["stop_pct"], "6")
         self.assertEqual(formula["approved_numbers"]["liq_of_mcap"], "0.25")
-        self.assertIn("analyst_weights_unapproved", desk_loop.scheduler_status()["ready_because"])
+        self.assertNotIn("analyst_weights_unapproved", desk_loop.scheduler_status()["ready_because"])
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         import stalkchain_adapter
         malformed = stalkchain_adapter.normalize({"lp_burned_or_locked": True}, MINT)
@@ -322,7 +353,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(kill["reason"], "response_fields_unpublished")
         self.assertNotEqual(kill["reason"], "lp")
         self.assertFalse(kill["capability"]["response_verified"])
-        self.assertEqual(kill["capability"]["analyst_formula"], "UNAPPROVED")
+        self.assertEqual(kill["capability"]["analyst_formula"], "approved")
         self.assertIn("lpBurnedPercent", kill["stalkchain"]["unmapped_keys"])
         self.assertFalse(kill["stalkchain"]["fdv_used_as_market_cap"])
         posts.clear()
@@ -437,7 +468,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(measured["price_change_1h"]["numeric_rule_result"], "reject")
         self.assertFalse(measured["holder_quality"]["is_analyst_score"])
         self.assertIsNone(measured["analyst_score"])
-        self.assertFalse(measured["analyst_formula"]["owner_approved"])
+        self.assertTrue(measured["analyst_formula"]["owner_approved"])
         self.assertEqual([item["name"] for item in measured["analyst_formula"]["required_inputs"]], list(memecoin_desk.COMPONENTS))
         self.assertFalse(measured["fdv_used_as_market_cap"])
         self.assertEqual(measured["market_cap_basis"], "fully diluted")

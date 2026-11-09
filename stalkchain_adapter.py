@@ -112,7 +112,7 @@ def capability(reason: str, *, called: bool, http_status=None) -> dict:
         "rugs": "unproven",
         "growth": "unproven",
         "score": "unapproved",
-        "analyst_formula": "UNAPPROVED",
+        "analyst_formula": "approved",
     }
 
 

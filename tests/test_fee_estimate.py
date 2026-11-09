@@ -273,6 +273,59 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertEqual(booked["pre_sign"]["fee_estimate"]["pool_sqrt_price"], quote.sqrt_price_from_tick(0))
         self.assertIsNotNone(booked["pre_sign"]["fee_estimate"]["pool_snapshot_sha256"])
 
+    def test_mock_sign_and_send_wait_for_every_earlier_gate(self):
+        import phantom_transport
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"mock": True, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        over = self._message(values, solana_tx.NATIVE_MINT, mint, 395_001)
+        over_digest = self._store(over, values["pool"], "entry", "gate-over")
+        blocked = desk_loop.approach_signer("gate-over", over_digest, self._transport(accounts), NOW, auth)
+        self.assertTrue(blocked["fee_estimate_blocked"], blocked)
+        self.assertFalse(blocked["signer_reached"])
+        self.assertIsNone(blocked["signer"])
+        self.assertIsNone(blocked["sender"])
+        self.assertFalse(blocked["sign"])
+        self.assertFalse(blocked["network_called"])
+
+        wide = self._message(values, solana_tx.NATIVE_MINT, mint, 0, slippage=51)
+        wide_digest = self._store(wide, values["pool"], "entry", "gate-slip")
+        slipped = desk_loop.approach_signer("gate-slip", wide_digest, self._transport(accounts), NOW, auth)
+        self.assertFalse(slipped["fee_estimate_blocked"], slipped)
+        self.assertEqual(slipped["reason"], "slippage_exceeds")
+        self.assertFalse(slipped["signer_reached"])
+        self.assertIsNone(slipped["sender"])
+
+        db.set_setting("memecoin_entry_halt", "1", "test")
+        halted_message = self._message(values, solana_tx.NATIVE_MINT, mint, 0)
+        halted_digest = self._store(halted_message, values["pool"], "entry", "gate-halt")
+        halted = desk_loop.approach_signer("gate-halt", halted_digest, self._transport(accounts), NOW, auth)
+        self.assertEqual(halted["reason"], "entry_halt", halted)
+        self.assertIsNone(halted["signer"])
+        db.set_setting("memecoin_entry_halt", "0", "test")
+
+        wrong = dict(auth)
+        wrong["wallet_id"] = "not-the-server-wallet"
+        mismatched = desk_loop.approach_signer("gate-halt", halted_digest, self._transport(accounts), NOW, wrong)
+        self.assertEqual(mismatched["reason"], "wallet_mismatch", mismatched)
+        self.assertIsNone(mismatched["signer"])
+
+        passed = desk_loop.approach_signer("gate-halt", halted_digest, self._transport(accounts), NOW, auth)
+        self.assertTrue(passed["signer_reached"], passed)
+        self.assertTrue(passed["signer"]["signed"])
+        self.assertTrue(passed["signer"]["mock"])
+        self.assertFalse(passed["signer"]["network_called"])
+        self.assertEqual(passed["signer"]["wallet"], phantom_transport.REQUIRED_WALLET)
+        self.assertEqual(passed["signer"]["wallet_id"], phantom_transport.REQUIRED_WALLET_ID)
+        self.assertTrue(passed["sender"]["accepted"])
+        self.assertFalse(passed["sender"]["broadcast"])
+        self.assertFalse(passed["sender"]["network_called"])
+        self.assertFalse(passed["sign"])
+        self.assertFalse(passed["send"])
+        self.assertFalse(passed["live_ready"])
+        self.assertFalse(desk_loop.readiness()["sign"])
+        self.assertFalse(desk_loop.scheduler_status()["send"])
+
     def test_an_adaptive_pool_is_not_signed(self):
         mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, mint, adaptive=True)
