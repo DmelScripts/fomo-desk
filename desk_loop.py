@@ -1619,6 +1619,301 @@ def _exact_in_ceiling(hop: dict) -> dict:
     }
 
 
+FEE_ESTIMATE_LABEL = "estimate, not guaranteed"
+
+
+def _message_network_estimate(decoded) -> dict:
+    """Base fee, requested priority, and any non-wrap system transfer. An estimate."""
+    import jupiter_route_v2
+    import phantom_transport
+    import solana_tx
+    refused = {"ok": False}
+    compute = []
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+        except (IndexError, TypeError):
+            return refused | {"reason": "network_unparsed"}
+        if program == solana_tx.COMPUTE_BUDGET:
+            compute.append(bytes(instruction.data))
+    network = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
+    if network.get("ok") is not True:
+        return refused | {"reason": network.get("reason") or "network_unparsed"}
+    try:
+        wrap = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return refused | {"reason": "network_unparsed"}
+    tip = 0
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return refused | {"reason": "network_unparsed"}
+        if program != solana_tx.SYSTEM_PROGRAM:
+            continue
+        moved = solana_tx.system_transfer(bytes(instruction.data))
+        if moved is None:
+            return refused | {"reason": "network_unparsed"}
+        if len(keys) != 2 or keys[0] != phantom_transport.REQUIRED_WALLET:
+            return refused | {"reason": "network_unparsed"}
+        if keys[1] == wrap:
+            continue
+        tip += moved
+    base = jupiter_route_v2.BASE_FEE_LAMPORTS * decoded.required_signatures
+    priority = network["requested_priority_lamports"]
+    return {
+        "ok": True,
+        "base_fee_lamports": base,
+        "priority_lamports": priority,
+        "tip_lamports": tip,
+        "network_lamports": base + priority + tip,
+        "base_fee_is_protocol_constant": True,
+    }
+
+
+def _raw_to_usd(amount: int, unit: str, sol: dict, sqrt_price: int, token_is_mint_a: bool):
+    """One unit family to USD. Token raw is not added to lamports."""
+    import jupiter_route_v2
+    import pyth_sponsored
+    if unit == "lamports":
+        return pyth_sponsored.lamports_usd(amount, sol)
+    if unit != "token_raw":
+        return None
+    lamports = jupiter_route_v2.token_raw_to_lamports(amount, sqrt_price, token_is_mint_a)
+    if lamports is None:
+        return None
+    return pyth_sponsored.lamports_usd(lamports, sol)
+
+
+def fee_estimate_before_sign(case_id: str, message_sha256: str, transport, now: float, attempt: int) -> dict:
+    """Re-read the current tick-step fee and the message network fee before a signature.
+
+    The dollar figure is an estimate. It is not a guaranteed cap, and a pass
+    does not sign. Each attempt reads the pool again. Nothing is cached.
+    """
+    import base64
+    import memecoin_desk
+    import pyth_sponsored
+    import solana_tx
+    import solana_whirlpool
+    body = {
+        "sign": False, "send": False, "simulate": False, "execution_eligible": False,
+        "preflight_ready": False, "gate_complete": False, "combined_fee_usd_proven": False,
+        "fee_estimate_is_hard_cap": False, "fee_estimate_label": FEE_ESTIMATE_LABEL,
+        "fee_estimate_skip": True, "attempt": attempt, "case_id": case_id,
+        "message_sha256": message_sha256, "signer_implemented": False,
+    }
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        return body | {"reason": "attempt_unbound"}
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return body | {"reason": "quote_stale"}
+    memecoin_desk._ensure()
+    import db
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1 or rows[0]["case_id"] != case_id or rows[0]["side"] not in {"entry", "exit"}:
+        return _log_fee_estimate(body | {"reason": "reservation_missing"}, now)
+    proof = rows[0]
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
+    except Exception:
+        return _log_fee_estimate(body | {"reason": "message", "side": proof["side"]}, now)
+    hop = _hop_pool(decoded)
+    if hop is None or hop["pool"] != proof["pool"]:
+        return _log_fee_estimate(body | {"reason": "pool_unbound", "side": proof["side"]}, now)
+    try:
+        tip_response = transport({"method": "getSlot"})
+    except Exception:
+        return _log_fee_estimate(body | {"reason": "quote_stale", "side": proof["side"]}, now)
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return _log_fee_estimate(body | {"reason": "quote_stale", "side": proof["side"]}, now)
+    quoted = _reserved_pool_fee(transport, {"pool": proof["pool"], "blockhash": proof["blockhash"]}, decoded, tip)
+    network = _message_network_estimate(decoded)
+    prices = pyth_sponsored.read_accounts(transport, now)
+    sol = prices.get("sol") if isinstance(prices, dict) else None
+    detail = body | {
+        "side": proof["side"],
+        "dex_fee_quote_raw": quoted.get("dex_fee_quote_raw"),
+        "dex_fee_quote_unit": quoted.get("dex_fee_input_ceiling_unit"),
+        "dex_fee_quote_current_state": quoted.get("dex_fee_quote_current_state") is True,
+        "dex_fee_quote_is_inclusion_bound": False,
+        "adaptive_fee_unsupported": quoted.get("adaptive_fee_unsupported") is True,
+        "base_fee_lamports": network.get("base_fee_lamports"),
+        "priority_lamports": network.get("priority_lamports"),
+        "tip_lamports": network.get("tip_lamports"),
+        "network_lamports": network.get("network_lamports"),
+    }
+    if quoted.get("adaptive_fee_unsupported") is True or hop["token_program"] != solana_tx.TOKEN_PROGRAM:
+        return _log_fee_estimate(detail | {"reason": "adaptive_fee_unsupported" if quoted.get("adaptive_fee_unsupported") else "pool_unsupported"}, now)
+    reason = quoted.get("pool_fee_reason")
+    if quoted.get("dex_fee_quote_current_state") is not True or not isinstance(quoted.get("dex_fee_quote_raw"), int):
+        stale = reason in {"pool_context_stale", "pool_context_future", "tick_array_context", "pool_context_missing"}
+        return _log_fee_estimate(detail | {"reason": "quote_stale" if stale else (reason or "quote_missing")}, now)
+    if quoted.get("dex_fee_quote_partial") is True:
+        return _log_fee_estimate(detail | {"reason": "quote_partial"}, now)
+    if network.get("ok") is not True:
+        return _log_fee_estimate(detail | {"reason": network.get("reason") or "network_unparsed"}, now)
+    if not isinstance(sol, dict) or sol.get("fresh") is not True or sol.get("used") is not True:
+        missing = prices.get("reason") if isinstance(prices, dict) else None
+        return _log_fee_estimate(detail | {"reason": missing or "usd_unpriced"}, now)
+    try:
+        pool_response = transport({
+            "method": "getAccountInfo", "purpose": "whirlpool_pool", "account": hop["pool"],
+            "commitment": "confirmed", "minContextSlot": tip, "blockhash": proof["blockhash"],
+        })
+        pool_value = pool_response["body"]["result"]["value"]
+        raw = _decoded_account_data(pool_value.get("data"))
+        state = solana_whirlpool.pool_state(raw)
+        fields = solana_whirlpool.pool_fields(raw)
+    except Exception:
+        state, fields = None, None
+    if state is None or fields is None:
+        return _log_fee_estimate(detail | {"reason": "quote_missing"}, now)
+    unit = "lamports" if hop["source_mint"] == solana_tx.NATIVE_MINT else "token_raw"
+    if quoted.get("dex_fee_input_ceiling_unit") != unit:
+        return _log_fee_estimate(detail | {"reason": "fee_unit"}, now)
+    token_is_a = hop["source_mint"] == fields[0]
+    dex_usd = _raw_to_usd(quoted["dex_fee_quote_raw"], unit, sol, state["sqrt_price"], token_is_a)
+    network_usd = _raw_to_usd(network["network_lamports"], "lamports", sol, state["sqrt_price"], token_is_a)
+    if dex_usd is None or network_usd is None:
+        return _log_fee_estimate(detail | {"reason": "usd_unpriced"}, now)
+    total = dex_usd + network_usd
+    detail = detail | {
+        "dex_fee_usd": format(dex_usd, "f"),
+        "network_fee_usd": format(network_usd, "f"),
+        "estimated_fee_usd": format(total, "f"),
+        "dex_fee_quote_unit": unit,
+        "price_source": "pyth_sponsored_sol_usd",
+        "token_converted_through_pool_sqrt": unit == "token_raw",
+    }
+    if total > memecoin_desk.MAX_FEE:
+        return _log_fee_estimate(detail | {"reason": "fee_estimate_above_0.05"}, now)
+    return _log_fee_estimate(detail | {"fee_estimate_skip": False, "reason": "signer_unimplemented"}, now)
+
+
+def _log_fee_estimate(body: dict, now: float) -> dict:
+    import memecoin_desk
+    import db
+    evidence = {
+        "label": FEE_ESTIMATE_LABEL,
+        "guaranteed_cap": False,
+        "hard_cap": False,
+        "attempt": body.get("attempt"),
+        "side": body.get("side"),
+        "reason": body.get("reason"),
+        "estimated_fee_usd": body.get("estimated_fee_usd"),
+        "dex_fee_usd": body.get("dex_fee_usd"),
+        "network_fee_usd": body.get("network_fee_usd"),
+        "dex_fee_quote_raw": body.get("dex_fee_quote_raw"),
+        "dex_fee_quote_unit": body.get("dex_fee_quote_unit"),
+        "base_fee_lamports": body.get("base_fee_lamports"),
+        "priority_lamports": body.get("priority_lamports"),
+        "tip_lamports": body.get("tip_lamports"),
+        "network_lamports": body.get("network_lamports"),
+        "message_sha256": body.get("message_sha256"),
+        "sign": False,
+    }
+    case_id = body.get("case_id")
+    try:
+        row = memecoin_desk._case(case_id) if isinstance(case_id, str) else None
+        mint = None if row is None else row["mint"]
+        verdict = "skip" if body.get("fee_estimate_skip") is not False else "pass"
+        db.exclusive(lambda conn: memecoin_desk._log(
+            conn, case_id, mint, "fee_estimate", verdict, body.get("reason"), FEE_ESTIMATE_LABEL, evidence, float(now),
+        ))
+    except Exception:
+        pass
+    return body
+
+
+def _safe_landed_fee_log(case_id: str, signature: str, transport, now: float) -> None:
+    try:
+        log_landed_fee_against_estimate(case_id, signature, transport, now)
+    except Exception:
+        return
+
+
+def log_landed_fee_against_estimate(case_id: str, signature: str, transport, now: float) -> dict:
+    """Write the pre-sign estimate beside the landed fee. Neither number is a cap."""
+    import memecoin_desk
+    import db
+    import pyth_sponsored
+    blank = {
+        "logged": False, "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False,
+        "hard_cap": False, "overrun": None, "sign": False,
+    }
+    memecoin_desk._ensure()
+    fees = db.query("SELECT * FROM memecoin_landed_swap_fee WHERE signature = ?", (signature,))
+    if len(fees) != 1 or fees[0]["case_id"] != case_id:
+        return blank | {"reason": "landed_fee_missing"}
+    landed = fees[0]
+    logs = db.query(
+        "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'fee_estimate' AND verdict = 'pass' ORDER BY id DESC",
+        (case_id,),
+    )
+    estimate = None
+    for row in logs:
+        try:
+            parsed = __import__("json").loads(row["evidence_json"])
+        except Exception:
+            continue
+        if parsed.get("message_sha256") == landed["message_sha256"] and parsed.get("estimated_fee_usd"):
+            estimate = parsed
+            break
+    if estimate is None:
+        return blank | {"reason": "estimate_missing"}
+    prices = pyth_sponsored.read_accounts(transport, now)
+    sol = prices.get("sol") if isinstance(prices, dict) else None
+    if not isinstance(sol, dict) or sol.get("fresh") is not True:
+        evidence = {
+            "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False, "hard_cap": False,
+            "estimated_fee_usd": estimate.get("estimated_fee_usd"),
+            "landed_lp_fee": landed["lp_fee"], "landed_protocol_fee": landed["protocol_fee"],
+            "landed_fee_unit": landed["fee_unit"], "landed_network_lamports": landed["network_fee_lamports"],
+            "overrun": None, "reason": "usd_unpriced",
+        }
+        _write_overrun_log(case_id, evidence, now)
+        return blank | evidence | {"logged": True}
+    try:
+        dex_raw = int(landed["lp_fee"]) + int(landed["protocol_fee"])
+        sqrt_price = int(landed["pre_sqrt_price"])
+    except (TypeError, ValueError):
+        return blank | {"reason": "landed_fee_missing"}
+    token_is_a = landed["a_to_b"] == 1
+    dex_usd = _raw_to_usd(dex_raw, landed["fee_unit"], sol, sqrt_price, token_is_a)
+    network_usd = _raw_to_usd(int(landed["network_fee_lamports"]), "lamports", sol, sqrt_price, token_is_a)
+    if dex_usd is None or network_usd is None:
+        return blank | {"reason": "usd_unpriced"}
+    landed_usd = dex_usd + network_usd
+    estimated = memecoin_desk._money(estimate.get("estimated_fee_usd"))
+    overrun = estimated is not None and landed_usd > estimated
+    evidence = {
+        "label": FEE_ESTIMATE_LABEL, "guaranteed_cap": False, "hard_cap": False,
+        "estimated_fee_usd": estimate.get("estimated_fee_usd"),
+        "landed_fee_usd": format(landed_usd, "f"),
+        "landed_dex_usd": format(dex_usd, "f"),
+        "landed_network_usd": format(network_usd, "f"),
+        "landed_fee_unit": landed["fee_unit"],
+        "overrun": overrun,
+        "message_sha256": landed["message_sha256"],
+        "signature": signature,
+    }
+    _write_overrun_log(case_id, evidence, now)
+    return blank | evidence | {"logged": True, "reason": "landed_above_estimate" if overrun else None}
+
+
+def _write_overrun_log(case_id: str, evidence: dict, now: float) -> None:
+    import memecoin_desk
+    import db
+    row = memecoin_desk._case(case_id)
+    mint = None if row is None else row["mint"]
+    db.exclusive(lambda conn: memecoin_desk._log(
+        conn, case_id, mint, "fee_estimate", "landed", evidence.get("reason"), FEE_ESTIMATE_LABEL, evidence, float(now),
+    ))
+
+
 def _reserved_pool_fee(transport, proof, decoded, tip: int) -> dict:
     """Static Whirlpool fee rate on the reserved hop's pool account.
 
@@ -3876,6 +4171,8 @@ def record_landed_swap_fee(case_id: str, signature: str, transport, now: float) 
             and seen["pre_sqrt_price"] == pre_text and seen["post_sqrt_price"] == post_text
             and seen["network_fee_lamports"] == bound["fee"]
         )
+        if same_fields:
+            _safe_landed_fee_log(case_id, signature, transport, now)
         return _fee_gap(flow, None if same_fields else "fee_conflict") | {
             "fee_recorded": bool(same_fields), "fee_proven": bool(same_fields), "idempotent": bool(same_fields),
             "lp_fee": lp_text if same_fields else None, "protocol_fee": protocol_text if same_fields else None,
@@ -3903,12 +4200,14 @@ def record_landed_swap_fee(case_id: str, signature: str, transport, now: float) 
             raise
         raced = db.query("SELECT * FROM memecoin_landed_swap_fee WHERE signature = ?", (signature,))
         if raced and raced[0]["lp_fee"] == lp_text and raced[0]["protocol_fee"] == protocol_text and raced[0]["fee_unit"] == unit:
+            _safe_landed_fee_log(case_id, signature, transport, now)
             return _fee_gap(flow, None) | {
                 "fee_recorded": True, "fee_proven": True, "idempotent": True,
                 "lp_fee": lp_text, "protocol_fee": protocol_text, "fee_unit": unit,
                 "network_fee_lamports": bound["fee"],
             }
         return _fee_gap(flow, "fee_conflict")
+    _safe_landed_fee_log(case_id, signature, transport, now)
     return _fee_gap(flow, None) | {
         "fee_recorded": True, "fee_proven": True, "idempotent": False, "fee_reason": None,
         "lp_fee": lp_text, "protocol_fee": protocol_text, "fee_unit": unit,

@@ -106,7 +106,7 @@ def _canonical() -> bytes:
     )
 
 
-def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None, signers: int = 1, fund_mint: str | None = None, blockhash: str | None = None) -> str:
+def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000, omit_limit: bool = False, side: str = "buy", extra_transfer: str | None = None, signers: int = 1, fund_mint: str | None = None, blockhash: str | None = None, tip_lamports: int = 1) -> str:
     ordered = []
     def add(pubkey: str) -> None:
         if pubkey not in ordered:
@@ -144,11 +144,14 @@ def _tx(metas: list[dict], swap: bytes, limit: int = 200_000, price: int = 1_000
         instructions = head + ([mint_create] if mint_create is not None else []) + [create, transfer, sync, swap_ix, close]
     else:
         instructions = head + ([mint_create] if mint_create is not None else []) + [swap_ix, close]
+    readonly_count = len(readonly)
     if extra_transfer is not None:
         if extra_transfer not in index:
-            raise AssertionError("extra")
-        instructions.append((index[solana_tx.SYSTEM_PROGRAM], [index[WALLET], index[extra_transfer]], (2).to_bytes(4, "little") + (1).to_bytes(8, "little")))
-    return solana_tx.encode_legacy(WALLET, ordered, len(readonly), instructions, blockhash or solana_tx.b58encode(b"\x44" * 32), required=signers)
+            ordered.append(extra_transfer)
+            index[extra_transfer] = len(ordered) - 1
+            readonly_count += 1
+        instructions.append((index[solana_tx.SYSTEM_PROGRAM], [index[WALLET], index[extra_transfer]], (2).to_bytes(4, "little") + int(tip_lamports).to_bytes(8, "little")))
+    return solana_tx.encode_legacy(WALLET, ordered, readonly_count, instructions, blockhash or solana_tx.b58encode(b"\x44" * 32), required=signers)
 
 
 def _prices(slot: int = PRICE_SLOT, sol_raw: bytes | None = None, usdc_raw: bytes | None = None):
