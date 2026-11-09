@@ -169,6 +169,10 @@ def collect_holder_count(mint: str, reading: dict) -> dict:
     """
     if not isinstance(reading, dict):
         return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False}
+    if reading.get("source") == "solana_tracker_holders_chart":
+        import public_filter_docs
+        parsed = public_filter_docs.parse_holder_chart(reading.get("body"), mint)
+        return parsed | {"written": False, "booked": False}
     if reading.get("source") != "desk_holder_count" or "holder_count" not in reading:
         return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False}
     return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False, "mint": mint}
