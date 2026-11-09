@@ -353,6 +353,15 @@ def match_entry(reserved: dict, signature: str, pulled: dict) -> dict:
         return refused | {"reason": "rent_unproven", "network_fee_lamports": fee, "wallet_spent_lamports": spent}
     if spent != int(reserved["input_lamports"]) + fee + deposit:
         return refused | {"reason": "cost_unsplit", "spent_lamports": spent, "network_fee_lamports": fee, "deposit_lamports": deposit}
+    if any((rent.get(name) or {}).get("user_account_closed") is True for name in ("wsol", "mint_ata", "position_account")):
+        return refused | {"reason": "preexisting_close_refused", "network_fee_lamports": fee, "wallet_spent_lamports": spent}
+    rent_bound = (
+        isinstance(deposit, int) and deposit > 0
+        and mint_row.get("created_in_message") is True
+        and mint_row.get("preexisting") is not True
+        and mint_row.get("pre_lamports") == 0
+        and mint_row.get("post_lamports") == deposit
+    )
     return {
         "ok": True,
         "reason": None,
@@ -371,6 +380,12 @@ def match_entry(reserved: dict, signature: str, pulled: dict) -> dict:
         "network_fee_added_once": True,
         "deposit_lamports": deposit,
         "wallet_spent_lamports": spent,
+        "cost_basis_proven": True,
+        "rent_bound_lamports": deposit if rent_bound else None,
+        "rent_bound_proven": rent_bound,
+        "deposit_refund_proven": False,
+        "deposit_exposure_open": deposit > 0,
+        "preexisting_close_refused": False,
         "proceeds": None,
         "rent": rent,
         "quote_clock_proven": clock["quote_clock_proven"],

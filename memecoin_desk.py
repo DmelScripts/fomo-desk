@@ -969,6 +969,11 @@ def confirm_entry(case_id: str, signature: str, now: float | None = None) -> dic
         fresh.pop("realized_pnl", None)
         fresh["quote_clock_proven"] = proven["quote_clock_proven"]
         fresh["quote_expiry_proven"] = proven["quote_expiry_proven"]
+        fresh["cost_basis_proven"] = proven.get("cost_basis_proven") is True
+        fresh["rent_bound_proven"] = proven.get("rent_bound_proven") is True
+        fresh["rent_bound_lamports"] = proven.get("rent_bound_lamports")
+        fresh["deposit_refund_proven"] = False
+        fresh["deposit_exposure_open"] = proven.get("deposit_exposure_open") is True
         _write_deposits(conn, row["id"], fresh["deposits"])
         if breach:
             _halt_entries(conn, moment)
@@ -1006,6 +1011,11 @@ def confirm_entry(case_id: str, signature: str, now: float | None = None) -> dic
             "fee_policy_breach": breach,
             "entry_halt": breach,
             "entry_funding_proven": True,
+            "cost_basis_proven": fresh["cost_basis_proven"],
+            "rent_bound_proven": fresh["rent_bound_proven"],
+            "rent_bound_lamports": fresh["rent_bound_lamports"],
+            "deposit_refund_proven": False,
+            "deposit_exposure_open": fresh["deposit_exposure_open"],
             "effectual_entry": False,
             "owner_slippage_approved": __import__("owner_slippage").ceiling_bps() == 50,
             "holds": True,

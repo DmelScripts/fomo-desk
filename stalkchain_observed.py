@@ -67,6 +67,43 @@ def _rule(value, limit, above_rejects: bool) -> str:
     return "unknown"
 
 
+def documented_measurement_gaps() -> dict:
+    """What the 8 November capture and the tool contracts actually name.
+
+    stalkchain_token_onchain supplies lpBurnedPercent and one holdersTotal.
+    The capture's own note says that burn percent has no unlock time.
+    stalkchain_token_deployer supplies tokensLaunched and a tokens array whose
+    recorded keys are mint, symbol, liquidityUsd, marketCapUsd,
+    lpBurnedPercent, and hasSocials. That array has no prior-rug flag.
+    risk.rugged is one token's flag, not a history. DexScreener liquidity is
+    not a lock expiry. Two holder samples are growth only when the source,
+    mint, and metric are the same. This capture has holdersTotal and a
+    different snapshot totalHolders, so it is not a growth series.
+    """
+    return {
+        "lp_lock_expiry": {
+            "available": False,
+            "endpoint": "stalkchain_token_onchain",
+            "documented_field": "$.data.lpBurnedPercent",
+            "missing": "unlock time or lock-account expiry",
+            "citation": "tests/fixtures/nov8_observed_mcp_field_mapping.json",
+        },
+        "rug_history": {
+            "available": False,
+            "endpoint": "stalkchain_token_deployer",
+            "documented_fields": ["$.data.tokensLaunched", "$.data.tokens", "$.data.risk.rugged"],
+            "missing": "a prior-rug flag or a complete lookback",
+            "citation": "tests/fixtures/nov8_observed_mcp_field_mapping.json",
+        },
+        "holder_growth": {
+            "available": False,
+            "reason": "one holdersTotal and a different totalHolders are not two samples of one metric",
+            "parser": "holder_growth_series",
+            "citation": "tests/fixtures/nov8_observed_mcp_fixtures.json",
+        },
+    }
+
+
 def holder_growth_series(points) -> dict:
     """Same source, mint, and metric at two increasing capture times. One row is not growth."""
     refused = {"ok": False, "reason": "t0_only", "score_measured": False, "live_ready": False, "cross_source_is_growth": False}
