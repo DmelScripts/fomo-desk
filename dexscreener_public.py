@@ -10,7 +10,7 @@ the network unless a caller passes a transport.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
@@ -169,12 +169,5 @@ def _nested(value, key: str):
 
 
 def _num(value) -> Decimal | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    if not number.is_finite():
-        return None
-    return number
+    import memecoin_desk
+    return memecoin_desk._num(value)

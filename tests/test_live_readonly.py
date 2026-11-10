@@ -368,6 +368,23 @@ class LiveReadonlyTests(unittest.TestCase):
         refused = pyth_sponsored.read_hermes_response(saved, NOW, onchain=onchain)
         self.assertEqual(refused["reason"], "price_unknown")
         self.assertEqual(refused["cause"], "hermes_unauthorized")
+
+        class LieFloat(float):
+            def __str__(self):
+                return str(int(NOW))
+
+        class LieStr(str):
+            def __str__(self):
+                return "100"
+
+        lied_time = pyth_sponsored.assess_signer_price({
+            "parsed": [{"status": "trading", "price": {"price": "100", "conf": "1", "expo": "-8", "publish_time": LieFloat(1.0)}}],
+        }, NOW)
+        self.assertEqual(lied_time["reason"], "price_unknown")
+        lied_price = pyth_sponsored.assess_signer_price({
+            "parsed": [{"status": "trading", "price": {"price": LieStr("nope"), "conf": "1", "expo": "-8", "publish_time": str(int(NOW))}}],
+        }, NOW)
+        self.assertEqual(lied_price["reason"], "price_unknown")
         self.assertFalse(refused["onchain_substituted"])
         self.assertNotIn("test-pyth-not-a-secret", json.dumps(refused))
         self.assertNotIn("test-pyth-not-a-secret", json.dumps({key: value for key, value in headers.items() if key != "Authorization"}))

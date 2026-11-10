@@ -227,12 +227,7 @@ def holder_growth(mint: str) -> dict:
 
 
 def Decimal_from(value):
-    from decimal import Decimal, InvalidOperation
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return number if number.is_finite() else None
+    return memecoin_desk._num(value)
 
 
 def _observations(conn) -> None:
@@ -512,7 +507,7 @@ def _bind_provider_window(window: dict, order: dict, message_blockhash: str, now
             return window | blank | {"ok": False, "reason": "route_expiry_missing", "router": router, "provider_quote_expiry_published": False}
     else:
         return window | blank | {"ok": False, "reason": "route_expiry_unspecified", "router": router if isinstance(router, str) else None}
-    if isinstance(expire_at, int) and not isinstance(expire_at, bool) and float(now) > float(expire_at):
+    if type(expire_at) is int and type(now) is not bool and (type(now) is int or type(now) is float) and float(now) > float(expire_at):
         return window | blank | {"ok": False, "reason": "quote_expired", "router": router, "expire_at": expire_at, "provider_quote_expiry_published": True, "expire_at_enforced": True}
     if isinstance(provider_height, int) and not isinstance(provider_height, bool) and window.get("block_height") > provider_height:
         return window | blank | {
@@ -1225,7 +1220,7 @@ def execution_gate(case_id: str, message_sha256: str, transport, now: float) -> 
     if validity.get("ok") is not True:
         return base | identity | {"reason": validity.get("reason") or "blockhash_validity_missing", "blockhash_valid": validity.get("blockhash_valid")}
     expired = isinstance(stored_last, int) and not isinstance(stored_last, bool) and validity.get("block_height") > stored_last
-    quote_past = isinstance(expire_at, int) and not isinstance(expire_at, bool) and isinstance(now, (int, float)) and not isinstance(now, bool) and float(now) > float(expire_at)
+    quote_past = type(expire_at) is int and (type(now) is int or type(now) is float) and float(now) > float(expire_at)
     if expired or quote_past:
         return base | identity | {
             "reason": "quote_expired" if quote_past and not expired else "blockhash_expired",
@@ -2554,7 +2549,7 @@ def _signer_quote_and_blockhash(proof, decoded, transport, now: float) -> dict:
     if not isinstance(stored, str) or stored == "" or not isinstance(message_hash, str) or message_hash == "":
         return {"ok": False, "reason": "blockhash_unknown"}
     last_valid = proof["last_valid_block_height"]
-    if isinstance(last_valid, bool) or not isinstance(last_valid, int) or not math.isfinite(last_valid) or not last_valid > 0:
+    if type(last_valid) is not int or last_valid <= 0:
         return {"ok": False, "reason": "blockhash_unknown"}
     if not callable(transport):
         return {"ok": False, "reason": "blockhash_unknown"}
@@ -2569,7 +2564,7 @@ def _signer_quote_and_blockhash(proof, decoded, transport, now: float) -> dict:
     valid = _result_field(valid_response, "value")
     if valid is None:
         valid = _result_field(valid_response)
-    if isinstance(height, bool) or not isinstance(height, int) or not math.isfinite(height) or not isinstance(valid, bool):
+    if type(height) is not int or not isinstance(valid, bool):
         return {"ok": False, "reason": "blockhash_unknown"}
     if height >= 0 and height < last_valid and valid is True:
         return {"ok": True}

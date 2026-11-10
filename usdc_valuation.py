@@ -159,12 +159,15 @@ def parse_hermes_latest(payload: dict) -> dict | None:
 
 
 def _hermes_int(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
+    if type(value) is int:
         return value
-    if isinstance(value, str) and value.lstrip("-").isdigit():
-        return int(value)
+    if type(value) is str:
+        text = value.strip()
+        negative = text.startswith("-")
+        digits = text[1:] if negative else text
+        if digits.isdigit() and digits != "" and not digits.startswith("-"):
+            parsed = int(digits)
+            return -parsed if negative else parsed
     return None
 
 
@@ -183,7 +186,7 @@ def assess(quote: dict, now: float) -> dict:
         return _unused("valuation_fields")
     if conf < 0 or expo < -12 or expo > 0:
         return _unused("valuation_scale")
-    if isinstance(now, bool) or not isinstance(now, (int, float)):
+    if type(now) is not int and type(now) is not float:
         return _unused("valuation_clock")
     age = float(now) - published
     if age < -5 or age > MAX_AGE_S:
@@ -378,6 +381,6 @@ def _unused(reason: str) -> dict:
 
 
 def _int(value):
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         return None
     return value

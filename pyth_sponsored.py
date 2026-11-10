@@ -76,9 +76,10 @@ def _refused(reason: str, **extra) -> dict:
 
 def _other_feed(price: int, conf: int, expo: int, published: int, now: float) -> dict:
     """Same age and confidence rules as the USDC valuation, for a different feed id."""
-    if conf < 0 or expo < -12 or expo > 0 or isinstance(now, bool) or not isinstance(now, (int, float)):
+    clock = finite_clock(now)
+    if conf < 0 or expo < -12 or expo > 0 or clock is None or type(published) is not int:
         return {"usable": False, "reason": "valuation_scale"}
-    age = float(now) - published
+    age = clock - published
     if age < -5 or age > usdc_valuation.MAX_AGE_S:
         return {"usable": False, "reason": "valuation_stale"}
     scale = Decimal(10) ** expo
@@ -159,16 +160,14 @@ def parse_account(data: bytes, *, owner: str, address: str, feed_id: str, now: f
 
 def lamports_usd(lamports: int, leg: dict) -> Decimal | None:
     """SOL/USD ceiling for a lamport amount. The pool price is not this rate."""
-    if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0 or not isinstance(leg, dict):
+    if type(lamports) is not int or lamports < 0 or not isinstance(leg, dict):
         return None
     if leg.get("fresh") is not True or leg.get("used") is not True:
         return None
     price = leg.get("price")
     conf = leg.get("conf")
     expo = leg.get("expo")
-    if isinstance(price, bool) or isinstance(conf, bool) or isinstance(expo, bool):
-        return None
-    if not isinstance(price, int) or not isinstance(conf, int) or not isinstance(expo, int):
+    if type(price) is not int or type(conf) is not int or type(expo) is not int:
         return None
     if conf < 0 or expo < -12 or expo > 0:
         return None
@@ -188,8 +187,14 @@ def status(now: float | None = None) -> dict:
     fetched = last.get("fetched") is True
     observed = last.get("observed_at")
     published = last.get("publish_time")
-    observation_age = None if not isinstance(observed, (int, float)) else float(moment) - float(observed)
-    price_age = None if not isinstance(published, int) else float(moment) - published
+    clock = finite_number(moment)
+    observation_age = None
+    price_age = None
+    if type(clock) is int or type(clock) is float:
+        if type(observed) is int or type(observed) is float:
+            observation_age = float(clock) - float(observed)
+        if type(published) is int:
+            price_age = float(clock) - published
     fresh = (
         fetched
         and last.get("valid") is True
@@ -354,36 +359,35 @@ SIGNER_PRICE_CONF_RATIO = Decimal("0.01")
 
 def finite_clock(value):
     """A check time the signer may use. NaN, infinity, and a non-positive clock are refused."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        if not math.isfinite(value) or not value > 0:
+    number = finite_number(value)
+    if type(number) is int:
+        if number <= 0:
             return None
-        return float(value)
-    except (OverflowError, ValueError, ArithmeticError):
+        try:
+            number = float(number)
+        except (OverflowError, ValueError, ArithmeticError):
+            return None
+    if type(number) is not float or not math.isfinite(number) or not number > 0:
         return None
+    return number
 
 
 def finite_number(value):
-    """An int or float that can be compared. NaN, infinity, and an int that will not fit in float are refused."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        if not math.isfinite(value):
-            return None
-    except (OverflowError, ValueError, ArithmeticError):
-        return None
-    return value
+    """Exactly an int or a float. NaN, infinity, and a subclass are refused."""
+    if type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    return None
 
 
 def _signer_int(value) -> int | None:
     """A finite whole number. A float is kept only when it is finite and integral."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, str):
+    if type(value) is str:
+        text = value.strip()
         try:
-            negative = value.startswith("-")
-            digits = value[1:] if negative else value
+            negative = text.startswith("-")
+            digits = text[1:] if negative else text
             if digits.startswith("-") or not digits.isdigit() or digits == "":
                 return None
             parsed = int(digits)
@@ -393,15 +397,15 @@ def _signer_int(value) -> int | None:
             return None
         return parsed if finite_number(parsed) is not None else None
     number = finite_number(value)
-    if number is None:
+    if type(number) is int:
+        return number
+    if type(number) is not float:
         return None
     try:
-        if isinstance(value, float):
-            whole = math.trunc(number)
-            if number != whole:
-                return None
-            return int(whole)
-        return int(number)
+        whole = math.trunc(number)
+        if number != whole:
+            return None
+        return int(whole)
     except (OverflowError, ValueError, ArithmeticError):
         return None
 

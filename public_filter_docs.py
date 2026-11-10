@@ -87,7 +87,7 @@ def parse_lp_locked_pct(body) -> dict:
     if not isinstance(body, dict) or "lpLockedPct" not in body:
         return refused
     value = body.get("lpLockedPct")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) is not int and type(value) is not float:
         return refused
     if value != 100:
         return refused | {"lpLockedPct": value}
@@ -115,9 +115,9 @@ def growth_points(parsed: dict):
     from decimal import Decimal
     start = parsed.get("start_holders")
     delta = parsed.get("delta")
-    if isinstance(start, bool) or not isinstance(start, int) or start <= 0:
+    if type(start) is not int or start <= 0:
         return None
-    if isinstance(delta, bool) or not isinstance(delta, int):
+    if type(delta) is not int:
         return None
     points = (Decimal(delta) * Decimal(100)) / Decimal(start)
     if points < 0:
@@ -187,9 +187,9 @@ def parse_holder_chart(body, mint: str) -> dict:
             return refused | {"reason": "point_shape"}
         count = row.get("holders")
         moment = row.get("time")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        if type(count) is not int or count < 0:
             return refused | {"reason": "count_type"}
-        if isinstance(moment, bool) or not isinstance(moment, int):
+        if type(moment) is not int:
             return refused | {"reason": "time_type"}
         points.append((moment, count))
     points.sort()

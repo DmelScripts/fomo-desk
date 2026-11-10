@@ -487,6 +487,26 @@ class MemecoinDeskTests(unittest.TestCase):
         lied_float = {"risk": {"bundlers": {"count": 4, "totalInitialPercentage": LieFloat(50.0)}}}
         self.assertEqual(cross_source.bundle_check(lied_float, None)["reason"], "bundle_unverified")
 
+        class LieChange(float):
+            def __str__(self):
+                return "10"
+
+        cross_source.note_dex(_mint(61), h1=LieChange(80.0))
+        lied_change = memecoin_desk.scout(_pair(_mint(61)), now=NOW)
+        self.assertEqual(lied_change["reason"], "price", lied_change)
+
+        class LieQuote(float):
+            def __str__(self):
+                return "300000"
+
+        spoofed = _passing_cross(_mint(62))
+        spoofed["rugcheck"]["markets"][0]["lp"]["quoteUSD"] = LieQuote(1.0)
+        spoofed["tracker"]["pools"][0]["liquidity"]["quote"] = LieQuote(1.0)
+        spoofed["tracker"]["risk"]["bundlers"] = {"count": 0}
+        cross_source.note_bundle(_mint(62), spoofed)
+        arm_clean_creator(_mint(62))
+        self.assertEqual(memecoin_desk.filter_case(self._open(62), _onchain(), now=NOW)["reason"], "liquidity_source_missing")
+
     def test_rug_reader_and_holder_chart_fail_closed(self):
         import dev_rug_history
         import public_filter_docs

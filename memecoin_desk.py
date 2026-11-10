@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -115,7 +116,8 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if pair.get("market_cap_basis") != "marketCap":
         return _kill(None, mint, "scout", "market_cap_basis", "dexscreener")
     fetched = _num(pair.get("fetched_at"))
-    if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
+    clock = _num(moment)
+    if fetched is None or clock is None or abs(clock - fetched) > FRESH_S:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
     import cross_source
     selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
@@ -123,9 +125,9 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if not isinstance(pair_address, str) or pair_address == "":
         return _kill(None, mint, "scout", why or "pool_missing", "dexscreener")
     created_ms = selected.get("pairCreatedAt") if isinstance(selected, dict) else None
-    if isinstance(created_ms, bool) or not isinstance(created_ms, int) or created_ms < 10**12:
+    if type(created_ms) is not int or created_ms < 10**12:
         return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
-    age = Decimal(str(moment)) - (Decimal(created_ms) / Decimal(1000))
+    age = clock - (Decimal(created_ms) / Decimal(1000))
     if age < MIN_AGE_S or age > MAX_AGE_S:
         return _kill(None, mint, "scout", "age", "dexscreener")
     if "marketCap" not in selected:
@@ -198,7 +200,8 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return _fail(row, "filter", reason, source=source)
 
     fetched = _num(onchain.get("fetched_at"))
-    if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
+    clock = _num(moment)
+    if fetched is None or clock is None or abs(clock - fetched) > FRESH_S:
         return refuse("onchain_stale")
     import dev_rug_history
     import cross_source
@@ -317,7 +320,7 @@ def _fetched_components(mint: str) -> dict:
     sells = hour.get("sells")
     if change is None or volume is None or volume <= 0:
         return {"ok": False, "reason": "component_unverified", "component": "momentum"}
-    if isinstance(buys, bool) or isinstance(sells, bool) or not isinstance(buys, int) or not isinstance(sells, int):
+    if type(buys) is not int or type(sells) is not int:
         return {"ok": False, "reason": "component_unverified", "component": "buy_sell_ratio"}
     trades = buys + sells
     if trades <= 0:
@@ -378,7 +381,11 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     values["holder_growth"] = holder
     values["unique_buyers"] = Decimal("0")
     values["smart_wallets"] = Decimal("0")
-    score = score_from_values(values)
+    plain = {
+        name: format(values[name], "f") if type(values[name]) is Decimal else values[name]
+        for name in ("momentum", "buy_sell_ratio", "holder_growth", "liq_mcap")
+    }
+    score = score_from_values(plain)
     if score is None:
         return _fail(row, "analyst", "component_unverified", evidence)
     evidence["score"] = format(score, "f")
@@ -1823,7 +1830,8 @@ def mark(case_id: str, price_usd: str, *, source: str, fetched_at: float, now: f
     if not isinstance(source, str) or source == "":
         return _note(row, "risk", "mark_source")
     fetched = _num(fetched_at)
-    if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
+    clock = _num(moment)
+    if fetched is None or clock is None or abs(clock - fetched) > FRESH_S:
         return _note(row, "risk", "mark_stale")
     price = _money(price_usd)
     if price is None:
@@ -4948,11 +4956,25 @@ def _money(value) -> Decimal | None:
 
 
 def _num(value) -> Decimal | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    """An exact int, float, or str. Subclasses and their string forms are not numbers."""
+    if type(value) is int:
+        number = Decimal(value)
+    elif type(value) is float:
+        if not math.isfinite(value):
+            return None
+        try:
+            number = Decimal(repr(float(value)))
+        except (InvalidOperation, ValueError):
+            return None
+    elif type(value) is str:
+        text = value.strip()
+        if text == "":
+            return None
+        try:
+            number = Decimal(text)
+        except (InvalidOperation, ValueError):
+            return None
+    else:
         return None
     if not number.is_finite():
         return None
