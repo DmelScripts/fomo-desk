@@ -621,3 +621,85 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertEqual(priced["reason"], "allocation", priced)
         held = db.exclusive(lambda conn: memecoin_desk._held_conn(conn, unknown_is_none=True, now=NOW))
         self.assertGreater(held, Decimal("90"))
+
+    def test_a_payer_token_transfer_and_an_uncapped_priority_fee_are_refused(self):
+        import base64
+        from tests.test_jupiter_route_v2 import _metas, _route, _tx
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, case_mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        transport = self._transport(accounts)
+        pyth_sponsored.read_accounts(transport, NOW)
+        wallet = phantom_transport.REQUIRED_WALLET
+        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+
+        def extend(encoded, extra_keys, program_index, ix_accounts, ix_data):
+            decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+            keys = list(decoded.static_keys) + extra_keys
+            instructions = [(ix.program_index, list(ix.account_indexes), bytes(ix.data)) for ix in decoded.instructions]
+            instructions.append((program_index, ix_accounts, ix_data))
+            return solana_tx.encode_legacy(
+                decoded.fee_payer, keys, decoded.readonly_unsigned + len(extra_keys), instructions,
+                decoded.blockhash, required=decoded.required_signatures,
+            )
+
+        plain = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        decoded = solana_tx.decode_transaction(base64.b64decode(plain))
+        token_program = decoded.static_keys.index(solana_tx.TOKEN_PROGRAM)
+        source = solana_tx.b58encode(b"\xab" * 32)
+        dest = solana_tx.b58encode(b"\xac" * 32)
+        stolen = extend(
+            plain, [source, dest], token_program,
+            [len(decoded.static_keys), len(decoded.static_keys) + 1, 0],
+            bytes([3]) + (2_000_000_000).to_bytes(8, "little"),
+        )
+        stolen_digest = self._store(stolen, exit_values["pool"], "exit", "foreign-transfer")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'foreign-transfer'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        moved = desk_loop.mock_phantom_sign(stolen_digest, auth, NOW, transport)
+        self.assertFalse(moved["signed"], moved)
+        self.assertEqual(moved["reason"], "unparseable_instruction")
+        self.assertFalse(moved["ticket_limit_proven"])
+        self.assertFalse(moved["allocation_proven"])
+
+        position = solana_tx.associated_token_address(wallet, case_mint, solana_tx.TOKEN_PROGRAM)
+        within = extend(
+            plain, [position, dest], token_program,
+            [len(decoded.static_keys), len(decoded.static_keys) + 1, 0],
+            bytes([3]) + (4).to_bytes(8, "little"),
+        )
+        within_digest = self._store(within, exit_values["pool"], "exit", "position-transfer")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'position-transfer'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        kept = desk_loop.mock_phantom_sign(within_digest, auth, NOW, transport)
+        self.assertTrue(kept["signed"], kept)
+        self.assertFalse(kept["ticket_limit_proven"])
+        self.assertFalse(kept["allocation_proven"])
+        over = extend(
+            plain, [position, dest], token_program,
+            [len(decoded.static_keys), len(decoded.static_keys) + 1, 0],
+            bytes([3]) + (5).to_bytes(8, "little"),
+        )
+        over_digest = self._store(over, exit_values["pool"], "exit", "position-over")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'position-over'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        too_much = desk_loop.mock_phantom_sign(over_digest, auth, NOW, transport)
+        self.assertFalse(too_much["signed"], too_much)
+        self.assertEqual(too_much["reason"], "unparseable_instruction")
+
+        expensive = _tx(
+            _metas(case_mint, solana_tx.NATIVE_MINT, exit_values), _route(100, 50, True, amount=4),
+            limit=200_000, price=10**12, side="exit", extra_transfer=None, tip_lamports=0,
+            blockhash=solana_tx.b58encode(b"\x44" * 32),
+        )
+        expensive_digest = self._store(expensive, exit_values["pool"], "exit", "priority-cap")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'priority-cap'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        capped = desk_loop.mock_phantom_sign(expensive_digest, auth, NOW, transport)
+        self.assertFalse(capped["signed"], capped)
+        self.assertEqual(capped["reason"], "fee_cap")
+        self.assertFalse(capped["ticket_limit_proven"])
+        self.assertFalse(capped["allocation_proven"])
+
+        duplicated = extend(plain, [], decoded.static_keys.index(solana_tx.COMPUTE_BUDGET), [], bytes([2]) + (200_000).to_bytes(4, "little"))
+        duplicated_digest = self._store(duplicated, exit_values["pool"], "exit", "duplicate-budget")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'duplicate-budget'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        twice = desk_loop.mock_phantom_sign(duplicated_digest, auth, NOW, transport)
+        self.assertFalse(twice["signed"], twice)
+        self.assertEqual(twice["reason"], "unparseable_instruction")

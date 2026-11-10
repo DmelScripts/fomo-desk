@@ -2095,28 +2095,83 @@ def _message_deposit_lamports(decoded, transport) -> dict:
     return {"ok": True, "lamports": held}
 
 
-def _message_outflow(decoded, transport) -> dict:
+def _payer_token_ix(decoded, data: bytes, keys: list, wallet: str, wsol: str, position_ata: str | None, side: str, remaining) -> dict:
+    """Token instructions the payer signs. Anything else is refused."""
+    import solana_tx
+    refused = {"ok": False, "reason": "unparseable_instruction"}
+    if data == bytes([17]):
+        if keys == [wsol]:
+            return {"ok": True, "wsol": 0, "position": 0}
+        return refused
+    if data == bytes([9]):
+        if keys == [wsol, wallet, wallet]:
+            return {"ok": True, "wsol": 0, "position": 0}
+        return refused
+    amount = solana_tx.token_transfer(data)
+    authority = keys[2] if amount is not None and len(keys) >= 3 else None
+    source = keys[0] if amount is not None and len(keys) >= 3 else None
+    checked = None
+    if amount is None:
+        checked = solana_tx.transfer_checked(data)
+        if checked is not None and len(keys) >= 4:
+            amount = checked[0]
+            source = keys[0]
+            authority = keys[3]
+            if keys[1] != solana_tx.NATIVE_MINT and not (side == "exit" and source == position_ata):
+                return refused
+        else:
+            return refused
+    signers = set(decoded.static_keys[:decoded.required_signatures])
+    if authority not in signers:
+        return refused
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+        return refused
+    if source == wsol and authority == wallet:
+        return {"ok": True, "wsol": amount, "position": 0}
+    if side == "exit" and position_ata is not None and source == position_ata and authority == wallet:
+        if isinstance(remaining, bool) or not isinstance(remaining, int) or remaining < 0 or amount > remaining:
+            return refused
+        return {"ok": True, "wsol": 0, "position": amount}
+    return refused
+
+
+def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
     """Every lamport and wSOL unit that leaves the payer, plus the rent of new ATAs.
 
-    Network and priority fees are parsed and are not exposure. Any other program,
-    or a known program with an unknown layout, is unparseable_instruction.
+    Compute-budget limit and price are returned for the fee check and are not
+    exposure. A token movement the payer signs is refused unless it is the
+    payer's wSOL or the position sold on an exit.
     """
     import jupiter_route_v2
     import phantom_transport
     import solana_jupiter
     import solana_tx
     refused = {"ok": False}
-    if getattr(decoded, "lookups", None):
+    if getattr(decoded, "lookups", None) or decoded.required_signatures != 1:
         return refused | {"reason": "unparseable_instruction"}
     wallet = phantom_transport.REQUIRED_WALLET
+    if decoded.fee_payer != wallet or decoded.static_keys[:1] != [wallet]:
+        return refused | {"reason": "unparseable_instruction"}
     try:
         wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
     except Exception:
         return refused | {"reason": "unparseable_instruction"}
+    position_mint = None if case is None else case["mint"]
+    position_ata = None
+    if isinstance(position_mint, str) and position_mint != "":
+        try:
+            position_ata = solana_tx.associated_token_address(wallet, position_mint, solana_tx.TOKEN_PROGRAM)
+        except Exception:
+            return refused | {"reason": "unparseable_instruction"}
+    snap = {} if case is None else __import__("memecoin_desk")._snapshot(case)
+    remaining = snap.get("remaining_raw")
     lamport_out = 0
     wsol_out = 0
+    position_out = 0
     route_sol = 0
     routes = 0
+    cu_limit = None
+    cu_price = None
     for instruction in decoded.instructions:
         try:
             program = decoded.static_keys[instruction.program_index]
@@ -2125,14 +2180,28 @@ def _message_outflow(decoded, transport) -> dict:
             return refused | {"reason": "unparseable_instruction"}
         data = bytes(instruction.data)
         if program == solana_tx.COMPUTE_BUDGET:
-            if solana_tx.compute_budget_payload(data) is None:
+            parsed = solana_tx.compute_budget_payload(data)
+            if parsed is None:
                 return refused | {"reason": "unparseable_instruction"}
-            continue
+            tag, payload, _length = parsed
+            if tag == 2:
+                if cu_limit is not None:
+                    return refused | {"reason": "unparseable_instruction"}
+                cu_limit = int.from_bytes(payload, "little")
+                continue
+            if tag == 3:
+                if cu_price is not None:
+                    return refused | {"reason": "unparseable_instruction"}
+                cu_price = int.from_bytes(payload, "little")
+                continue
+            return refused | {"reason": "unparseable_instruction"}
         if program == solana_tx.SYSTEM_PROGRAM:
             moved = solana_tx.system_transfer(data)
             if moved is not None and len(keys) == 2:
                 if keys[0] == wallet:
                     lamport_out += moved
+                elif keys[0] in decoded.static_keys[:decoded.required_signatures]:
+                    return refused | {"reason": "unparseable_instruction"}
                 continue
             created = solana_tx.system_create(data)
             if created is not None and len(keys) >= 2 and keys[0] == wallet:
@@ -2140,33 +2209,16 @@ def _message_outflow(decoded, transport) -> dict:
                 continue
             return refused | {"reason": "unparseable_instruction"}
         if program == solana_tx.ASSOCIATED_TOKEN:
-            if data != bytes([1]) or len(keys) != 6:
+            if data != bytes([1]) or len(keys) != 6 or keys[0] != wallet:
                 return refused | {"reason": "unparseable_instruction"}
             continue
         if program == solana_tx.TOKEN_PROGRAM:
-            if data == bytes([17]):
-                continue
-            if data == bytes([9]):
-                if len(keys) != 3 or keys[1] != wallet or keys[2] != wallet:
-                    return refused | {"reason": "unparseable_instruction"}
-                continue
-            amount = solana_tx.token_transfer(data)
-            if amount is not None and len(keys) >= 3:
-                if keys[0] == wsol and keys[2] == wallet:
-                    wsol_out += amount
-                    continue
-                if keys[0] == wsol:
-                    return refused | {"reason": "unparseable_instruction"}
-                continue
-            checked = solana_tx.transfer_checked(data)
-            if checked is not None and len(keys) >= 4:
-                if keys[1] == solana_tx.NATIVE_MINT and keys[0] == wsol and keys[3] == wallet:
-                    wsol_out += checked[0]
-                    continue
-                if keys[1] == solana_tx.NATIVE_MINT:
-                    return refused | {"reason": "unparseable_instruction"}
-                continue
-            return refused | {"reason": "unparseable_instruction"}
+            allowed = _payer_token_ix(decoded, data, keys, wallet, wsol, position_ata, side, remaining)
+            if allowed.get("ok") is not True:
+                return refused
+            wsol_out += allowed["wsol"]
+            position_out += allowed["position"]
+            continue
         if program == solana_jupiter.PROGRAM_ID:
             found = jupiter_route_v2.parse(data)
             if found.get("ok") is not True or isinstance(found.get("in_amount"), bool) or not isinstance(found.get("in_amount"), int):
@@ -2182,12 +2234,20 @@ def _message_outflow(decoded, transport) -> dict:
                 route_sol += found["in_amount"]
             continue
         return refused | {"reason": "unparseable_instruction"}
-    if routes != 1:
+    if routes != 1 or cu_limit is None or cu_price is None or cu_limit <= 0 or cu_limit > 1_400_000 or cu_price < 0:
         return refused | {"reason": "unparseable_instruction"}
+    if isinstance(remaining, bool) or not isinstance(remaining, int) or position_out > remaining:
+        if position_out:
+            return refused | {"reason": "unparseable_instruction"}
     deposit = _message_deposit_lamports(decoded, transport)
     if deposit.get("ok") is not True:
         return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
-    return {"ok": True, "lamports": max(lamport_out, route_sol) + wsol_out + deposit["lamports"]}
+    return {
+        "ok": True,
+        "lamports": max(lamport_out, route_sol) + wsol_out + deposit["lamports"],
+        "cu_limit": cu_limit,
+        "cu_price": cu_price,
+    }
 
 
 def _signer_capital(message_sha256: str, now, transport) -> dict:
@@ -2207,15 +2267,23 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
     except Exception:
         return refused | {"reason": "exposure_unknown"}
-    outflow = _message_outflow(decoded, transport)
+    case = memecoin_desk._case(proof["case_id"])
+    outflow = _message_outflow(decoded, transport, case, proof["side"] if isinstance(proof["side"], str) else "")
     if outflow.get("ok") is not True:
         return refused | {"reason": outflow.get("reason") or "unparseable_instruction"}
-    if outflow["lamports"] == 0:
-        return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True}
     moment = time.time() if now is None else now
     sol = pyth_sponsored.sol_leg(moment)
     if sol.get("fresh") is not True or sol.get("used") is not True:
         return refused | {"reason": "price_unknown"}
+    import jupiter_route_v2
+    priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
+    fee_usd = pyth_sponsored.lamports_usd(priority + jupiter_route_v2.BASE_FEE_LAMPORTS, sol)
+    if fee_usd is None:
+        return refused | {"reason": "price_unknown"}
+    if fee_usd > memecoin_desk.MAX_FEE:
+        return refused | {"reason": "fee_cap"}
+    if outflow["lamports"] == 0:
+        return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True}
     usd = pyth_sponsored.lamports_usd(outflow["lamports"], sol)
     if usd is None:
         return refused | {"reason": "price_unknown"}
