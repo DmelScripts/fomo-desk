@@ -358,18 +358,19 @@ class MemecoinDeskTests(unittest.TestCase):
         measured = _components()
         measured["holder_growth"]["value"] = "1"
         scored = memecoin_desk.analyze(good, measured, now=NOW)
-        self.assertEqual(scored["reason"], "smart_wallets_missing", scored)
+        self.assertEqual(scored["reason"], "score", scored)
         self.assertEqual(calls, [])
 
     def test_score_boundaries_and_missing_provenance(self):
         low = self._filtered(29)
         scored = memecoin_desk.analyze(low, _components(momentum={"value": "65", "source": "holder_reader", "fetched_at": NOW}), now=NOW)
-        self.assertEqual(scored["reason"], "smart_wallets_missing")
+        self.assertEqual(scored["reason"], "score")
         passed = memecoin_desk.analyze(self._filtered(30), _components(), now=NOW)
-        self.assertEqual(passed["reason"], "smart_wallets_missing", passed)
-        incomplete = _components()
-        del incomplete["unique_buyers"]
-        self.assertEqual(memecoin_desk.analyze(self._filtered(31), incomplete, now=NOW)["reason"], "unique_buyers_missing")
+        self.assertEqual(passed["reason"], "score", passed)
+        for offset, name in enumerate(name for name in memecoin_desk.COMPONENTS if name != "smart_wallets"):
+            incomplete = _components()
+            del incomplete[name]
+            self.assertEqual(memecoin_desk.analyze(self._filtered(80 + offset), incomplete, now=NOW)["reason"], name + "_missing")
         stale = _components()
         stale["holder_growth"] = {"value": "70", "source": "holder_reader", "fetched_at": NOW - 31}
         self.assertEqual(memecoin_desk.analyze(self._filtered(32), stale, now=NOW)["reason"], "holder_growth_unknown")
@@ -377,8 +378,15 @@ class MemecoinDeskTests(unittest.TestCase):
         counts["unique_buyers"] = {"value": "70", "source": "dexscreener_txns", "fetched_at": NOW}
         self.assertEqual(memecoin_desk.analyze(self._filtered(33), counts, now=NOW)["reason"], "unique_buyers_unproven")
         boost = _components()
-        boost["smart_wallets"] = {"value": "70", "source": "dexscreener_boost", "fetched_at": NOW}
-        self.assertEqual(memecoin_desk.analyze(self._filtered(34), boost, now=NOW)["reason"], "smart_wallets_missing")
+        boost["smart_wallets"] = {"value": "100", "source": "dexscreener_boost", "fetched_at": NOW}
+        ignored = self._filtered(34)
+        self.assertEqual(memecoin_desk.analyze(ignored, boost, now=NOW)["reason"], "score")
+        stored = json.loads(db.query(
+            "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND reason = 'score' ORDER BY id DESC LIMIT 1",
+            (ignored,),
+        )[0]["evidence_json"])
+        self.assertEqual(stored["smart_wallets"]["value"], "0")
+        self.assertEqual(stored["smart_wallets_source"], "none_scored_zero")
         skipped = self._open(35)
         self.assertEqual(memecoin_desk.analyze(skipped, _components(), now=NOW)["reason"], "stage")
         self.assertEqual(memecoin_desk.view(skipped)["stage"], "scout_passed")

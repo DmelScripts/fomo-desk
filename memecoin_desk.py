@@ -7,7 +7,10 @@ on 2026-11-10. The other approved risk numbers are the 6% stop, the 12% trail
 arm, the 12% drop from the peak, and liquidity of at least 25% of market cap.
 
 The trail does not lock a profit. A peak that only just arms, times a 12% drop,
-is 0.9856 of entry. Entry is not sent. A fixture route is not a live provider.
+is 0.9856 of entry. Smart wallets have no source, so that component is fixed at
+0 (label none_scored_zero) and a caller value is ignored. The weights stay
+20/20/15/15/15/15, so the highest score is 85 and the other five must reach 70.
+Entry is not sent. A fixture route is not a live provider.
 DexScreener and the on-chain readers are not called from here. The older
 3-hour exit was not restated for this desk, so it is not applied. The paper
 desk still uses its own exit tuple.
@@ -232,7 +235,10 @@ def _holder_growth_value(item: dict, mint: str):
 
 
 def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
-    """Score only measured components. A missing one is a reject, not a zero."""
+    """Score measured components. Smart wallets are 0 because there is no source.
+
+    Every other missing component rejects. A caller smart-wallet value is not read.
+    """
     moment = time.time() if now is None else now
     row = _case(case_id)
     if row is None or row["stage"] != "filter_passed":
@@ -245,14 +251,14 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         "weights_are": "engineering_default",
         "owner_approved": True,
         "approval_source": ANALYST_APPROVAL_SOURCE,
+        "smart_wallets_source": "none_scored_zero",
     }
     for name in COMPONENTS:
-        item = components.get(name)
         if name == "smart_wallets":
-            import stalkchain_observed
-            parsed = stalkchain_observed.parse_smart_wallets(None)
-            if parsed.get("ok") is not True:
-                return _fail(row, "analyst", "smart_wallets_missing", source=item.get("source") if isinstance(item, dict) else None)
+            evidence[name] = {"value": "0", "source": "none_scored_zero"}
+            weighted += WEIGHTS[name] * Decimal("0")
+            continue
+        item = components.get(name)
         if not isinstance(item, dict):
             return _fail(row, "analyst", name + "_missing")
         source = item.get("source")

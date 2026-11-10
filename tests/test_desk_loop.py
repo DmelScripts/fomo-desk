@@ -44,26 +44,58 @@ class DeskLoopTests(unittest.TestCase):
         self.assertTrue(decision["owner_approved"])
         import db
         memecoin_desk._ensure()
-        db.execute(
-            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('score-line', ?, 'filter_passed', '{}', ?, ?, 'paper', 'server')",
-            (MINT, NOW, NOW),
-        )
-        fresh = {name: {"value": "70", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
-        fresh["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
-        arm_holder_chart()
+
+        def row(case_id):
+            db.execute(
+                "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'filter_passed', '{}', ?, ?, 'paper', 'server')",
+                (case_id, MINT, NOW, NOW),
+            )
+
+        def components(value):
+            body = {name: {"value": value, "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+            body["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
+            body["smart_wallets"] = {"value": "100", "source": "caller", "fetched_at": NOW}
+            return body
+
+        def logged(case_id):
+            import json
+            stored = db.query(
+                "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'analyst' ORDER BY id DESC LIMIT 1",
+                (case_id,),
+            )[0]["evidence_json"]
+            return json.loads(stored)
+
         self.addCleanup(clear_filter_fixtures)
-        passed = memecoin_desk.analyze("score-line", fresh, NOW)
-        self.assertEqual(passed["reason"], "smart_wallets_missing", passed)
-        self.assertEqual(memecoin_desk.view("score-line")["stage"], "rejected")
-        db.execute(
-            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('score-line-short', ?, 'filter_passed', '{}', ?, ?, 'paper', 'server')",
-            (MINT, NOW, NOW),
-        )
-        short = {name: {"value": "69", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
-        short["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
-        failed = memecoin_desk.analyze("score-line-short", short, NOW)
-        self.assertEqual(failed["reason"], "smart_wallets_missing")
-        self.assertEqual(memecoin_desk.view("score-line")["stage"], "rejected")
+        arm_holder_chart(100, 200)
+        row("score-line")
+        passed = memecoin_desk.analyze("score-line", components("100"), NOW)
+        self.assertTrue(passed["ok"], passed)
+        self.assertEqual(passed["stage"], "analyst_passed")
+        body = memecoin_desk.view("score-line")["snapshot"]
+        self.assertEqual(body["score"], "85")
+        self.assertEqual(body["analyst"]["smart_wallets_source"], "none_scored_zero")
+        self.assertEqual(body["analyst"]["smart_wallets"]["value"], "0")
+        self.assertEqual(body["analyst"]["weights"]["smart_wallets"], "15")
+        arm_holder_chart(100, 182)
+        row("score-line-short")
+        failed = memecoin_desk.analyze("score-line-short", components("82"), NOW)
+        self.assertEqual(failed["reason"], "score", failed)
+        self.assertEqual(memecoin_desk.view("score-line-short")["stage"], "rejected")
+        evidence = logged("score-line-short")
+        self.assertEqual(evidence["score"], "69.7")
+        self.assertLess(Decimal(evidence["score"]), Decimal("70"))
+        self.assertEqual(evidence["smart_wallets"]["value"], "0")
+        self.assertEqual(evidence["smart_wallets_source"], "none_scored_zero")
+        arm_holder_chart()
+        row("score-line-seventy")
+        seventy = memecoin_desk.analyze("score-line-seventy", components("70"), NOW)
+        self.assertEqual(seventy["reason"], "score", seventy)
+        self.assertEqual(logged("score-line-seventy")["score"], "59.5")
+        gap = components("100")
+        del gap["momentum"]
+        row("score-line-gap")
+        self.assertEqual(memecoin_desk.analyze("score-line-gap", gap, NOW)["reason"], "momentum_missing")
+        self.assertEqual(memecoin_desk.view("score-line")["stage"], "analyst_passed")
 
     def setUp(self):
         _tmp, restore = temp_desk_env()
@@ -166,7 +198,7 @@ class DeskLoopTests(unittest.TestCase):
             },
             "components": components,
         }, lambda request: rugcheck_or_pair(request, _pair()), NOW)
-        self.assertEqual(screened["reason"], "smart_wallets_missing")
+        self.assertEqual(screened["reason"], "score")
         self.assertEqual(calls["n"], 0)
         self.assertEqual(memecoin_desk.view(MINT)["stage"], "rejected")
 
@@ -919,7 +951,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         self.assertFalse(found["live_ready"])
         self.assertFalse(screened["live_capital"], screened)
-        self.assertEqual(screened.get("reason"), "smart_wallets_missing", screened)
+        self.assertEqual(screened.get("reason"), "score", screened)
         self.assertFalse(screened["sign"])
         self.assertFalse(screened["send"])
         self.assertFalse(screened["signer_reached"])
