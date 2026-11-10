@@ -2401,36 +2401,46 @@ def _result_field(response, name: str | None = None):
     return result.get(name) if isinstance(result, dict) else None
 
 
-def _signer_quote_and_blockhash(proof, transport, now: float) -> dict:
-    """Quote age and the reserved blockhash. The height comes from the injected fixture provider."""
-    created = proof["created_at"]
-    if isinstance(created, bool) or not isinstance(created, (int, float)):
+def _signer_quote_and_blockhash(proof, decoded, transport, now: float) -> dict:
+    """Quote age and the message blockhash. The height comes from the injected fixture provider."""
+    import math
+    import pyth_sponsored
+    clock = pyth_sponsored.finite_clock(now)
+    if clock is None:
         return {"ok": False, "reason": "quote_expired"}
-    age = float(now) - float(created)
-    if age < 0 or age > SIGNER_QUOTE_MAX_AGE_S:
+    created = pyth_sponsored.finite_number(proof["created_at"])
+    if created is None:
         return {"ok": False, "reason": "quote_expired"}
-    blockhash = proof["blockhash"]
-    last_valid = proof["last_valid_block_height"]
-    if not isinstance(blockhash, str) or blockhash == "":
+    age = clock - float(created)
+    if not (0 <= age <= SIGNER_QUOTE_MAX_AGE_S):
+        return {"ok": False, "reason": "quote_expired"}
+    stored = proof["blockhash"]
+    message_hash = getattr(decoded, "blockhash", None)
+    if not isinstance(stored, str) or stored == "" or not isinstance(message_hash, str) or message_hash == "":
         return {"ok": False, "reason": "blockhash_unknown"}
-    if isinstance(last_valid, bool) or not isinstance(last_valid, int) or last_valid <= 0:
+    last_valid = proof["last_valid_block_height"]
+    if isinstance(last_valid, bool) or not isinstance(last_valid, int) or not math.isfinite(last_valid) or not last_valid > 0:
         return {"ok": False, "reason": "blockhash_unknown"}
     if not callable(transport):
         return {"ok": False, "reason": "blockhash_unknown"}
     try:
         height_response = transport({"method": "getBlockHeight", "commitment": "confirmed"})
-        valid_response = transport({"method": "isBlockhashValid", "blockhash": blockhash, "commitment": "confirmed"})
+        valid_response = transport({"method": "isBlockhashValid", "blockhash": message_hash, "commitment": "confirmed"})
     except Exception:
         return {"ok": False, "reason": "blockhash_unknown"}
+    if message_hash != stored:
+        return {"ok": False, "reason": "blockhash_mismatch"}
     height = _result_field(height_response)
     valid = _result_field(valid_response, "value")
     if valid is None:
         valid = _result_field(valid_response)
-    if isinstance(height, bool) or not isinstance(height, int) or not isinstance(valid, bool):
+    if isinstance(height, bool) or not isinstance(height, int) or not math.isfinite(height) or not isinstance(valid, bool):
         return {"ok": False, "reason": "blockhash_unknown"}
+    if height >= 0 and height < last_valid and valid is True:
+        return {"ok": True}
     if height >= last_valid or valid is not True:
         return {"ok": False, "reason": "blockhash_expired"}
-    return {"ok": True}
+    return {"ok": False, "reason": "blockhash_unknown"}
 
 
 def _signer_capital(message_sha256: str, now, transport) -> dict:
@@ -2454,11 +2464,16 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     outflow = _message_outflow(decoded, transport, case, proof["side"] if isinstance(proof["side"], str) else "")
     if outflow.get("ok") is not True:
         return refused | {"reason": outflow.get("reason") or "unparseable_instruction"}
-    moment = time.time() if now is None else now
+    if now is None:
+        moment = time.time()
+    else:
+        moment = pyth_sponsored.finite_clock(now)
+    if moment is None:
+        return refused | {"reason": "price_unknown"}
     priced = _signer_sol_price(transport, moment)
     if priced.get("ok") is not True:
         return refused | {"reason": priced.get("reason") or "price_unknown"}
-    expiry = _signer_quote_and_blockhash(proof, transport, moment)
+    expiry = _signer_quote_and_blockhash(proof, decoded, transport, moment)
     if expiry.get("ok") is not True:
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}

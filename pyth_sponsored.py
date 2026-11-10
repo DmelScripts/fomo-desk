@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import urllib.error
 import urllib.request
@@ -348,20 +349,49 @@ SIGNER_PRICE_FUTURE_SKEW_S = 5
 SIGNER_PRICE_CONF_RATIO = Decimal("0.01")
 
 
+def finite_clock(value):
+    """A check time the signer may use. NaN, infinity, and a non-positive clock are refused."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or not value > 0:
+        return None
+    return float(value)
+
+
+def finite_number(value):
+    """An int or float that can be compared. NaN and infinity are refused before any comparison."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
 def _signer_int(value) -> int | None:
+    """A finite whole number. A float is kept only when it is finite and integral."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.lstrip("-").isdigit():
-        return int(value)
-    return None
+    if isinstance(value, str):
+        text = value.lstrip("-")
+        if text.isdigit() and text != "":
+            return int(value)
+        return None
+    number = finite_number(value)
+    if number is None:
+        return None
+    if isinstance(value, float):
+        whole = math.trunc(number)
+        if number != whole:
+            return None
+        return int(whole)
+    return int(number)
 
 
 def assess_signer_price(payload, now: float) -> dict:
     """One Hermes-shaped SOL/USD update. No network. The signer calls this itself."""
     unknown = {"ok": False, "reason": "price_unknown"}
-    if isinstance(now, bool) or not isinstance(now, (int, float)) or not isinstance(payload, dict):
+    clock = finite_clock(now)
+    if clock is None or not isinstance(payload, dict):
         return unknown
     status_name = payload.get("status")
     price_obj = payload.get("price") if isinstance(payload.get("price"), dict) else None
@@ -379,12 +409,12 @@ def assess_signer_price(payload, now: float) -> dict:
     published = _signer_int(price_obj.get("publish_time"))
     if price is None or conf is None or expo is None or published is None:
         return unknown
-    if price <= 0 or conf < 0 or expo < -12 or expo > 0:
+    if not (price > 0 and conf >= 0 and -12 <= expo <= 0):
         return unknown
-    if Decimal(conf) / Decimal(price) > SIGNER_PRICE_CONF_RATIO:
+    if not (Decimal(conf) / Decimal(price) <= SIGNER_PRICE_CONF_RATIO):
         return {"ok": False, "reason": "price_conf"}
-    age = float(now) - published
-    if age > SIGNER_PRICE_FRESH_S or age < -SIGNER_PRICE_FUTURE_SKEW_S:
+    age = clock - published
+    if not (-SIGNER_PRICE_FUTURE_SKEW_S <= age <= SIGNER_PRICE_FRESH_S):
         return {"ok": False, "reason": "price_stale"}
     return {
         "ok": True,

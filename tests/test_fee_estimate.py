@@ -87,9 +87,10 @@ class FeeEstimateTests(unittest.TestCase):
     def tearDown(self):
         pyth_sponsored._LAST = None
 
-    def _store(self, encoded, pool, side, case_id="fee-case", *, created_at=NOW, last_valid=100):
+    def _store(self, encoded, pool, side, case_id="fee-case", *, created_at=NOW, last_valid=100, blockhash=None):
         digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
         mint = solana_tx.b58encode(b"\x73" * 32)
+        stored_hash = solana_tx.b58encode(b"\x44" * 32) if blockhash is None else blockhash
         db.execute(
             "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'protected', ?, ?, ?, 'live', 'server')",
             (case_id, mint, '{"reserved_usd": "0.00"}', NOW, NOW),
@@ -101,7 +102,7 @@ class FeeEstimateTests(unittest.TestCase):
                 last_valid_block_height, last_valid_provenance, pool, ledger, ledger_provenance, created_at
             ) VALUES (?, ?, ?, ?, 'metis', ?, ?, 'test', ?, 'live', 'server', ?)
             """,
-            (digest, case_id, side, encoded, solana_tx.b58encode(b"\x44" * 32), last_valid, pool, created_at),
+            (digest, case_id, side, encoded, stored_hash, last_valid, pool, created_at),
         )
         return digest
 
@@ -145,11 +146,11 @@ class FeeEstimateTests(unittest.TestCase):
 
         return transport
 
-    def _message(self, values, source, dest, tip, *, side="buy", amount=4, quoted=100, slippage=50):
+    def _message(self, values, source, dest, tip, *, side="buy", amount=4, quoted=100, slippage=50, blockhash=None):
         return _tx(
             _metas(source, dest, values), _route(quoted, slippage, True, amount=amount),
             limit=200_000, price=0, side=side, extra_transfer=TIP_ACCOUNT, tip_lamports=tip,
-            blockhash=solana_tx.b58encode(b"\x44" * 32),
+            blockhash=blockhash or solana_tx.b58encode(b"\x44" * 32),
         )
 
     def test_threshold_boundary_price_staleness_retry_and_network_parts(self):
@@ -943,3 +944,115 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertFalse(refused_exit["signed"], refused_exit)
         self.assertEqual(refused_exit["reason"], "price_stale")
         self.assertFalse(refused_exit["price_freshness_proven"])
+
+    def test_a_non_finite_clock_or_a_different_message_blockhash_cannot_sign(self):
+        import copy
+        import json
+        from pathlib import Path
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        stored_hash = solana_tx.b58encode(b"\x44" * 32)
+        message_hash = solana_tx.b58encode(b"\x99" * 32)
+        exit_values, exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        base = self._transport(exit_accounts)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        template = json.loads((Path(__file__).resolve().parent / "fixtures" / "hermes_sol_usd.json").read_text(encoding="utf-8"))
+
+        def feed(publish_time, *, price="100", conf="0", expo=0):
+            body = copy.deepcopy(template)
+            slot = body["parsed"][0]["price"]
+            slot["publish_time"] = publish_time
+            slot["price"] = price
+            slot["conf"] = conf
+            slot["expo"] = expo
+            body["parsed"][0]["status"] = "trading"
+            return body
+
+        def sign(name, amount, payload, when, *, created_at=1, message_blockhash=stored_hash, stored_blockhash=stored_hash, height=90):
+            asked = []
+            message = self._message(
+                exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=amount, blockhash=message_blockhash,
+            )
+            digest = self._store(
+                message, exit_values["pool"], "exit", name, created_at=created_at, blockhash=stored_blockhash,
+            )
+            db.execute(
+                "UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = ?",
+                ('{"reserved_usd": "0.00", "remaining_raw": %s}' % amount, name),
+            )
+
+            def transport(request):
+                if request.get("method") == "hermes_price":
+                    return {"status": 200, "body": payload}
+                if request.get("method") == "getBlockHeight":
+                    return {"status": 200, "body": {"result": height}}
+                if request.get("method") == "isBlockhashValid":
+                    asked.append(request.get("blockhash"))
+                    return {"status": 200, "body": {"result": {"value": True}}}
+                return base(request)
+
+            signed = desk_loop.mock_phantom_sign(digest, auth, when, transport)
+            signed["asked"] = asked
+            return signed
+
+        for amount, bad in enumerate((float("nan"), float("inf"), float("-inf")), start=4):
+            refused = sign("clock-%s" % amount, amount, feed(1), bad, created_at=1)
+            self.assertFalse(refused["signed"], refused)
+            self.assertEqual(refused["reason"], "price_unknown")
+            self.assertFalse(refused["price_freshness_proven"])
+            self.assertFalse(refused["ticket_limit_proven"])
+            self.assertFalse(refused["allocation_proven"])
+        stopped = sign("clock-zero", 8, feed(0), 0, created_at=0)
+        self.assertFalse(stopped["signed"], stopped)
+        self.assertEqual(stopped["reason"], "price_unknown")
+        self.assertFalse(stopped["price_freshness_proven"])
+        for amount, field in enumerate(("publish_time", "price", "conf", "expo"), start=9):
+            value = float("nan")
+            if field == "publish_time":
+                payload = feed(value)
+            elif field == "price":
+                payload = feed(NOW, price=value)
+            elif field == "conf":
+                payload = feed(NOW, conf=value)
+            else:
+                payload = feed(NOW, expo=value)
+            parsed = pyth_sponsored.assess_signer_price(payload, NOW)
+            self.assertEqual(parsed["reason"], "price_unknown", field)
+            self.assertIsNot(parsed.get("ok"), True)
+            refused = sign("nan-%s" % field, amount, payload, NOW, created_at=NOW)
+            self.assertFalse(refused["signed"], refused)
+            self.assertEqual(refused["reason"], "price_unknown", field)
+            self.assertFalse(refused["price_freshness_proven"])
+
+        class _Message:
+            def __init__(self, blockhash):
+                self.blockhash = blockhash
+
+        nan_quote = desk_loop._signer_quote_and_blockhash(
+            {"created_at": float("nan"), "blockhash": stored_hash, "last_valid_block_height": 100},
+            _Message(stored_hash), base, NOW,
+        )
+        self.assertIsNot(nan_quote.get("ok"), True)
+        self.assertEqual(nan_quote["reason"], "quote_expired")
+        inf_quote = desk_loop._signer_quote_and_blockhash(
+            {"created_at": float("inf"), "blockhash": stored_hash, "last_valid_block_height": 100},
+            _Message(stored_hash), base, NOW,
+        )
+        self.assertEqual(inf_quote["reason"], "quote_expired")
+
+        mismatch = sign("hash-mismatch", 14, feed(NOW), NOW, created_at=NOW, message_blockhash=message_hash, stored_blockhash=stored_hash)
+        self.assertFalse(mismatch["signed"], mismatch)
+        self.assertEqual(mismatch["reason"], "blockhash_mismatch")
+        self.assertEqual(mismatch["asked"], [message_hash])
+        self.assertNotIn(stored_hash, mismatch["asked"])
+        self.assertFalse(mismatch["price_freshness_proven"])
+        self.assertFalse(mismatch["ticket_limit_proven"])
+        missing = sign("hash-missing", 15, feed(NOW), NOW, created_at=NOW, stored_blockhash="")
+        self.assertFalse(missing["signed"], missing)
+        self.assertEqual(missing["reason"], "blockhash_unknown")
+        self.assertEqual(missing["asked"], [])
+        self.assertFalse(missing["price_freshness_proven"])
+        bound = sign("hash-bound", 16, feed(NOW), NOW, created_at=NOW)
+        self.assertTrue(bound["signed"], bound)
+        self.assertEqual(bound["asked"], [stored_hash])
+        self.assertTrue(bound["price_freshness_proven"])
+        self.assertFalse(bound["ticket_limit_proven"])
