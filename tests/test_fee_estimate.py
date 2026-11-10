@@ -549,9 +549,75 @@ class FeeEstimateTests(unittest.TestCase):
         pyth_sponsored.read_accounts(self._transport(exit_accounts), NOW)
         sold = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, self._transport(exit_accounts))
         self.assertTrue(sold["signed"], sold)
-        self.assertTrue(sold["ticket_limit_proven"])
-        self.assertTrue(sold["allocation_proven"])
+        self.assertFalse(sold["ticket_limit_proven"])
+        self.assertFalse(sold["allocation_proven"])
         gates = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "ticket_limit_proven")
         book = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "allocation_proven")
         self.assertTrue(gates["closed"])
         self.assertTrue(book["closed"])
+
+    def test_tips_unknown_programs_and_a_zero_deposit_are_not_free(self):
+        import base64
+        import json
+        from decimal import Decimal
+        mint = solana_tx.b58encode(b"\x79" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        transport = self._transport(accounts)
+        pyth_sponsored.read_accounts(transport, NOW)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('full-book', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x7a" * 32), '{"reserved_usd": "100.00"}', NOW, NOW),
+        )
+        exit_values, _exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        tipped_exit = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 2_000_000_000, side="exit", amount=4)
+        exit_digest = self._store(tipped_exit, exit_values["pool"], "exit", "tip-exit")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'tip-exit'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        exit_refused = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, transport)
+        self.assertFalse(exit_refused["signed"], exit_refused)
+        self.assertEqual(exit_refused["reason"], "ticket")
+        self.assertFalse(exit_refused["ticket_limit_proven"])
+        self.assertFalse(exit_refused["allocation_proven"])
+
+        tipped_entry = self._message(values, solana_tx.NATIVE_MINT, mint, 2_000_000_000, amount=4)
+        entry_digest = self._store(tipped_entry, values["pool"], "entry", "tip-entry")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'tip-entry'", ('{"reserved_usd": "1.00"}',))
+        entry_refused = desk_loop.mock_phantom_sign(entry_digest, auth, NOW, transport)
+        self.assertFalse(entry_refused["signed"], entry_refused)
+        self.assertEqual(entry_refused["reason"], "ticket")
+        self.assertFalse(entry_refused["ticket_limit_proven"])
+
+        plain = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        decoded = solana_tx.decode_transaction(base64.b64decode(plain))
+        keys = list(decoded.static_keys) + [solana_tx.b58encode(b"\x99" * 32)]
+        instructions = [(ix.program_index, list(ix.account_indexes), bytes(ix.data)) for ix in decoded.instructions]
+        instructions.append((len(keys) - 1, [], b"\x01"))
+        unknown = solana_tx.encode_legacy(decoded.fee_payer, keys, decoded.readonly_unsigned + 1, instructions, decoded.blockhash, required=decoded.required_signatures)
+        unknown_digest = self._store(unknown, exit_values["pool"], "exit", "unknown-program")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'unknown-program'", ('{"reserved_usd": "0.00"}',))
+        unknown_refused = desk_loop.mock_phantom_sign(unknown_digest, auth, NOW, transport)
+        self.assertFalse(unknown_refused["signed"], unknown_refused)
+        self.assertEqual(unknown_refused["reason"], "unparseable_instruction")
+        self.assertFalse(unknown_refused["ticket_limit_proven"])
+
+        db.execute("DELETE FROM memecoin_cases")
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('zero-deposit', ?, 'exited', ?, ?, ?, 'live', 'server')",
+            (mint, json.dumps({
+                "reserved_usd": "0.00", "remaining_raw": 0, "deposit_refund_proven": False,
+                "deposits": {"mint_ata": {"account": "ata"}},
+            }), NOW, NOW),
+        )
+        blank = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, "new-ticket", memecoin_desk.TICKET, now=NOW))
+        self.assertEqual(blank["reason"], "exposure_unknown", blank)
+        db.execute(
+            "UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'zero-deposit'",
+            (json.dumps({
+                "reserved_usd": "0.00", "remaining_raw": 0, "deposit_refund_proven": False,
+                "deposits": {"mint_ata": {"account": "ata", "rent_lamports": 950_000_000}},
+            }),),
+        )
+        priced = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, "new-ticket", memecoin_desk.TICKET, now=NOW))
+        self.assertEqual(priced["reason"], "allocation", priced)
+        held = db.exclusive(lambda conn: memecoin_desk._held_conn(conn, unknown_is_none=True, now=NOW))
+        self.assertGreater(held, Decimal("90"))

@@ -2178,13 +2178,13 @@ def _room_for(conn, case_id: str, incoming: Decimal) -> bool:
     return _held_conn(conn, exclude_id=case_id) + incoming <= ALLOCATION
 
 
-def capital_room(conn, case_id: str, incoming: Decimal) -> dict:
+def capital_room(conn, case_id: str, incoming: Decimal, now: float | None = None) -> dict:
     """Open exposure plus this ticket. An unknown hold or price is not a number."""
     if not isinstance(incoming, Decimal) or not incoming.is_finite() or incoming < 0:
         return {"ok": False, "reason": "exposure_unknown"}
     if incoming > TICKET:
         return {"ok": False, "reason": "ticket"}
-    held = _held_conn(conn, exclude_id=case_id, unknown_is_none=True)
+    held = _held_conn(conn, exclude_id=case_id, unknown_is_none=True, now=now)
     if held is None:
         return {"ok": False, "reason": "exposure_unknown"}
     if held + incoming > ALLOCATION:
@@ -2230,7 +2230,33 @@ def _ata_creates(decoded) -> int | None:
     return count
 
 
-def _held_conn(conn, exclude_id=None, *, unknown_is_none: bool = False):
+def _unrefunded_deposit_usd(body: dict, now: float | None) -> Decimal | None:
+    """USD of an open deposit from its rent lamports. Zero or a missing rent is not a value."""
+    import pyth_sponsored
+    deposits = body.get("deposits") if isinstance(body.get("deposits"), dict) else {}
+    lamports = 0
+    saw = False
+    for name in ("mint_ata", "wsol", "position_account"):
+        row = deposits.get(name) if isinstance(deposits, dict) else None
+        if not isinstance(row, dict) or row.get("refunded") is True or row.get("preexisting") is True:
+            continue
+        rent = row.get("rent_lamports")
+        if rent is None and name == "mint_ata":
+            rent = body.get("deposit_hold_lamports")
+        if isinstance(rent, bool) or not isinstance(rent, int) or rent <= 0:
+            return None
+        lamports += rent
+        saw = True
+    if not saw or lamports <= 0:
+        return None
+    moment = time.time() if now is None else now
+    sol = pyth_sponsored.sol_leg(moment)
+    if sol.get("fresh") is not True or sol.get("used") is not True:
+        return None
+    return pyth_sponsored.lamports_usd(lamports, sol)
+
+
+def _held_conn(conn, exclude_id=None, *, unknown_is_none: bool = False, now: float | None = None):
     """Full ticket stays reserved while tokens or an unrefunded deposit remain."""
     total = Decimal("0")
     for item in conn.execute("SELECT id, stage, snapshot_json, ledger, ledger_provenance FROM memecoin_cases"):
@@ -2248,6 +2274,23 @@ def _held_conn(conn, exclude_id=None, *, unknown_is_none: bool = False):
         if item["stage"] == "exited" and not unresolved:
             continue
         reserved = _reserved_amount(body.get("reserved_usd"))
+        if deposit_open:
+            priced = _unrefunded_deposit_usd(body, now)
+            if priced is None or priced <= 0:
+                if reserved is not None and reserved > 0:
+                    total += reserved
+                    continue
+                if unknown_is_none:
+                    return None
+                total += TICKET
+                continue
+            if reserved is None:
+                if unknown_is_none:
+                    return None
+                total += priced
+            else:
+                total += priced if reserved <= 0 else max(reserved, priced)
+            continue
         if reserved is None:
             if unknown_is_none:
                 return None

@@ -2095,15 +2095,108 @@ def _message_deposit_lamports(decoded, transport) -> dict:
     return {"ok": True, "lamports": held}
 
 
+def _message_outflow(decoded, transport) -> dict:
+    """Every lamport and wSOL unit that leaves the payer, plus the rent of new ATAs.
+
+    Network and priority fees are parsed and are not exposure. Any other program,
+    or a known program with an unknown layout, is unparseable_instruction.
+    """
+    import jupiter_route_v2
+    import phantom_transport
+    import solana_jupiter
+    import solana_tx
+    refused = {"ok": False}
+    if getattr(decoded, "lookups", None):
+        return refused | {"reason": "unparseable_instruction"}
+    wallet = phantom_transport.REQUIRED_WALLET
+    try:
+        wsol = solana_tx.associated_token_address(wallet, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return refused | {"reason": "unparseable_instruction"}
+    lamport_out = 0
+    wsol_out = 0
+    route_sol = 0
+    routes = 0
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return refused | {"reason": "unparseable_instruction"}
+        data = bytes(instruction.data)
+        if program == solana_tx.COMPUTE_BUDGET:
+            if solana_tx.compute_budget_payload(data) is None:
+                return refused | {"reason": "unparseable_instruction"}
+            continue
+        if program == solana_tx.SYSTEM_PROGRAM:
+            moved = solana_tx.system_transfer(data)
+            if moved is not None and len(keys) == 2:
+                if keys[0] == wallet:
+                    lamport_out += moved
+                continue
+            created = solana_tx.system_create(data)
+            if created is not None and len(keys) >= 2 and keys[0] == wallet:
+                lamport_out += created[0]
+                continue
+            return refused | {"reason": "unparseable_instruction"}
+        if program == solana_tx.ASSOCIATED_TOKEN:
+            if data != bytes([1]) or len(keys) != 6:
+                return refused | {"reason": "unparseable_instruction"}
+            continue
+        if program == solana_tx.TOKEN_PROGRAM:
+            if data == bytes([17]):
+                continue
+            if data == bytes([9]):
+                if len(keys) != 3 or keys[1] != wallet or keys[2] != wallet:
+                    return refused | {"reason": "unparseable_instruction"}
+                continue
+            amount = solana_tx.token_transfer(data)
+            if amount is not None and len(keys) >= 3:
+                if keys[0] == wsol and keys[2] == wallet:
+                    wsol_out += amount
+                    continue
+                if keys[0] == wsol:
+                    return refused | {"reason": "unparseable_instruction"}
+                continue
+            checked = solana_tx.transfer_checked(data)
+            if checked is not None and len(keys) >= 4:
+                if keys[1] == solana_tx.NATIVE_MINT and keys[0] == wsol and keys[3] == wallet:
+                    wsol_out += checked[0]
+                    continue
+                if keys[1] == solana_tx.NATIVE_MINT:
+                    return refused | {"reason": "unparseable_instruction"}
+                continue
+            return refused | {"reason": "unparseable_instruction"}
+        if program == solana_jupiter.PROGRAM_ID:
+            found = jupiter_route_v2.parse(data)
+            if found.get("ok") is not True or isinstance(found.get("in_amount"), bool) or not isinstance(found.get("in_amount"), int):
+                return refused | {"reason": "unparseable_instruction"}
+            if len(instruction.account_indexes) < 4:
+                return refused | {"reason": "unparseable_instruction"}
+            try:
+                source = decoded.static_keys[instruction.account_indexes[3]]
+            except (IndexError, TypeError):
+                return refused | {"reason": "unparseable_instruction"}
+            routes += 1
+            if source == solana_tx.NATIVE_MINT:
+                route_sol += found["in_amount"]
+            continue
+        return refused | {"reason": "unparseable_instruction"}
+    if routes != 1:
+        return refused | {"reason": "unparseable_instruction"}
+    deposit = _message_deposit_lamports(decoded, transport)
+    if deposit.get("ok") is not True:
+        return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
+    return {"ok": True, "lamports": max(lamport_out, route_sol) + wsol_out + deposit["lamports"]}
+
+
 def _signer_capital(message_sha256: str, now, transport) -> dict:
-    """Recompute the ticket and the book from the reserved message. A snapshot figure is not this."""
+    """Price the whole-message outflow. A reduce-only parse does not set the flags."""
     import base64
     import db
     import time
-    import jupiter_route_v2
     import memecoin_desk
     import pyth_sponsored
-    import solana_jupiter
     import solana_tx
     refused = {"ok": False, "ticket_limit_proven": False, "allocation_proven": False}
     rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
@@ -2114,42 +2207,30 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
     except Exception:
         return refused | {"reason": "exposure_unknown"}
+    outflow = _message_outflow(decoded, transport)
+    if outflow.get("ok") is not True:
+        return refused | {"reason": outflow.get("reason") or "unparseable_instruction"}
+    if outflow["lamports"] == 0:
+        return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True}
     moment = time.time() if now is None else now
     sol = pyth_sponsored.sol_leg(moment)
     if sol.get("fresh") is not True or sol.get("used") is not True:
         return refused | {"reason": "price_unknown"}
-    parsed = None
-    source_mint = None
-    for instruction in decoded.instructions:
-        try:
-            program = decoded.static_keys[instruction.program_index]
-        except (IndexError, TypeError):
-            return refused | {"reason": "exposure_unknown"}
-        if program != solana_jupiter.PROGRAM_ID:
-            continue
-        found = jupiter_route_v2.parse(bytes(instruction.data))
-        if found.get("ok") is not True or not isinstance(found.get("in_amount"), int) or isinstance(found.get("in_amount"), bool):
-            return refused | {"reason": "exposure_unknown"}
-        try:
-            source_mint = decoded.static_keys[instruction.account_indexes[3]]
-        except (IndexError, TypeError):
-            return refused | {"reason": "exposure_unknown"}
-        parsed = found
-    if parsed is None or not isinstance(source_mint, str):
-        return refused | {"reason": "exposure_unknown"}
-    deposit = _message_deposit_lamports(decoded, transport)
-    if deposit.get("ok") is not True:
-        return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
-    adds_sol = source_mint == solana_tx.NATIVE_MINT
-    if proof["side"] == "exit" and not adds_sol and deposit["lamports"] == 0:
-        return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "reduce_only": True}
-    spend = (parsed["in_amount"] if adds_sol else 0) + deposit["lamports"]
-    usd = pyth_sponsored.lamports_usd(spend, sol)
+    usd = pyth_sponsored.lamports_usd(outflow["lamports"], sol)
     if usd is None:
         return refused | {"reason": "price_unknown"}
+    case = memecoin_desk._case(proof["case_id"])
+    snap = memecoin_desk._snapshot(case) if case is not None else {}
+    if "reserved_usd" not in snap:
+        return refused | {"reason": "exposure_unknown"}
+    reserved = memecoin_desk._reserved_amount(snap.get("reserved_usd"))
+    if reserved is None:
+        return refused | {"reason": "exposure_unknown"}
+    if reserved > usd:
+        usd = reserved
     if usd > memecoin_desk.TICKET:
         return refused | {"reason": "ticket"}
-    room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd))
+    room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd, now=moment))
     if room.get("ok") is not True:
         return refused | {"reason": room.get("reason") or "allocation"}
     return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "reduce_only": False}
@@ -2170,7 +2251,8 @@ def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None,
         "signature": "mock:" + digest[:32],
         "wallet_id": auth.get("wallet_id"), "wallet": auth.get("wallet"),
         "reason": None,
-        "ticket_limit_proven": True, "allocation_proven": True,
+        "ticket_limit_proven": capital.get("ticket_limit_proven") is True,
+        "allocation_proven": capital.get("allocation_proven") is True,
     }
 
 
