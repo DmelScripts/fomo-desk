@@ -406,6 +406,52 @@ def _signer_int(value) -> int | None:
         return None
 
 
+HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest?ids[]=ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d&parsed=true"
+PYTH_KEY_ENV = "PYTH_API_KEY"
+
+
+def hermes_headers() -> dict:
+    """Authorization: Bearer from PYTH_API_KEY. The key is not copied into results."""
+    import os
+    headers = {"accept": "application/json"}
+    key = os.environ.get(PYTH_KEY_ENV)
+    if isinstance(key, str) and key.strip():
+        headers["Authorization"] = "Bearer " + key.strip()
+    return headers
+
+
+def read_hermes_response(response, now: float, onchain=None) -> dict:
+    """A Hermes body. A missing key or a 401 is price_unknown. An on-chain account is not a substitute."""
+    refused = {"ok": False, "reason": "price_unknown", "onchain_substituted": False, "live": False}
+    if onchain is not None:
+        refused["onchain_ignored"] = True
+    import os
+    key = os.environ.get(PYTH_KEY_ENV)
+    if not isinstance(key, str) or not key.strip():
+        return refused | {"cause": "pyth_api_key_missing"}
+    status = response.get("status") if isinstance(response, dict) else None
+    meta = response.get("meta") if isinstance(response, dict) and isinstance(response.get("meta"), dict) else {}
+    if status is None and isinstance(meta.get("status"), int):
+        status = meta["status"]
+    if status == 401:
+        return refused | {"cause": "hermes_unauthorized"}
+    body = response.get("body") if isinstance(response, dict) else None
+    if isinstance(body, dict) and "body" in body and "meta" in body:
+        nested = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        if nested.get("status") == 401 or body.get("status") == 401:
+            return refused | {"cause": "hermes_unauthorized"}
+        body = body.get("body")
+    if not isinstance(body, dict):
+        return refused | {"cause": "hermes_unparsed"}
+    try:
+        priced = assess_signer_price(body, now)
+    except (OverflowError, ValueError, ArithmeticError):
+        return refused
+    if priced.get("ok") is not True:
+        return refused | {"cause": priced.get("reason")}
+    return priced | {"onchain_substituted": False, "onchain_ignored": onchain is not None, "live": False}
+
+
 def assess_signer_price(payload, now: float) -> dict:
     """One Hermes-shaped SOL/USD update. No network. The signer calls this itself."""
     unknown = {"ok": False, "reason": "price_unknown"}

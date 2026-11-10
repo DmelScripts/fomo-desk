@@ -1,0 +1,95 @@
+{
+ "meta": {
+  "name": "tok_BIG_dex_token",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/tokens/v1/solana/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+  "status": 200,
+  "latency_ms": 111,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:01:55+0700",
+  "fetched_unix": 1794326515.4773307,
+  "request_body": null
+ },
+ "body": [
+  {
+   "chainId": "solana",
+   "dexId": "pumpswap",
+   "url": "https://dexscreener.com/solana/5tecgcpfldbnjvbrpjvk32uayabpra1hgefpeujqqkyk",
+   "pairAddress": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+   "baseToken": {
+    "address": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+    "name": "Big Guy",
+    "symbol": "BIG"
+   },
+   "quoteToken": {
+    "address": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+    "name": "Take-Two Interactive Software - Backpack Securities",
+    "symbol": "TTWO"
+   },
+   "priceNative": "0.000004103",
+   "priceUsd": "0.0009200",
+   "txns": {
+    "m5": {
+     "buys": 60,
+     "sells": 66
+    },
+    "h1": {
+     "buys": 840,
+     "sells": 858
+    },
+    "h6": {
+     "buys": 4957,
+     "sells": 5186
+    },
+    "h24": {
+     "buys": 10679,
+     "sells": 10933
+    }
+   },
+   "volume": {
+    "h24": 407942.15,
+    "h6": 43478.3,
+    "h1": 6601.97,
+    "m5": 455.92
+   },
+   "priceChange": {
+    "m5": -2.02,
+    "h1": 7.04,
+    "h6": 21.01,
+    "h24": 624
+   },
+   "liquidity": {
+    "usd": 85257.23,
+    "base": 46923103,
+    "quote": 187.7365
+   },
+   "fdv": 873613,
+   "marketCap": 873613,
+   "pairCreatedAt": 1794154309000,
+   "info": {
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/3qi7XlWb884wtJIS?width=800&height=800&quality=95&format=auto",
+    "header": "https://cdn.dexscreener.com/cms/images/2jlDlRMbuBJa7EoC?width=1500&height=500&quality=95&format=auto",
+    "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump?timestamp=1794326400000",
+    "websites": [
+     {
+      "url": "https://bigguy.win",
+      "label": "Website"
+     }
+    ],
+    "socials": [
+     {
+      "url": "https://x.com/bigguygta",
+      "type": "twitter"
+     },
+     {
+      "url": "https://t.me/bigguygta",
+      "type": "telegram"
+     }
+    ]
+   },
+   "boosts": {
+    "active": 100
+   }
+  }
+ ]
+}

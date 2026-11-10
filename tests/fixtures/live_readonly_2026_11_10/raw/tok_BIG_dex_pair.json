@@ -1,0 +1,178 @@
+{
+ "meta": {
+  "name": "tok_BIG_dex_pair",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/pairs/solana/5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+  "status": 200,
+  "latency_ms": 113,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:01:55+0700",
+  "fetched_unix": 1794326515.3621912,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/5tecgcpfldbnjvbrpjvk32uayabpra1hgefpeujqqkyk",
+    "pairAddress": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+    "baseToken": {
+     "address": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+     "name": "Big Guy",
+     "symbol": "BIG"
+    },
+    "quoteToken": {
+     "address": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+     "name": "Take-Two Interactive Software - Backpack Securities",
+     "symbol": "TTWO"
+    },
+    "priceNative": "0.000004134",
+    "priceUsd": "0.0009267",
+    "txns": {
+     "m5": {
+      "buys": 55,
+      "sells": 58
+     },
+     "h1": {
+      "buys": 835,
+      "sells": 850
+     },
+     "h6": {
+      "buys": 4952,
+      "sells": 5178
+     },
+     "h24": {
+      "buys": 10674,
+      "sells": 10925
+     }
+    },
+    "volume": {
+     "h24": 407941.31,
+     "h6": 43477.46,
+     "h1": 6601.13,
+     "m5": 455.09
+    },
+    "priceChange": {
+     "m5": -1.3,
+     "h1": 7.83,
+     "h6": 21.9,
+     "h24": 630
+    },
+    "liquidity": {
+     "usd": 85574.72,
+     "base": 46923103,
+     "quote": 187.7365
+    },
+    "fdv": 880038,
+    "marketCap": 880038,
+    "pairCreatedAt": 1794154309000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/3qi7XlWb884wtJIS?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/2jlDlRMbuBJa7EoC?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://bigguy.win",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/bigguygta",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/bigguygta",
+       "type": "telegram"
+      }
+     ]
+    },
+    "boosts": {
+     "active": 100
+    }
+   }
+  ],
+  "pair": {
+   "chainId": "solana",
+   "dexId": "pumpswap",
+   "url": "https://dexscreener.com/solana/5tecgcpfldbnjvbrpjvk32uayabpra1hgefpeujqqkyk",
+   "pairAddress": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+   "baseToken": {
+    "address": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+    "name": "Big Guy",
+    "symbol": "BIG"
+   },
+   "quoteToken": {
+    "address": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+    "name": "Take-Two Interactive Software - Backpack Securities",
+    "symbol": "TTWO"
+   },
+   "priceNative": "0.000004134",
+   "priceUsd": "0.0009267",
+   "txns": {
+    "m5": {
+     "buys": 55,
+     "sells": 58
+    },
+    "h1": {
+     "buys": 835,
+     "sells": 850
+    },
+    "h6": {
+     "buys": 4952,
+     "sells": 5178
+    },
+    "h24": {
+     "buys": 10674,
+     "sells": 10925
+    }
+   },
+   "volume": {
+    "h24": 407941.31,
+    "h6": 43477.46,
+    "h1": 6601.13,
+    "m5": 455.09
+   },
+   "priceChange": {
+    "m5": -1.3,
+    "h1": 7.83,
+    "h6": 21.9,
+    "h24": 630
+   },
+   "liquidity": {
+    "usd": 85574.72,
+    "base": 46923103,
+    "quote": 187.7365
+   },
+   "fdv": 880038,
+   "marketCap": 880038,
+   "pairCreatedAt": 1794154309000,
+   "info": {
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/3qi7XlWb884wtJIS?width=800&height=800&quality=95&format=auto",
+    "header": "https://cdn.dexscreener.com/cms/images/2jlDlRMbuBJa7EoC?width=1500&height=500&quality=95&format=auto",
+    "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump?timestamp=1794326400000",
+    "websites": [
+     {
+      "url": "https://bigguy.win",
+      "label": "Website"
+     }
+    ],
+    "socials": [
+     {
+      "url": "https://x.com/bigguygta",
+      "type": "twitter"
+     },
+     {
+      "url": "https://t.me/bigguygta",
+      "type": "telegram"
+     }
+    ]
+   },
+   "boosts": {
+    "active": 100
+   }
+  }
+ }
+}

@@ -1,0 +1,164 @@
+{
+ "meta": {
+  "name": "tok_Nothing_dex_pair",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/pairs/solana/7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+  "status": 200,
+  "latency_ms": 158,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:31+0700",
+  "fetched_unix": 1794326551.3861642,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/7uj81bsdr8dyzcvajajs537gqpbwvwkxcjxstxw22qpb",
+    "pairAddress": "7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+    "baseToken": {
+     "address": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+     "name": "Nothing Coin",
+     "symbol": "Nothing"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00002000",
+    "priceUsd": "0.001645",
+    "txns": {
+     "m5": {
+      "buys": 22,
+      "sells": 1
+     },
+     "h1": {
+      "buys": 309,
+      "sells": 6
+     },
+     "h6": {
+      "buys": 1592,
+      "sells": 31
+     },
+     "h24": {
+      "buys": 8675,
+      "sells": 4300
+     }
+    },
+    "volume": {
+     "h24": 316834.04,
+     "h6": 183.33,
+     "h1": 26.47,
+     "m5": 14.95
+    },
+    "priceChange": {
+     "m5": 0.11,
+     "h1": -2.21,
+     "h6": 64111,
+     "h24": 4413
+    },
+    "liquidity": {
+     "usd": 1333527.02,
+     "base": 810104237,
+     "quote": 5.09836
+    },
+    "fdv": 1598814,
+    "marketCap": 1598814,
+    "pairCreatedAt": 1794247215000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/tOA16gGKAGL-XvJ2?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/qEAXMH-aLc3XWtH8?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.govinfo.gov/content/pkg/CREC-2026-05-15/pdf/CREC-2026-05-15.pdf?utm_source=chatgpt.com",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/early404/status/2119848220394168797",
+       "type": "twitter"
+      }
+     ]
+    }
+   }
+  ],
+  "pair": {
+   "chainId": "solana",
+   "dexId": "pumpswap",
+   "url": "https://dexscreener.com/solana/7uj81bsdr8dyzcvajajs537gqpbwvwkxcjxstxw22qpb",
+   "pairAddress": "7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+   "baseToken": {
+    "address": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+    "name": "Nothing Coin",
+    "symbol": "Nothing"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.00002000",
+   "priceUsd": "0.001645",
+   "txns": {
+    "m5": {
+     "buys": 22,
+     "sells": 1
+    },
+    "h1": {
+     "buys": 309,
+     "sells": 6
+    },
+    "h6": {
+     "buys": 1592,
+     "sells": 31
+    },
+    "h24": {
+     "buys": 8675,
+     "sells": 4300
+    }
+   },
+   "volume": {
+    "h24": 316834.04,
+    "h6": 183.33,
+    "h1": 26.47,
+    "m5": 14.95
+   },
+   "priceChange": {
+    "m5": 0.11,
+    "h1": -2.21,
+    "h6": 64111,
+    "h24": 4413
+   },
+   "liquidity": {
+    "usd": 1333527.02,
+    "base": 810104237,
+    "quote": 5.09836
+   },
+   "fdv": 1598814,
+   "marketCap": 1598814,
+   "pairCreatedAt": 1794247215000,
+   "info": {
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/tOA16gGKAGL-XvJ2?width=800&height=800&quality=95&format=auto",
+    "header": "https://cdn.dexscreener.com/cms/images/qEAXMH-aLc3XWtH8?width=1500&height=500&quality=95&format=auto",
+    "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump?timestamp=1794326400000",
+    "websites": [
+     {
+      "url": "https://www.govinfo.gov/content/pkg/CREC-2026-05-15/pdf/CREC-2026-05-15.pdf?utm_source=chatgpt.com",
+      "label": "Website"
+     }
+    ],
+    "socials": [
+     {
+      "url": "https://x.com/early404/status/2119848220394168797",
+      "type": "twitter"
+     }
+    ]
+   }
+  }
+ }
+}

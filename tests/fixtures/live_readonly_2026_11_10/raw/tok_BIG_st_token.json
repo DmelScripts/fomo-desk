@@ -1,0 +1,380 @@
+{
+ "meta": {
+  "name": "tok_BIG_st_token",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/tokens/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+  "status": 200,
+  "latency_ms": 150,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:01:58+0700",
+  "fetched_unix": 1794326517.9776716,
+  "request_body": null
+ },
+ "body": {
+  "token": {
+   "name": "Big Guy",
+   "symbol": "BIG",
+   "mint": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+   "decimals": 6,
+   "uri": "https://ipfs.io/ipfs/bafkreighgj5fyzx4edadut3dropmpwdt7dyprjm5xdocvfudycpgkrjy7u",
+   "description": "Meet Big Guy - the dog of GTA VI, interacted with by Jason Duval in the first 2 minutes of the trailer.",
+   "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs-forward.solanatracker.io%2Fipfs%2Fbafkreidh5rc23v3zzjqeanvzwhrosrmlo5th7s6bkyu7zufqqjjj2gopke",
+   "twitter": "https://x.com/bigguygta",
+   "telegram": "https://t.me/bigguygta",
+   "website": "https://bigguy.win/",
+   "hasFileMetaData": true,
+   "strictSocials": {
+    "twitter": "https://x.com/bigguygta",
+    "telegram": "https://t.me/bigguygta",
+    "website": "https://bigguy.win/"
+   },
+   "creation": {
+    "creator": "5YLSzDFSFTY2rD485ihPNzdY4GahEjsBeiBBKW3fqSkS",
+    "created_tx": "3VP4xAJZpmBtFGmjURRKZxSYHUmzBNaWHiHpNzE2yuwFkmKfn9pcQNeP7H8ViQNhfzr4Sbak6MEu3kfrQ8YzBBXD",
+    "created_time": 1794142003
+   }
+  },
+  "pools": [
+   {
+    "poolId": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+    "liquidity": {
+     "quote": 196.497787,
+     "usd": 88078.5651417445
+    },
+    "price": {
+     "quote": 4.184932913921183e-06,
+     "usd": 0.0009379313932747689
+    },
+    "tokenSupply": 949552176.258019,
+    "lpBurn": 100,
+    "tokenAddress": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+    "marketCap": {
+     "quote": 3973.812155907672,
+     "usd": 890614.7956647726
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+    "market": "pumpfun-amm",
+    "pumpfun-amm": {
+     "isMayhemMode": false,
+     "isCashbackCoin": false,
+     "isHolderReward": true,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "virtualQuoteReserves": "8888072",
+     "effectiveQuoteTokenAmount": "196497787",
+     "effectiveQuoteTokenUiAmount": "196.497787"
+    },
+    "deployer": "HuWYwy9niWXTPnsT8vB87yQfoXCSbJyTfEA643vD7KTw",
+    "lastUpdated": 1794326517554,
+    "createdAt": 1794154309283,
+    "txns": {
+     "buys": 10456,
+     "sells": 10670,
+     "total": 21126,
+     "volume": 427890,
+     "volume24h": 399905.2080951967
+    },
+    "bundleId": "9f0bd74717d2e4be4affa1f5ee6b54626de4428e7189af98bbcf00e22b057e30"
+   },
+   {
+    "poolId": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+    "liquidity": {
+     "quote": 0,
+     "usd": 0
+    },
+    "price": {
+     "quote": 0,
+     "usd": 0
+    },
+    "tokenSupply": 1000000000,
+    "lpBurn": 100,
+    "tokenAddress": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+    "marketCap": {
+     "quote": 0,
+     "usd": 0
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+    "market": "pumpfun",
+    "deployer": "5YLSzDFSFTY2rD485ihPNzdY4GahEjsBeiBBKW3fqSkS",
+    "pumpfun": {
+     "complete": true,
+     "isMayhemMode": false,
+     "isHolderReward": true,
+     "isCashbackCoin": false,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "quoteMint": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+     "quoteDepth": 0
+    },
+    "curvePercentage": 100,
+    "curve": "DZGFrramJ7iKZPrMQgLgv7ceRGARocvDnDfpupRx6uD",
+    "lastUpdated": 1794326145357,
+    "createdAt": 1794142003445,
+    "txns": {
+     "buys": 27,
+     "sells": 33,
+     "total": 60,
+     "volume": 11514,
+     "volume24h": 0
+    },
+    "bundleId": "9f0bd74717d2e4be4affa1f5ee6b54626de4428e7189af98bbcf00e22b057e30"
+   }
+  ],
+  "events": {
+   "1m": {
+    "priceChangePercentage": 0.044954086321551935
+   },
+   "5m": {
+    "priceChangePercentage": -2.032627116768871
+   },
+   "15m": {
+    "priceChangePercentage": 1.3390420926820645
+   },
+   "30m": {
+    "priceChangePercentage": -0.5292390274529795
+   },
+   "1h": {
+    "priceChangePercentage": 6.482679687329289
+   },
+   "2h": {
+    "priceChangePercentage": -4.368682591565863
+   },
+   "3h": {
+    "priceChangePercentage": 22.43697424046576
+   },
+   "4h": {
+    "priceChangePercentage": 7.057654871602752
+   },
+   "5h": {
+    "priceChangePercentage": 13.564594402427623
+   },
+   "6h": {
+    "priceChangePercentage": 26.079203422580484
+   },
+   "12h": {
+    "priceChangePercentage": 30.706937619487597
+   },
+   "24h": {
+    "priceChangePercentage": 30.706937619487597
+   }
+  },
+  "risk": {
+   "snipers": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "insiders": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "bundlers": {
+    "count": 18,
+    "totalBalance": 810190.428515,
+    "totalPercentage": 0.0853,
+    "totalInitialBalance": 2719192.154647,
+    "totalInitialPercentage": 0.2864,
+    "wallets": [
+     {
+      "wallet": "42CjAiBhaihRRD3AUgR3jd7TfFpkSTiPiFTgJ9uyDEo2",
+      "initialBalance": 222937.272034,
+      "initialPercentage": 0.0235,
+      "balance": 436021.353484,
+      "percentage": 0.04592,
+      "bundleTime": 1794315013562
+     },
+     {
+      "wallet": "3bKcMtUCDmvepxWrM35gz2UtBA5LMWkmLXn3EKTcapTD",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 374169.075031,
+      "percentage": 0.0394,
+      "bundleTime": 1794281318438
+     },
+     {
+      "wallet": "7s9WB8PcH9YHLEEyUgwSU7JuQSy1Fa7TiinPQvagfQdy",
+      "initialBalance": 1028040.105198,
+      "initialPercentage": 0.1083,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794249437891
+     },
+     {
+      "wallet": "8LNR1UEPJ8YKL6xcdMD3KfndGrTg71MFDpbZ8mCcWLnZ",
+      "initialBalance": 538188.519279,
+      "initialPercentage": 0.0567,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794276786942
+     },
+     {
+      "wallet": "CWq9HRrM43nc9dfocquY3uEs3nTsUpE4WaQHWUCcpUEf",
+      "initialBalance": 584512.579835,
+      "initialPercentage": 0.0616,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794276786944
+     },
+     {
+      "wallet": "2D2huRMJ4tFFTFJQQQkNSybwHroANYCKiqBjWvNkgUJT",
+      "initialBalance": 190129.868128,
+      "initialPercentage": 0.02,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277075407
+     },
+     {
+      "wallet": "7zXsMJ5EeDjyYYov2Zjd1nARW1TCW9RYHDLpHsJcPx4K",
+      "initialBalance": 31201.320914,
+      "initialPercentage": 0.0033,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277100041
+     },
+     {
+      "wallet": "2koZm2Nz5ZPcSgBDmadcnqzAyjTT9aXxqZFPFkjyc7Ec",
+      "initialBalance": 27950.872726,
+      "initialPercentage": 0.0029,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277100740
+     },
+     {
+      "wallet": "8RBCjj2yzB9cFR6nQPaKmM4rpqCWD12NftGuBVtS8uLw",
+      "initialBalance": 35803.192867000005,
+      "initialPercentage": 0.0038,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277100737
+     },
+     {
+      "wallet": "5p3nubAg1Qg7jZiSKE7DyEerhKbTLF7akFYUJGf3MaEF",
+      "initialBalance": 938.860301,
+      "initialPercentage": 0.0001,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277104078
+     },
+     {
+      "wallet": "3yusQ1uHiBs96XtzuZkX56qu5wWi2FuKvgVCzQyvHgTt",
+      "initialBalance": 967.948717,
+      "initialPercentage": 0.0001,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277115561
+     },
+     {
+      "wallet": "8e8hUbGeKjcmSPfTZAixYLm7VTdnio3xRimD8vJysQ3i",
+      "initialBalance": 6596.311121999999,
+      "initialPercentage": 0.0007,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277121410
+     },
+     {
+      "wallet": "F5hdSw36K6MnpeWGJm53vpH1XFyoNv7Gu3gYAeZU6kr7",
+      "initialBalance": 6530.753142,
+      "initialPercentage": 0.0007,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277121350
+     },
+     {
+      "wallet": "9eJabV3kNxpqv43qZfqQrHXsxFHCburgJhQ8Nri9K9dv",
+      "initialBalance": 4914.989599,
+      "initialPercentage": 0.0005,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277121408
+     },
+     {
+      "wallet": "4z14LzG2mxbLiQLJfQcjpeAFEtoCBYQMUJmeewTuEy6E",
+      "initialBalance": 6022.700596999999,
+      "initialPercentage": 0.0006,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277121407
+     },
+     {
+      "wallet": "9aHJo3c2mqzShaYtHbmNJAQkfNrK3uEt3sSCAefBbzQo",
+      "initialBalance": 11354.486962,
+      "initialPercentage": 0.0012,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277124395
+     },
+     {
+      "wallet": "8dP2KnVtXuZ93dVmGAZHmSoh7TPdbkz9ye86kNo4AXRV",
+      "initialBalance": 11839.735408,
+      "initialPercentage": 0.0012,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277124916
+     },
+     {
+      "wallet": "6jPxwbKNSCSiJNgVXKLdwm6LgpGbixmTnDvMEt3pZwJF",
+      "initialBalance": 11262.637818,
+      "initialPercentage": 0.0012,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794277125734
+     }
+    ]
+   },
+   "top10": 23.224199999999996,
+   "dev": {
+    "percentage": 0,
+    "amount": 0
+   },
+   "fees": {
+    "helius-sender": 0.104779674,
+    "network": 2.15980156,
+    "pumpfun-app": 0.39016235760084894,
+    "astralane": 0.167225587,
+    "gmgn": 14.445045245521865,
+    "nozomi": 0.715117115,
+    "trojan": 0.268454137,
+    "axiom": 1.846919528,
+    "fomo": 1.2650339416491678,
+    "0slot": 0.00347,
+    "jito": 0.165190825,
+    "bloom": 0.326877416,
+    "bonkbot": 0.334147849,
+    "maestro": 0.058524322,
+    "padre": 0.265503324,
+    "soltradingbot": 0.024809669,
+    "photon": 0.012219018,
+    "bloxroute": 0.014,
+    "totalTrading": 19.237696807771883,
+    "totalTips": 3.3295847609999996,
+    "total": 22.56728156877188
+   },
+   "rugged": false,
+   "risks": [
+    {
+     "name": "Top 10 Holders",
+     "description": "Top 10 holders own more than 23.22% of the total supply.",
+     "value": "23.22%",
+     "level": "danger",
+     "score": 5000
+    }
+   ],
+   "score": 4
+  },
+  "buys": 10456,
+  "sells": 10670,
+  "txns": 21126,
+  "holders": 611
+ }
+}

@@ -1,0 +1,503 @@
+[
+ {
+  "sym": "BIG",
+  "mint": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+  "pair": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+  "verdicts": {
+   "mint_freeze_revoked": "PASS",
+   "lp_100": "PASS",
+   "liq_ge_25pct": "FAIL",
+   "dev_le_3pct": "FAIL-CLOSED: creator identity conflict (RugCheck 3gGYvn.. vs SolanaTracker 5YLSzD..)",
+   "no_past_rug": "FAIL-CLOSED: dev identity conflict; past tokens not attributable",
+   "holder_growth": "PASS"
+  },
+  "overall": "FAIL",
+  "evidence": {
+   "pair": {
+    "dex": "pumpswap",
+    "quote": "TTWO",
+    "age_h": 47.84,
+    "marketCap": 880038,
+    "fdv": 880038,
+    "liq": 85574.72
+   },
+   "authorities": {
+    "rc_mint": null,
+    "rc_freeze": null,
+    "st_security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    }
+   },
+   "lp": {
+    "rc_lpLockedPct": 100,
+    "rc_lpCurrentSupply": 0,
+    "st_lpBurn": 100,
+    "rc_markets": [
+     [
+      "pump_fun_amm",
+      100
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ]
+    ]
+   },
+   "liq_ratio": 0.0972,
+   "dev": {
+    "rc_creator": "3gGYvne8RDn7wXca7tuejFoh46hP9wnofQy649DFRbYR",
+    "st_creator": "5YLSzDFSFTY2rD485ihPNzdY4GahEjsBeiBBKW3fqSkS",
+    "rc_creatorBalance_pct": 0.0,
+    "st_dev_pct": 0
+   },
+   "past": {
+    "das_byCreator_total": 0,
+    "das_byAuthority_total": 0,
+    "st_deployer_total": 0,
+    "st_deployer_other_mints": [],
+    "rc_creatorTokens_len": null
+   },
+   "holders": {
+    "chart": [
+     {
+      "holders": 0,
+      "time": 1794092400
+     },
+     {
+      "holders": 52,
+      "time": 1794178800
+     },
+     {
+      "holders": 210,
+      "time": 1794265200
+     }
+    ],
+    "st_holders": 611,
+    "rc_totalHolders": 942
+   },
+   "rc_risks": [],
+   "rc_rugged": false,
+   "st_rugged": false,
+   "st_risks": [
+    "Top 10 Holders"
+   ],
+   "insiderNetworks": [
+    [
+     7,
+     "transfer"
+    ]
+   ]
+  }
+ },
+ {
+  "sym": "X",
+  "mint": "9VZerdNL1x6EjetDqRnh5bYcdmk1y8sLAGs1ybzGpump",
+  "pair": "6MdmwvCsrMAbTqJC7GBBu5FBUFLbC6dJXGxm5VtnrDzQ",
+  "verdicts": {
+   "mint_freeze_revoked": "PASS",
+   "lp_100": "PASS",
+   "liq_ge_25pct": "FAIL",
+   "dev_le_3pct": "FAIL-CLOSED: creator identity conflict (RugCheck AiKvek.. vs SolanaTracker 9MsrGF..)",
+   "no_past_rug": "FAIL-CLOSED: dev identity conflict; past tokens not attributable",
+   "holder_growth": "FAIL-CLOSED: holders chart has 0 non-zero daily point(s); growth not computable"
+  },
+  "overall": "FAIL",
+  "evidence": {
+   "pair": {
+    "dex": "pumpswap",
+    "quote": "SOL",
+    "age_h": 7.25,
+    "marketCap": 307666,
+    "fdv": 307666,
+    "liq": 47703.43
+   },
+   "authorities": {
+    "rc_mint": null,
+    "rc_freeze": null,
+    "st_security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    }
+   },
+   "lp": {
+    "rc_lpLockedPct": 100,
+    "rc_lpCurrentSupply": 0,
+    "st_lpBurn": 100,
+    "rc_markets": [
+     [
+      "pump_fun_amm",
+      100
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ],
+     [
+      "meteoraDlmm",
+      0
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ]
+    ]
+   },
+   "liq_ratio": 0.155,
+   "dev": {
+    "rc_creator": "AiKvekQa4Zp6ARDErEtD26DhtCGKc4HagGjEpYarzr6c",
+    "st_creator": "9MsrGFJqAD1JmQCfTR86XfLMsLFKFGTsUQFCLRoykZZf",
+    "rc_creatorBalance_pct": 0.0,
+    "st_dev_pct": 0
+   },
+   "past": {
+    "das_byCreator_total": 0,
+    "das_byAuthority_total": 0,
+    "st_deployer_total": 0,
+    "st_deployer_other_mints": [],
+    "rc_creatorTokens_len": null
+   },
+   "holders": {
+    "chart": [
+     {
+      "holders": 0,
+      "time": 1794265200
+     }
+    ],
+    "st_holders": 3436,
+    "rc_totalHolders": 8463
+   },
+   "rc_risks": [],
+   "rc_rugged": false,
+   "st_rugged": false,
+   "st_risks": [
+    "Top 10 Holders"
+   ],
+   "insiderNetworks": [
+    [
+     5,
+     "transfer"
+    ],
+    [
+     6,
+     "transfer"
+    ],
+    [
+     4,
+     "transfer"
+    ],
+    [
+     18,
+     "transfer"
+    ],
+    [
+     22,
+     "transfer"
+    ],
+    [
+     27,
+     "transfer"
+    ],
+    [
+     6,
+     "transfer"
+    ],
+    [
+     10,
+     "transfer"
+    ]
+   ]
+  }
+ },
+ {
+  "sym": "TRUMP",
+  "mint": "3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump",
+  "pair": "DmoLzHQEtUPeoeo1XMY6CqJodT2TCkFQHPV4Y4AhvYRH",
+  "verdicts": {
+   "mint_freeze_revoked": "PASS",
+   "lp_100": "PASS",
+   "liq_ge_25pct": "FAIL-CLOSED: source conflict - DexScreener liquidity.usd/marketCap ~$1.0-1.3M each, but RugCheck markets[].lp and SolanaTracker pools[] show liquidity ~$2.3-4.1k and mcap ~$2.2-2.4k for the same pair (~500x apart)",
+   "dev_le_3pct": "PASS",
+   "no_past_rug": "FAIL: RugCheck risks[] contains \"Creator history of rugged tokens\" for this creator, contradicting the 20 capped past-token reports (all rugged=false); 20 checked of >=46 (RugCheck creatorTokens) / 71 pools (SolanaTracker /deployer)",
+   "holder_growth": "FAIL-CLOSED: holders chart has 0 non-zero daily point(s); growth not computable"
+  },
+  "overall": "FAIL",
+  "evidence": {
+   "pair": {
+    "dex": "pumpswap",
+    "quote": "SOL",
+    "age_h": 4.26,
+    "marketCap": 1220598,
+    "fdv": 1220598,
+    "liq": 1052513.78
+   },
+   "authorities": {
+    "rc_mint": null,
+    "rc_freeze": null,
+    "st_security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    }
+   },
+   "lp": {
+    "rc_lpLockedPct": 100,
+    "rc_lpCurrentSupply": 0,
+    "st_lpBurn": 100,
+    "rc_markets": [
+     [
+      "pump_fun_amm",
+      100
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ]
+    ]
+   },
+   "liq_ratio": 0.8623,
+   "dev": {
+    "rc_creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+    "st_creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+    "rc_creatorBalance_pct": 0.0,
+    "st_dev_pct": 0
+   },
+   "past": {
+    "das_byCreator_total": 20,
+    "das_byAuthority_total": 0,
+    "st_deployer_total": 71,
+    "st_deployer_other_mints": [
+     "2DqTSadBmgTRzMLBbxzeg8JCKTWebWYFCRRSrFXHpump",
+     "3YiUxaXebZyeqtWxgfdEZtk9PeG5QaH1KEPmTjBe8WEm",
+     "3q8MQGS2Ci2j8X5T7jvR5LFaRPYFTjvjLKjaynXXs69Y",
+     "3ri1kBbbNK9WgRH61QBoL9yDfTNNuYumFSKKGdefpump",
+     "4iWV2mw1Wky1vc3NeJX3WAS2mVY7FQWH57hVyYFapump"
+    ],
+    "rc_creatorTokens_len": 46,
+    "checked": 20,
+    "rugged": []
+   },
+   "holders": {
+    "chart": [
+     {
+      "holders": 0,
+      "time": 1794265200
+     }
+    ],
+    "st_holders": 150,
+    "rc_totalHolders": 657
+   },
+   "rc_risks": [
+    "Creator history of rugged tokens",
+    "Low Liquidity"
+   ],
+   "rc_rugged": false,
+   "st_rugged": false,
+   "st_risks": [
+    "Price Decrease",
+    "Top 10 Holders",
+    "Bundlers Detected"
+   ],
+   "insiderNetworks": []
+  }
+ },
+ {
+  "sym": "MYWAY",
+  "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+  "pair": "CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+  "verdicts": {
+   "mint_freeze_revoked": "PASS",
+   "lp_100": "PASS",
+   "liq_ge_25pct": "FAIL",
+   "dev_le_3pct": "PASS",
+   "no_past_rug": "FAIL-CLOSED: DAS creator+authority listings empty (DAS also does not index the current token under this creator), RugCheck creatorTokens null; only SolanaTracker /deployer lists the current mint itself - first-time dev not independently provable",
+   "holder_growth": "PASS"
+  },
+  "overall": "FAIL",
+  "evidence": {
+   "pair": {
+    "dex": "pumpswap",
+    "quote": "SOL",
+    "age_h": 49.31,
+    "marketCap": 628629,
+    "fdv": 628629,
+    "liq": 63376.99
+   },
+   "authorities": {
+    "rc_mint": null,
+    "rc_freeze": null,
+    "st_security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    }
+   },
+   "lp": {
+    "rc_lpLockedPct": 100,
+    "rc_lpCurrentSupply": 0,
+    "st_lpBurn": 100,
+    "rc_markets": [
+     [
+      "pump_fun_amm",
+      100
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ],
+     [
+      "orca",
+      0
+     ]
+    ]
+   },
+   "liq_ratio": 0.1008,
+   "dev": {
+    "rc_creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "st_creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "rc_creatorBalance_pct": 0.0,
+    "st_dev_pct": 0
+   },
+   "past": {
+    "das_byCreator_total": 0,
+    "das_byAuthority_total": 0,
+    "st_deployer_total": 3,
+    "st_deployer_other_mints": [],
+    "rc_creatorTokens_len": null
+   },
+   "holders": {
+    "chart": [
+     {
+      "holders": 0,
+      "time": 1794092400
+     },
+     {
+      "holders": 4165,
+      "time": 1794178800
+     },
+     {
+      "holders": 8007,
+      "time": 1794265200
+     }
+    ],
+    "st_holders": 6444,
+    "rc_totalHolders": 14348
+   },
+   "rc_risks": [],
+   "rc_rugged": false,
+   "st_rugged": false,
+   "st_risks": [
+    "No social media"
+   ],
+   "insiderNetworks": []
+  }
+ },
+ {
+  "sym": "Nothing",
+  "mint": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+  "pair": "7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+  "verdicts": {
+   "mint_freeze_revoked": "PASS",
+   "lp_100": "PASS",
+   "liq_ge_25pct": "FAIL-CLOSED: source conflict - DexScreener liquidity.usd/marketCap ~$1.0-1.3M each, but RugCheck markets[].lp and SolanaTracker pools[] show liquidity ~$2.3-4.1k and mcap ~$2.2-2.4k for the same pair (~500x apart)",
+   "dev_le_3pct": "FAIL-CLOSED: creator identity conflict (RugCheck AeVtfB.. vs SolanaTracker CAsJeU..)",
+   "no_past_rug": "FAIL-CLOSED: dev identity conflict; past tokens not attributable",
+   "holder_growth": "FAIL-CLOSED: holders chart has 1 non-zero daily point(s); growth not computable"
+  },
+  "overall": "FAIL-CLOSED",
+  "evidence": {
+   "pair": {
+    "dex": "pumpswap",
+    "quote": "SOL",
+    "age_h": 22.04,
+    "marketCap": 1598814,
+    "fdv": 1598814,
+    "liq": 1333527.02
+   },
+   "authorities": {
+    "rc_mint": null,
+    "rc_freeze": null,
+    "st_security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    }
+   },
+   "lp": {
+    "rc_lpLockedPct": 100,
+    "rc_lpCurrentSupply": 0,
+    "st_lpBurn": 100,
+    "rc_markets": [
+     [
+      "pump_fun_amm",
+      100
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ],
+     [
+      "meteora_damm_v2",
+      0
+     ]
+    ]
+   },
+   "liq_ratio": 0.8341,
+   "dev": {
+    "rc_creator": "AeVtfBvPjCRJJ2KNwh2E6ygPf4sz6Pi4NXsM1vxyrmaT",
+    "st_creator": "CAsJeUjgQohPYC4t5UWCELhfSjvMVrKo4itZ7DA74rTQ",
+    "rc_creatorBalance_pct": 0.0,
+    "st_dev_pct": 0
+   },
+   "past": {
+    "das_byCreator_total": 0,
+    "das_byAuthority_total": 0,
+    "st_deployer_total": 0,
+    "st_deployer_other_mints": [],
+    "rc_creatorTokens_len": null
+   },
+   "holders": {
+    "chart": [
+     {
+      "holders": 0,
+      "time": 1794178800
+     },
+     {
+      "holders": 231,
+      "time": 1794265200
+     }
+    ],
+    "st_holders": 176,
+    "rc_totalHolders": 1212
+   },
+   "rc_risks": [
+    "Low Liquidity"
+   ],
+   "rc_rugged": false,
+   "st_rugged": false,
+   "st_risks": [
+    "Top 10 Holders",
+    "Bundlers Detected"
+   ],
+   "insiderNetworks": [
+    [
+     4,
+     "transfer"
+    ]
+   ]
+  }
+ }
+]

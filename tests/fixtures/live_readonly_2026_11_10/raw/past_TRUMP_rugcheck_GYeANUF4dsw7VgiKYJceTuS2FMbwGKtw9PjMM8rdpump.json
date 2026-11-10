@@ -1,0 +1,264 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump/report",
+  "status": 200,
+  "latency_ms": 2252,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:03:29+0700",
+  "fetched_unix": 1794326607.3165133,
+  "request_body": null
+ },
+ "body": {
+  "mint": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 999999999999990,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "Appshare",
+   "symbol": "Appshare",
+   "uri": "https://ipfs.io/ipfs/bafkreiev4fp74kcgwcyzs4xr3zwa6myyhab5s7oyvka2vim5r26atvozjy",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "9KiCGvqtiGerGpsYJ9hdh6cuXAhwCzitZFm3qQppJDkG",
+    "amount": 999995796472834,
+    "decimals": 6,
+    "pct": 99.99957964728439,
+    "uiAmount": 999995796.472834,
+    "uiAmountString": "999995796.472834",
+    "owner": "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj",
+    "insider": false
+   },
+   {
+    "address": "DKLQKvDyzcdYPh34pLoWDptztimyeTg5aQyczdfssTna",
+    "amount": 2415946348,
+    "decimals": 6,
+    "pct": 0.00024159463480000242,
+    "uiAmount": 2415.946348,
+    "uiAmountString": "2415.946348",
+    "owner": "F3baKwMbzkrbEc76fQjxq5htwSKuLQcVx3a9Jpmco2Si",
+    "insider": false
+   },
+   {
+    "address": "BnT57mjNaDex83ejAUiUqriTaQANsJGRYjAdFqs3jHhi",
+    "amount": 1787580808,
+    "decimals": 6,
+    "pct": 0.00017875808080000178,
+    "uiAmount": 1787.580808,
+    "uiAmountString": "1787.580808",
+    "owner": "HKDKpx5abUntJPDD8pLMnQLzoBvFdMCqGfC57hVDh7MA",
+    "insider": false
+   },
+   {
+    "address": "4CCUoNocggLJpAVkYbazhG7dhdJ6g8QAxoN8YKG9Q5DN",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "2Wbzn1LDsQgVrNEjFM6cW7X8iyS2ppqQX2PcWzXfLFFx",
+    "insider": false
+   },
+   {
+    "address": "7vYayhBjsora99bNMc5yYVxMqDDxh73hVJv9TAaVVcCg",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "FKnGXysQeqxjWdtU9qRWFNHLrJ1wqHUctVg9syG7Riqw",
+    "insider": false
+   },
+   {
+    "address": "9wQgELGYRnYCMiGufweuUrvYXSBKdt1wky2aCaqU4oQz",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "7v6NFsAzQdRWEEuctRtjHANUT6h8pksj6JveqVBHe6jS",
+    "insider": false
+   },
+   {
+    "address": "AiVbR4EHtuv8itv3jcRnRe2xjTu7KuBE8NNBA5LY9BdW",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "8GjF65cJ3P3WippwjRCfm12t9GGZvyk7xbUQ6CYUfahs",
+    "insider": false
+   },
+   {
+    "address": "FT9PjSAcQFm28MzVFTepHsMXfVKoobZnUBF8eGzkwf2m",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "J4DGGWCMcKZBFPZeP6jAKsJyGj5PNhVPibE85ocaw83J",
+    "insider": false
+   },
+   {
+    "address": "HgzAr5LMJw5bjh2L5ru4HCbdMLEK7m5yq2G1RahYFASs",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "BHhuLb2jVPtiZQD3qEo7KGPFfeMuGZzZQHUagWkEyZ9D",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "Appshare",
+   "symbol": "Appshare",
+   "image": ""
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj",
+    "marketType": "pump_fun",
+    "mintA": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "9KiCGvqtiGerGpsYJ9hdh6cuXAhwCzitZFm3qQppJDkG",
+    "liquidityB": "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 999999999999990,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+     "owner": "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj",
+     "amount": 793095796472834,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj",
+     "amount": 117921,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.18457988511702,
+     "basePrice": 3.2788804596597256e-06,
+     "base": 793095796.472834,
+     "quote": 0.000117921,
+     "reserveSupply": 117921,
+     "currentSupply": 0,
+     "quoteUSD": 0.009691287844632884,
+     "baseUSD": 2600.466309693042,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 117921,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2600.476000980887,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 117921
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2600.476000980887,
+  "totalStableLiquidity": 0.009691287844632884,
+  "totalLPProviders": 0,
+  "totalHolders": 9,
+  "price": 3.2788804596597256e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "9KiCGvqtiGerGpsYJ9hdh6cuXAhwCzitZFm3qQppJDkG": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "9mcfYBHxUXMGoEz2wSzD1GDyKx5tCYmsrcquDgaSP3Pj": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "FgDsUvdChCgrHN9aEjWLQwVVpAPa8TsMhhcftRT6QSSD": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-09-24T20:35:55.977002424Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

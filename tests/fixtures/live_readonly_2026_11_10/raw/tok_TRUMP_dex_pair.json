@@ -1,0 +1,154 @@
+{
+ "meta": {
+  "name": "tok_TRUMP_dex_pair",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/pairs/solana/DmoLzHQEtUPeoeo1XMY6CqJodT2TCkFQHPV4Y4AhvYRH",
+  "status": 200,
+  "latency_ms": 210,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:13+0700",
+  "fetched_unix": 1794326533.2203856,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/dmolzhqetupeoeo1xmy6cqjodt2tckfqhpv4y4ahvyrh",
+    "pairAddress": "DmoLzHQEtUPeoeo1XMY6CqJodT2TCkFQHPV4Y4AhvYRH",
+    "baseToken": {
+     "address": "3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump",
+     "name": "The Orange Bull",
+     "symbol": "TRUMP"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00001538",
+    "priceUsd": "0.001265",
+    "txns": {
+     "m5": {
+      "buys": 22,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 309,
+      "sells": 7
+     },
+     "h6": {
+      "buys": 8457,
+      "sells": 4185
+     },
+     "h24": {
+      "buys": 8457,
+      "sells": 4185
+     }
+    },
+    "volume": {
+     "h24": 783058.69,
+     "h6": 783058.69,
+     "h1": 93.38,
+     "m5": 81.4
+    },
+    "priceChange": {
+     "m5": 0.11,
+     "h1": -2.21,
+     "h6": 3510,
+     "h24": 3510
+    },
+    "liquidity": {
+     "usd": 1052513.78,
+     "base": 831010265,
+     "quote": 7.08117
+    },
+    "fdv": 1220598,
+    "marketCap": 1220598,
+    "pairCreatedAt": 1794311188000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/8jn5ESx5WNo2ld5a?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/vW6oI1_gdU2ve8HN?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump?timestamp=1794326400000",
+     "websites": [],
+     "socials": [
+      {
+       "url": "https://x.com/kalshi_crypto/status/2120115904931602444?a=448CyUU8GMvRKF4V9FY&s=46",
+       "type": "twitter"
+      }
+     ]
+    }
+   }
+  ],
+  "pair": {
+   "chainId": "solana",
+   "dexId": "pumpswap",
+   "url": "https://dexscreener.com/solana/dmolzhqetupeoeo1xmy6cqjodt2tckfqhpv4y4ahvyrh",
+   "pairAddress": "DmoLzHQEtUPeoeo1XMY6CqJodT2TCkFQHPV4Y4AhvYRH",
+   "baseToken": {
+    "address": "3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump",
+    "name": "The Orange Bull",
+    "symbol": "TRUMP"
+   },
+   "quoteToken": {
+    "address": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "symbol": "SOL"
+   },
+   "priceNative": "0.00001538",
+   "priceUsd": "0.001265",
+   "txns": {
+    "m5": {
+     "buys": 22,
+     "sells": 0
+    },
+    "h1": {
+     "buys": 309,
+     "sells": 7
+    },
+    "h6": {
+     "buys": 8457,
+     "sells": 4185
+    },
+    "h24": {
+     "buys": 8457,
+     "sells": 4185
+    }
+   },
+   "volume": {
+    "h24": 783058.69,
+    "h6": 783058.69,
+    "h1": 93.38,
+    "m5": 81.4
+   },
+   "priceChange": {
+    "m5": 0.11,
+    "h1": -2.21,
+    "h6": 3510,
+    "h24": 3510
+   },
+   "liquidity": {
+    "usd": 1052513.78,
+    "base": 831010265,
+    "quote": 7.08117
+   },
+   "fdv": 1220598,
+   "marketCap": 1220598,
+   "pairCreatedAt": 1794311188000,
+   "info": {
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/8jn5ESx5WNo2ld5a?width=800&height=800&quality=95&format=auto",
+    "header": "https://cdn.dexscreener.com/cms/images/vW6oI1_gdU2ve8HN?width=1500&height=500&quality=95&format=auto",
+    "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump?timestamp=1794326400000",
+    "websites": [],
+    "socials": [
+     {
+      "url": "https://x.com/kalshi_crypto/status/2120115904931602444?a=448CyUU8GMvRKF4V9FY&s=46",
+      "type": "twitter"
+     }
+    ]
+   }
+  }
+ }
+}

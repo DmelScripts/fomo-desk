@@ -1,0 +1,181 @@
+{
+ "meta": {
+  "name": "dex_community_takeovers",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/community-takeovers/latest/v1",
+  "status": 200,
+  "latency_ms": 66,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:00:34+0700",
+  "fetched_unix": 1794326434.777998,
+  "request_body": null
+ },
+ "body": [
+  {
+   "url": "https://dexscreener.com/solana/dfnnzi7mlegskfhipua964z1ddlrkmggtr1vuhtwh6bi",
+   "chainId": "solana",
+   "tokenAddress": "DFNnZi7mLegSKFhipUa964Z1DdLRKmggTr1vUhtwH6Bi",
+   "icon": "https://cdn.dexscreener.com/cms/images/DSDoGc5758RvfTwi?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/LtdfKcMHD2m8q7bf?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/DFNnZi7mLegSKFhipUa964Z1DdLRKmggTr1vUhtwH6Bi?timestamp=1794326400000",
+   "description": "Meet Lana \ud83e\udd84\n\nSTONKLANA is a community-driven token paired with $STONK, bringing holders together to support and grow the STONK ecosystem. \n\nWith the community now leading the way, STONKLANA enters a new era focused on unity, organic growth and building momentum.\n\nPowered by the community. Driven by the STONK movement.\n\nThis is STONKLANA Season.",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/stonklanasol?s=11"
+    }
+   ],
+   "claimDate": "2026-11-10T14:59:44.946Z"
+  },
+  {
+   "url": "https://dexscreener.com/bsc/0x7e15837daf327b65f571a008b2d5dd6c5e407777",
+   "chainId": "bsc",
+   "tokenAddress": "0x7E15837DaF327b65f571a008B2D5Dd6C5E407777",
+   "icon": "https://cdn.dexscreener.com/cms/images/GkX4Ln8GBGy3NkYV?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/aJlxnXMfL9B-YPOI?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/bsc/0x7e15837daf327b65f571a008b2d5dd6c5e407777?timestamp=1794326400000",
+   "description": "\u66d9\u5b9d (Shubao, \uc288\ubc14\uc624) is a community token on BNB Chain inspired by the giant panda cub born in South Korea on June 3, 2026. Her name means \"a treasure as bright as the dawn light\".",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/ShuBaoCto"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/ShuBaoCtoBNB"
+    }
+   ],
+   "claimDate": "2026-11-10T14:01:29.869Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/ed3qnmtyyqrrc6fyx98gwwysayijfbmnsh65wkhfpump",
+   "chainId": "solana",
+   "tokenAddress": "ED3qnMtYYqRRC6Fyx98gWwySAYiJfBmNSH65wkhFpump",
+   "icon": "https://cdn.dexscreener.com/cms/images/PqDQV_B6gYvJaZfy?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/5QeVhL-kPwYv_uF5?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/ED3qnMtYYqRRC6Fyx98gWwySAYiJfBmNSH65wkhFpump?timestamp=1794326400000",
+   "description": "The viral excited wiener dog",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/xturzom/status/2119999205309874589"
+    }
+   ],
+   "claimDate": "2026-11-10T03:53:10.251Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/5jhhcudrqibzuc4s9tggthmflnorof4e3kwwgqsrpump",
+   "chainId": "solana",
+   "tokenAddress": "5JHHcudrqibzuc4S9tGgthmfLNoRof4E3KWWGQsrpump",
+   "icon": "https://cdn.dexscreener.com/cms/images/dfd7FfZaoWyQ3DYP?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/AiSW6wluEvOGhqLw?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/5JHHcudrqibzuc4S9tGgthmfLNoRof4E3KWWGQsrpump?timestamp=1794326400000",
+   "description": "4chan is building a fresh animal cult,\n\nHis name is Steve, a stupidly simple fish drawing that anons on /s4s/ are turning into a whole cult",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/SteveTheFishy"
+    }
+   ],
+   "claimDate": "2026-11-10T03:10:37.363Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/btck1zaagrbsq7e4l7mg8oirkrqafkubelqpxegq9btc",
+   "chainId": "solana",
+   "tokenAddress": "BTCk1ZAAGrbSq7e4L7mg8oiRKRqafkUbeLQpXeGq9BTC",
+   "icon": "https://cdn.dexscreener.com/cms/images/03k7noOO-VjKO52a?width=64&height=64&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/BTCk1ZAAGrbSq7e4L7mg8oiRKRqafkUbeLQpXeGq9BTC?timestamp=1794326400000",
+   "description": "$BTC \u2014 BIG TESTICLE COIN | OFFICIAL CTO. \nThe dev with small balls sold on us. \nBIG BALLS STAY. BIG BALLS GROW. Community-driven CTO.\nWe're taking over, rebuilding and growing this project together!\nHold $BTC. Receive Bitcoin from trading fees. Paid in \u20bf WBTC, every 30 minutes.\nSMALL BALLS SELL. BIG BALLS DON'T FOLD!",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/BigTesticleCTO"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/bigtesticleCTO"
+    }
+   ],
+   "claimDate": "2026-11-09T23:30:49.847Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/hjibij1bcewjcgpeb22k8y7imdgaf1khgmhuegcdpump",
+   "chainId": "solana",
+   "tokenAddress": "HjiBij1BcEwjcgPEb22K8y7imdgaf1kHGMHuEgcDpump",
+   "icon": "https://cdn.dexscreener.com/cms/images/RC7rStq5OXNx7DF3?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/0PexGdlzIornxJfY?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HjiBij1BcEwjcgPEb22K8y7imdgaf1kHGMHuEgcDpump?timestamp=1794326400000",
+   "description": "$AMD (Always Moist Downstairs) is a 100% community-driven, CTO-led memecoin on Solana, paired with $BTC (Big Titty Coin) on PumpSwap. Every $AMD buy routes through $BTC. Hold the pair, squeeze the float.",
+   "links": [
+    {
+     "label": "Website",
+     "url": "https://alwaysmoistdownstairs.fun/"
+    },
+    {
+     "label": "X Group Chat",
+     "url": "https://x.com/i/chat/group_join/g2119102816698380500/Yl7OMH916M"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/alwaysmoistdown"
+    }
+   ],
+   "claimDate": "2026-11-09T17:53:36.693Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/hm6ob55fqvgt5wnq5kkkqle6sweimnteyqvdkdnvpump",
+   "chainId": "solana",
+   "tokenAddress": "Hm6oB55fQvgT5wnq5KKKqLE6sweimNTeyQvDkDNVpump",
+   "icon": "https://cdn.dexscreener.com/cms/images/gt3ob70zdfq5pXXr?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/cB1X5paF_eiCQPCw?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/Hm6oB55fQvgT5wnq5KKKqLE6sweimNTeyQvDkDNVpump?timestamp=1794326400000",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/solnaiwa?s=11"
+    }
+   ],
+   "claimDate": "2026-11-09T17:53:08.042Z"
+  },
+  {
+   "url": "https://dexscreener.com/solana/8mzxomcrjukscnk3fvorch9zbxz8g6hwhyrqeb3iwoov",
+   "chainId": "solana",
+   "tokenAddress": "8MzXoMcRjUkScnk3FvorCH9ZbXz8G6hWhyrQEb3iwoov",
+   "icon": "https://cdn.dexscreener.com/cms/images/A79WmyE3Aj3_P-Zs?width=64&height=64&fit=crop&quality=95&format=auto",
+   "header": "https://cdn.dexscreener.com/cms/images/nNFxv2G0Yo6XvQu7?width=600&height=200&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/8MzXoMcRjUkScnk3FvorCH9ZbXz8G6hWhyrQEb3iwoov?timestamp=1794326400000",
+   "description": "WOOV is a story-driven memecoin on Solana starring WOOV, a small Spanish Maneto dog, and his best friend Pippin the squirrel. \ud83d\udc36\ud83d\udc3f\ufe0f\n\nWe make crypto easy to understand \u2013 with short reels and our free WOOV Crypto School on YouTube in German, English, Turkish and Spanish.\n\nLiquidity LP tokens are burned. No promises \u2013 just stories.\nAlways check the contract address on our official website.\nNot financial advice \u00b7 DYOR.",
+   "links": [
+    {
+     "label": "Website",
+     "url": "https://woovtoken.com"
+    },
+    {
+     "label": "YouTube DE",
+     "url": "https://www.youtube.com/@WOOVTOKEN"
+    },
+    {
+     "label": "YouTube EN/ES/PT",
+     "url": "https://www.youtube.com/@WOOVCryptoSchool"
+    },
+    {
+     "label": "YouTube TR",
+     "url": "https://www.youtube.com/@WOOVKriptoOkulu"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/woovtoken_rudel"
+    },
+    {
+     "type": "tiktok",
+     "url": "https://www.tiktok.com/@woovtoken"
+    },
+    {
+     "type": "instagram",
+     "url": "https://www.instagram.com/woovtoken"
+    }
+   ],
+   "claimDate": "2026-11-09T16:01:47.859Z"
+  }
+ ]
+}

@@ -192,11 +192,12 @@ def parse_holder_chart(body, mint: str) -> dict:
         if isinstance(moment, bool) or not isinstance(moment, int):
             return refused | {"reason": "time_type"}
         points.append((moment, count))
-    if len(points) < 2:
-        return refused | {"points": len(points)}
     points.sort()
-    if points[0][0] >= points[-1][0]:
-        return refused | {"reason": "time_not_increasing"}
+    nonzero = [item for item in points if item[1] > 0]
+    if len(nonzero) < 2:
+        return refused | {"points": len(points), "nonzero_points": len(nonzero)}
+    if nonzero[0][0] >= nonzero[-1][0]:
+        return refused | {"reason": "time_not_increasing", "nonzero_points": len(nonzero)}
     return {
         "ok": True,
         "reason": None,
@@ -204,11 +205,12 @@ def parse_holder_chart(body, mint: str) -> dict:
         "mint": mint,
         "metric": METRIC,
         "points": len(points),
-        "start_time": points[0][0],
-        "end_time": points[-1][0],
-        "start_holders": points[0][1],
-        "end_holders": points[-1][1],
-        "delta": points[-1][1] - points[0][1],
+        "nonzero_points": len(nonzero),
+        "start_time": nonzero[0][0],
+        "end_time": nonzero[-1][0],
+        "start_holders": nonzero[0][1],
+        "end_holders": nonzero[-1][1],
+        "delta": nonzero[-1][1] - nonzero[0][1],
         "score_measured": False,
         "live_ready": False,
         "api_key_required": True,

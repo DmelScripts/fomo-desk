@@ -1,0 +1,918 @@
+{
+ "meta": {
+  "name": "tok_BIG_st_holders_top",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/tokens/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump/holders",
+  "status": 200,
+  "latency_ms": 500,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:01+0700",
+  "fetched_unix": 1794326520.8613424,
+  "request_body": null
+ },
+ "body": {
+  "total": 612,
+  "accounts": [
+   {
+    "wallet": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+    "amount": 46953568.920226,
+    "value": {
+     "quote": 196.498041,
+     "usd": 44039.3394976089
+    },
+    "percentage": 4.944811890723049
+   },
+   {
+    "wallet": "7WQQ49PvfE8omJ7zsDWNYs7KhWjgb4q7xd7kJ5addJ2S",
+    "amount": 36500000,
+    "value": {
+     "quote": 152.75044392654183,
+     "usd": 34234.58383735972
+    },
+    "percentage": 3.843917260433087
+   },
+   {
+    "wallet": "DqNWgkTbUPtMqARGtiZifEcByCYv5uKCP2LEBExizkSr",
+    "amount": 34495682.745777,
+    "value": {
+     "quote": 144.36248912237227,
+     "usd": 32354.666931157975
+    },
+    "percentage": 3.632836994984001
+   },
+   {
+    "wallet": "FiXH953VP8AZCY8FHyB8egQwmFayP7XFpesKGwKTZC4u",
+    "amount": 29719627.71587,
+    "value": {
+     "quote": 124.37496786111505,
+     "usd": 27875.043469974553
+    },
+    "percentage": 3.129857258922692
+   },
+   {
+    "wallet": "GTRWdhZGa9BCXRAiEM4ujSoYMJDaNFNv8ZhGQmUaSpv4",
+    "amount": 24626193.536978,
+    "value": {
+     "quote": 103.05923273957055,
+     "usd": 23097.73937634848
+    },
+    "percentage": 2.5934534354946703
+   },
+   {
+    "wallet": "2KQKdxPGT9HfD6L78feS2tSRpeVs5nW8uVuqZmUa7TfV",
+    "amount": 18864464.004583,
+    "value": {
+     "quote": 78.94671920921432,
+     "usd": 17693.618479774013
+    },
+    "percentage": 1.9866695560557608
+   },
+   {
+    "wallet": "4rrrjHJsuay3NnzAAVWmDWuQnubTKBCXK1cYhvouYM75",
+    "amount": 18627917.99567,
+    "value": {
+     "quote": 77.95678748673451,
+     "usd": 17471.753981869217
+    },
+    "percentage": 1.961758233136658
+   },
+   {
+    "wallet": "2qg7wkTw5k5ioFWuL68W2cQWGsAw5ougwGTQqMwRAgmy",
+    "amount": 17900983.709468,
+    "value": {
+     "quote": 74.91460844775426,
+     "usd": 16789.937741725833
+    },
+    "percentage": 1.8852027468371384
+   },
+   {
+    "wallet": "6apYw8u146Cid33kRjZWMuoj8kwjK6aZiFohSwsahDT4",
+    "amount": 17395778.372442,
+    "value": {
+     "quote": 72.80035257091099,
+     "usd": 16316.088578287527
+    },
+    "percentage": 1.8319981573835176
+   },
+   {
+    "wallet": "56dsS3RDo9tmz99cr7Je1CxvQRSYw8stkDM2FNctK3BC",
+    "amount": 17079391.607416,
+    "value": {
+     "quote": 71.47629178159033,
+     "usd": 16019.33873630633
+    },
+    "percentage": 1.7986785807518457
+   },
+   {
+    "wallet": "5GH827At9y4LQi93Sb5mSFsqSiYaYAnugiDHsMS8e1VM",
+    "amount": 17031883.140204,
+    "value": {
+     "quote": 71.27747152249712,
+     "usd": 15974.778938943218
+    },
+    "percentage": 1.793675330967382
+   },
+   {
+    "wallet": "2kFFNdjPzM6BdJhDprTQb7XBB7F2W2xfFyzYKmK1ZX4L",
+    "amount": 16728618.720733,
+    "value": {
+     "quote": 70.00832701013218,
+     "usd": 15690.33698844272
+    },
+    "percentage": 1.761737705310401
+   },
+   {
+    "wallet": "9vaAwMss8n1XsKCyRu2FXxjFE1vNshd1i5XichJoRKbJ",
+    "amount": 16609808.02751,
+    "value": {
+     "quote": 69.5111109516929,
+     "usd": 15578.900423020319
+    },
+    "percentage": 1.7492254183404312
+   },
+   {
+    "wallet": "B8d5udNVM2w2H8f6HnJGBCNZD51TMyLe3gPUvz5Zcxzv",
+    "amount": 16003273.134467,
+    "value": {
+     "quote": 66.97279659089138,
+     "usd": 15010.010843673343
+    },
+    "percentage": 1.6853495294521317
+   },
+   {
+    "wallet": "8Dy1uf2GhXty2qQ2VBCCrt9nuc1ayFKGAQcAMEo9pszz",
+    "amount": 15987946.545135,
+    "value": {
+     "quote": 66.90865567789568,
+     "usd": 14995.635517442463
+    },
+    "percentage": 1.6837354433897525
+   },
+   {
+    "wallet": "w1UhJouYUTVXQW5gGWf23vTcWZqku8UQnbsTaXpUa5U",
+    "amount": 15957795.029684,
+    "value": {
+     "quote": 66.78247328419161,
+     "usd": 14967.355391866278
+    },
+    "percentage": 1.6805601028234425
+   },
+   {
+    "wallet": "FgHhUVjv7vAYHHB9z4hvvuH77kTZNaUAovVf6BjQjgHL",
+    "amount": 15681470.316714,
+    "value": {
+     "quote": 65.62606992599869,
+     "usd": 14708.18110275653
+    },
+    "percentage": 1.6514595731338646
+   },
+   {
+    "wallet": "EWpjmb2BFVWSRn3kaaBhkwaPuUExE9PzpY3HtG9z2hLr",
+    "amount": 15551622.218247,
+    "value": {
+     "quote": 65.08266294835893,
+     "usd": 14586.392181849948
+    },
+    "percentage": 1.6377849060946394
+   },
+   {
+    "wallet": "8W3Pu17DeAopiB48e6PPxWf4JsduCTUsRVWxF7gUEedH",
+    "amount": 15497145.404476,
+    "value": {
+     "quote": 64.85468055144868,
+     "usd": 14535.29653669281
+    },
+    "percentage": 1.6320478002111394
+   },
+   {
+    "wallet": "CM7t4ghaywuLi8RZ9J1NndiYzxV7vBfJAS5b7EgyrKPm",
+    "amount": 15444955.21677,
+    "value": {
+     "quote": 64.63626755581303,
+     "usd": 14486.345595418603
+    },
+    "percentage": 1.6265515053248838
+   },
+   {
+    "wallet": "6NRYcFMZNkmDC9DgU4HbdjXuxnyxDXsVxa6PAmph8jVg",
+    "amount": 15286278.179191,
+    "value": {
+     "quote": 63.972213091946166,
+     "usd": 14337.517037992242
+    },
+    "percentage": 1.6098407819390124
+   },
+   {
+    "wallet": "EpLy6LJX8kJYpBPhQirEAdEWuebvC3Vz95JXTfEu5qUq",
+    "amount": 15285729.867564,
+    "value": {
+     "quote": 63.96991843867399,
+     "usd": 14337.002757982282
+    },
+    "percentage": 1.6097830377053923
+   },
+   {
+    "wallet": "DbLbtQnQ5xZRtmpKPBc4MoK5ecb4sdaSw24RPiAAZBAY",
+    "amount": 15057618.088662,
+    "value": {
+     "quote": 63.015283493683484,
+     "usd": 14123.049009513521
+    },
+    "percentage": 1.5857599471785568
+   },
+   {
+    "wallet": "GafzryKtPfmSeHuUtPbqxL8zvM6ekDcEWejxgsLKoL9C",
+    "amount": 14802939.603652,
+    "value": {
+     "quote": 61.94946838015426,
+     "usd": 13884.177449331422
+    },
+    "percentage": 1.5589390424007243
+   },
+   {
+    "wallet": "4ZMdzYoD9iPjgNh76ro1PHc4x59ZjtNzModnG37bBEfN",
+    "amount": 14621354.089355,
+    "value": {
+     "quote": 61.18954323167491,
+     "usd": 13713.862257198525
+    },
+    "percentage": 1.539815763150016
+   },
+   {
+    "wallet": "5u7e9cUYxHkgK5eJLume1LcdgHtEisZZdu2z125JEhDh",
+    "amount": 14483074.098009,
+    "value": {
+     "quote": 60.61084925731163,
+     "usd": 13584.164778931017
+    },
+    "percentage": 1.5252531098484428
+   },
+   {
+    "wallet": "8mgkRJdNGrbE2PJneR19nuYs9hhBbbTfeGHK6AbRDVbv",
+    "amount": 13871341.320349,
+    "value": {
+     "quote": 58.05078204218885,
+     "usd": 13010.399927893697
+    },
+    "percentage": 1.4608298171684442
+   },
+   {
+    "wallet": "5T5H5vkFYa8yYx4v1MjEMN6ExwMp44ts3uQvRL4cP7No",
+    "amount": 13502740.130673,
+    "value": {
+     "quote": 56.50820682698719,
+     "usd": 12664.676411989216
+    },
+    "percentage": 1.42201139319004
+   },
+   {
+    "wallet": "4YsjqttH2XRzeniQviMLJHHcZaBiP1SxsnaJ88VxY4qj",
+    "amount": 13069241.442367,
+    "value": {
+     "quote": 54.694039235745684,
+     "usd": 12258.083338339977
+    },
+    "percentage": 1.3763584318104638
+   },
+   {
+    "wallet": "6HsCzignNKwM6L4kpUbmB27VzCkBBLVNHUgyQhmQVveM",
+    "amount": 12973854.642354,
+    "value": {
+     "quote": 54.29485085090409,
+     "usd": 12168.616834174976
+    },
+    "percentage": 1.3663129806601226
+   },
+   {
+    "wallet": "61wnWzcFiwGmgjRR52rVJzGAHowSK94nZtFxyXvSMQaJ",
+    "amount": 11713885.150897,
+    "value": {
+     "quote": 49.021949504220366,
+     "usd": 10986.848856427026
+    },
+    "percentage": 1.233622063514077
+   },
+   {
+    "wallet": "92DFn84FbNjpNUQQXCAEpSqQfRURd2Xwaw3xu19MZmf9",
+    "amount": 11510598.540912,
+    "value": {
+     "quote": 48.171206492726384,
+     "usd": 10796.179473069655
+    },
+    "percentage": 1.212213381077467
+   },
+   {
+    "wallet": "AG9CwHjY3X3qwLQWTBsRU2869D9XKgpzkUi74jGXYz9C",
+    "amount": 10525765.284067,
+    "value": {
+     "quote": 44.04973478925526,
+     "usd": 9872.471070404443
+    },
+    "percentage": 1.1084978316354113
+   },
+   {
+    "wallet": "CfVc2ZjGSoENNaaFFuUD2GzgJFwVriGcXmGfS2S5aXYG",
+    "amount": 9890857.557234,
+    "value": {
+     "quote": 41.39268171730643,
+     "usd": 9276.969651137271
+    },
+    "percentage": 1.0416339201297757
+   },
+   {
+    "wallet": "CsXegDQS5cS19BubZpC1DWUXy1GuQTQGCxjTbEcZuGij",
+    "amount": 9544043.473113,
+    "value": {
+     "quote": 39.94128431156781,
+     "usd": 8951.680998018983
+    },
+    "percentage": 1.0051099572773372
+   },
+   {
+    "wallet": "F2HHCNuJbY1PQy7twyantSZKugvjWMg9uRXxdRDcLawi",
+    "amount": 9421544.221805,
+    "value": {
+     "quote": 39.428631845322165,
+     "usd": 8836.784809281517
+    },
+    "percentage": 0.992209217921366
+   },
+   {
+    "wallet": "B3vApqJknVJHjfWtXiqHmy7gnog5anrMTwQSYAEwaf7T",
+    "amount": 9288275.722371,
+    "value": {
+     "quote": 38.87091068230936,
+     "usd": 8711.78777868556
+    },
+    "percentage": 0.9781743388735202
+   },
+   {
+    "wallet": "5sGazgUBrpVUaTbn9cvGzvqGxHSDqBQhrmz5Ebn9A3fU",
+    "amount": 9141815.943945,
+    "value": {
+     "quote": 38.257984759790055,
+     "usd": 8574.418201608134
+    },
+    "percentage": 0.9627502492776049
+   },
+   {
+    "wallet": "DaecwSPo2GhAJzAEiLCg3GJk48KSZ12K1EcQztyNB3xw",
+    "amount": 9125115.554443,
+    "value": {
+     "quote": 38.18809457047014,
+     "usd": 8558.754341758195
+    },
+    "percentage": 0.9609914844704078
+   },
+   {
+    "wallet": "7meKz5voxseBAmJ4y47QjtYSEMaopdurDaCDyvc7dLEq",
+    "amount": 9064588.309656,
+    "value": {
+     "quote": 37.93479146058344,
+     "usd": 8501.983792823812
+    },
+    "percentage": 0.9546171907453884
+   },
+   {
+    "wallet": "6RuKWK5TVMBL4BbvumC4hB8q4BqFm2nhUEJFSgL1F25M",
+    "amount": 8939423.591652,
+    "value": {
+     "quote": 37.41098416636285,
+     "usd": 8384.587572769364
+    },
+    "percentage": 0.9414357436239414
+   },
+   {
+    "wallet": "8ZLWtYWZWNKbAskJ2PJFcF8nyGP3bbTGgudXcuj3gFwR",
+    "amount": 8806020.004068,
+    "value": {
+     "quote": 36.85269766705191,
+     "usd": 8259.463838431035
+    },
+    "percentage": 0.9273866380645488
+   },
+   {
+    "wallet": "Ezbs2srhavEQEkFmd7dcA72ickDJWU8k8D2to1JnMFjz",
+    "amount": 8407662.097615,
+    "value": {
+     "quote": 35.18559226835757,
+     "usd": 7885.830491972395
+    },
+    "percentage": 0.8854344508742836
+   },
+   {
+    "wallet": "E4BtBggdH9Lo275E9PpSNmUdyZZw4nnjdo1mMXLsvGwy",
+    "amount": 8366103.791821,
+    "value": {
+     "quote": 35.01167309962145,
+     "usd": 7846.851552141071
+    },
+    "percentage": 0.8810578292590531
+   },
+   {
+    "wallet": "2w9rkrZCbSpDMoUyiM8ojpTuV4Ao1TY6aBcNESh9DwPM",
+    "amount": 7746625.302248,
+    "value": {
+     "quote": 32.41919051646475,
+     "usd": 7265.821736066336
+    },
+    "percentage": 0.8158188139566785
+   },
+   {
+    "wallet": "GLPtMX54YyMyRuUw8VdViQQNMH1n42ZzfhdeASpzYeKg",
+    "amount": 7715051.679768,
+    "value": {
+     "quote": 32.287056684952724,
+     "usd": 7236.207768235084
+    },
+    "percentage": 0.8124937073148902
+   },
+   {
+    "wallet": "2qaSGYtnAxE9k1WbBKf5KNRxM4RpVdjCzSpJGKv7kwzk",
+    "amount": 7527235.311709,
+    "value": {
+     "quote": 31.501055764468255,
+     "usd": 7060.048447732501
+    },
+    "percentage": 0.7927142393977987
+   },
+   {
+    "wallet": "EJX5rwF5ziwp3rK8MBgSbnGi7icurgcdcwv2uukJgaD1",
+    "amount": 7221031.289087,
+    "value": {
+     "quote": 30.21960917850652,
+     "usd": 6772.849344067032
+    },
+    "percentage": 0.7604670358972302
+   },
+   {
+    "wallet": "CJjEb9KowVjH3KWjEDhimTxDmCaNyjDmQA3gAYnkxg5p",
+    "amount": 7166533.145857,
+    "value": {
+     "quote": 29.991537519011867,
+     "usd": 6721.733693289281
+    },
+    "percentage": 0.7547276837486452
+   },
+   {
+    "wallet": "BdoR2zfZdyPZTB4B4msZKkryv6fFAuLwXTebk7Ta8osX",
+    "amount": 6889126.845951,
+    "value": {
+     "quote": 28.830607780418422,
+     "usd": 6461.54494723055
+    },
+    "percentage": 0.7255132491086028
+   },
+   {
+    "wallet": "GBwZ6V2kGWDiX3RL2jc2EALW8LW2EZW7AAewasS3phc",
+    "amount": 6885643.116562,
+    "value": {
+     "quote": 28.816028569166644,
+     "usd": 6458.277439673443
+    },
+    "percentage": 0.7251463678064368
+   },
+   {
+    "wallet": "FsJJFCCycCucnsz1ExGXTxSPz6WfSez8z8BmGixoVeAt",
+    "amount": 6614015.054798,
+    "value": {
+     "quote": 27.679280431704807,
+     "usd": 6203.508298494287
+    },
+    "percentage": 0.6965404556137622
+   },
+   {
+    "wallet": "ENZVX1gZ77CWo3HoF2XeXbQjA2FduRCAxQcXzi8F9afu",
+    "amount": 6563305.476756,
+    "value": {
+     "quote": 27.467063704109105,
+     "usd": 6155.946071074123
+    },
+    "percentage": 0.6912000878793808
+   },
+   {
+    "wallet": "6QwC4vPpXj5B1ponbWg6zrCKw9u6aidSoK14RB18i6va",
+    "amount": 6545721.479041,
+    "value": {
+     "quote": 27.39347566419213,
+     "usd": 6139.453445211929
+    },
+    "percentage": 0.6893482678157067
+   },
+   {
+    "wallet": "GPygxon7ArQ2K7ycm1oov9zMDqY1tYGhZMf1N41wzND2",
+    "amount": 6260843.534506,
+    "value": {
+     "quote": 26.201277513709883,
+     "usd": 5872.256791085951
+    },
+    "percentage": 0.6593469733468085
+   },
+   {
+    "wallet": "67DQMM9qFrDEpJdfuQo4rTownosr1dipzig7PNrVU87H",
+    "amount": 6044680.676262,
+    "value": {
+     "quote": 25.296648128581086,
+     "usd": 5669.510339220813
+    },
+    "percentage": 0.6365822571312286
+   },
+   {
+    "wallet": "FWsBWF7RQRjXhnmfzziNbo3WjxhYCHF5w7rHErQfrT6D",
+    "amount": 5087120.506146,
+    "value": {
+     "quote": 21.289312756756594,
+     "usd": 4771.3822865317
+    },
+    "percentage": 0.535738912862403
+   },
+   {
+    "wallet": "EGoghZtReK3bXWsfmwHicwJyuEUBLVU4QTJNFmQb5x5L",
+    "amount": 4709201.479121,
+    "value": {
+     "quote": 19.707742917130414,
+     "usd": 4416.919255999624
+    },
+    "percentage": 0.49593920132740366
+   },
+   {
+    "wallet": "9EjA5KmFjtTkGBKPk2zvacDBnuihJVK5BWBi5p5QDwhs",
+    "amount": 4518717.26666,
+    "value": {
+     "quote": 18.910577218105338,
+     "usd": 4238.257674049226
+    },
+    "percentage": 0.47587877524195604
+   },
+   {
+    "wallet": "8qAqUgo74BjQ92ZM9KWiUzY1qvkhzxPTXu3XWNyWEEGg",
+    "amount": 4385762.804756,
+    "value": {
+     "quote": 18.354170284465596,
+     "usd": 4113.555189868307
+    },
+    "percentage": 0.46187696836621955
+   },
+   {
+    "wallet": "6D6PbVaD7FfUuSBkNKq6ak6a8Pp2Qx8zKRB86SwaYYbk",
+    "amount": 3882802.011962,
+    "value": {
+     "quote": 16.24930769879631,
+     "usd": 3641.8112603392356
+    },
+    "percentage": 0.40890875815411093
+   },
+   {
+    "wallet": "FNjSppTimF52Uez1pG1EpqDfpcBonaAnBoHPug8WLAav",
+    "amount": 3719339.481935,
+    "value": {
+     "quote": 15.56522621860508,
+     "usd": 3488.494227778242
+    },
+    "percentage": 0.3916940611512384
+   },
+   {
+    "wallet": "929xeZ3yjXXBJWnqjyiz2dX39aFXfqH843r2SNN42KcS",
+    "amount": 3513130.402829,
+    "value": {
+     "quote": 14.702252838464672,
+     "usd": 3295.083761841828
+    },
+    "percentage": 0.36997760530374346
+   },
+   {
+    "wallet": "Cwud6NVNJcKD5m254gEToSMSE1Bzhaj8QBVEZEkfKtRg",
+    "amount": 3452752.19534,
+    "value": {
+     "quote": 14.44957344127471,
+     "usd": 3238.453000027262
+    },
+    "percentage": 0.36361900711412765
+   },
+   {
+    "wallet": "Brcs4yfXqUN2gBJtKyhac3rSXUk2fWDAPGhzzHwMXnxu",
+    "amount": 3350354.140654,
+    "value": {
+     "quote": 14.021043350576058,
+     "usd": 3142.4104030976614
+    },
+    "percentage": 0.35283518109105133
+   },
+   {
+    "wallet": "5h7Z75cika33YzMsoXT5GvFwANqrmWeAwj334fZwPxSc",
+    "amount": 3333861.61979,
+    "value": {
+     "quote": 13.952023079796778,
+     "usd": 3126.941510270045
+    },
+    "percentage": 0.3510983075124984
+   },
+   {
+    "wallet": "AXqXmnr5GLYqAQhjS8Mw9vX7NqYRqgqzZQGYGGiFbpm5",
+    "amount": 3256509.467481,
+    "value": {
+     "quote": 13.628308679690662,
+     "usd": 3054.390311825588
+    },
+    "percentage": 0.34295213563873905
+   },
+   {
+    "wallet": "2orfoVw2boenzjVixabxXL2ZEcMCq8WtHJWa473mdAqe",
+    "amount": 3097499.47497,
+    "value": {
+     "quote": 12.96286081818898,
+     "usd": 2905.249464713375
+    },
+    "percentage": 0.3262063478361536
+   },
+   {
+    "wallet": "7vY8nC7KxX3YaocNazpJTtykAZTdPXnTBZWKye142VSG",
+    "amount": 3050738.13465,
+    "value": {
+     "quote": 12.767167243052539,
+     "usd": 2861.390422917968
+    },
+    "percentage": 0.3212817800778787
+   },
+   {
+    "wallet": "9qNqQS2Vc2j9tqqEEfqFx26VMxYkXNgMYN7YQw7pmtyX",
+    "amount": 2999378.147028,
+    "value": {
+     "quote": 12.552228588002617,
+     "usd": 2813.218154366431
+    },
+    "percentage": 0.3158729158884038
+   },
+   {
+    "wallet": "6VaauzKf5W3hQ1eG2NtZPfETCJNdwkP8fv3XVJQpEKct",
+    "amount": 2876184.305025,
+    "value": {
+     "quote": 12.036669298825233,
+     "usd": 2697.6704855363446
+    },
+    "percentage": 0.3028990272403381
+   },
+   {
+    "wallet": "hZZpqWrr71qsRc7jN2neAadfCpVmckRu6gH2xAJeWiy",
+    "amount": 2650686.145756,
+    "value": {
+     "quote": 11.092972204771595,
+     "usd": 2486.1681392715536
+    },
+    "percentage": 0.2791511843195162
+   },
+   {
+    "wallet": "9iRcAtwdTUt7KhGX7B4NCNZTB8rocRM3VQZ8xayq8MEh",
+    "amount": 2591834.461006,
+    "value": {
+     "quote": 10.846681219254133,
+     "usd": 2430.9691547361085
+    },
+    "percentage": 0.2729533485163356
+   },
+   {
+    "wallet": "5L3dGYvuQyUVd3tFZHHhR3C1gyZ1uAmMLXzLfDhoeu6J",
+    "amount": 2523640.687014,
+    "value": {
+     "quote": 10.56129411650607,
+     "usd": 2367.0079089028186
+    },
+    "percentage": 0.2657716711217624
+   },
+   {
+    "wallet": "9c4ZDUsPNf42QUjK2aGqTCx1WcnZsFLSqcCZq2jCeYp4",
+    "amount": 2512614.634158,
+    "value": {
+     "quote": 10.515150706409864,
+     "usd": 2356.666201207095
+    },
+    "percentage": 0.2646104866042932
+   },
+   {
+    "wallet": "GQiawPYQKoXDN8y6U6Q5BX4ZzkipxyryU4r7yF45Gg3i",
+    "amount": 2488952.845147,
+    "value": {
+     "quote": 10.416127452285853,
+     "usd": 2334.473009436164
+    },
+    "percentage": 0.2621185973113587
+   },
+   {
+    "wallet": "87ZeBFwNUpiVCnjqJcBP36j5yrjGaEq2ecEya6yraR3r",
+    "amount": 2479138.481128,
+    "value": {
+     "quote": 10.375054891717115,
+     "usd": 2325.267785660306
+    },
+    "percentage": 0.26108501914004895
+   },
+   {
+    "wallet": "B8F87kEbqbzXXQF3vyevzwzkpuFUJ58MrC6UaCiucjNs",
+    "amount": 2303402.393171,
+    "value": {
+     "quote": 9.639609262967921,
+     "usd": 2160.438968224318
+    },
+    "percentage": 0.24257775936528453
+   },
+   {
+    "wallet": "HYw9QhxFMcwMpCjDggomz1UAj3dyYs9jmbgkgWhBgjiZ",
+    "amount": 2198244.913905,
+    "value": {
+     "quote": 9.199531135842507,
+     "usd": 2061.8082137022006
+    },
+    "percentage": 0.2315033306087308
+   },
+   {
+    "wallet": "Boa27SPB3vqz5WtuAiSTpa9wzKPsk7KFSBsfrh1sxuza",
+    "amount": 2061783.152484,
+    "value": {
+     "quote": 8.62844635129304,
+     "usd": 1933.816114744365
+    },
+    "percentage": 0.21713216019461343
+   },
+   {
+    "wallet": "E6syzgXYWzmqFnFRZM9bymhbTm8CKaBQ6wqYVXTvGhYW",
+    "amount": 2018813.691947,
+    "value": {
+     "quote": 8.44862157944891,
+     "usd": 1893.5136051772406
+    },
+    "percentage": 0.2126069259198279
+   },
+   {
+    "wallet": "5MTSouwXzEqn3eCsmRnUWAHJb4ZhQ8KRuW4mwzcELFyU",
+    "amount": 1973922.293924,
+    "value": {
+     "quote": 8.260753607490106,
+     "usd": 1851.4084454732767
+    },
+    "percentage": 0.20787928702378455
+   },
+   {
+    "wallet": "AjNEcxsxCk2pSNSzmX2ZNBgV8Lbk2ayw7xNnED8AGk2c",
+    "amount": 1839251.080855,
+    "value": {
+     "quote": 7.697162166930772,
+     "usd": 1725.0957623420543
+    },
+    "percentage": 0.19369668427311634
+   },
+   {
+    "wallet": "DHEqFCqCH2Je2xZ2VYLnK9WWbwBfAzbYbsttKgYNY2Y9",
+    "amount": 1774223.652581,
+    "value": {
+     "quote": 7.425026042649817,
+     "usd": 1664.1043391920775
+    },
+    "percentage": 0.18684846361711624
+   },
+   {
+    "wallet": "HPorw497uFWcXbWUs7Ft8XBpba1YbCj3mfrXBNFtNAjY",
+    "amount": 1501026.951401,
+    "value": {
+     "quote": 6.2817132375946985,
+     "usd": 1407.86391807874
+    },
+    "percentage": 0.15807735361275507
+   },
+   {
+    "wallet": "3C2NyyLf2uVV6LyxsgbSBEsVedE6wSEKGatB4PmectuM",
+    "amount": 1469368.585764,
+    "value": {
+     "quote": 6.149224760744273,
+     "usd": 1378.1704667759
+    },
+    "percentage": 0.15474332243168204
+   },
+   {
+    "wallet": "GKx7myWQVjqLaoxkGENU18FFuUajMYomD1JHAJ8s576w",
+    "amount": 1440000,
+    "value": {
+     "quote": 6.026318883677267,
+     "usd": 1350.6246774191234
+    },
+    "percentage": 0.15165043438420947
+   },
+   {
+    "wallet": "53dZ4DKA3jHxaji1EEQz1eh3JohjBAM1XvzVAsRiBiNc",
+    "amount": 1392538.220912,
+    "value": {
+     "quote": 5.827694011753008,
+     "usd": 1306.108670425743
+    },
+    "percentage": 0.1466521014568882
+   },
+   {
+    "wallet": "7XQndwnxJzPuehFgdZAk3WLFtqywdRxJjoUMTein4nkk",
+    "amount": 1378775.603894,
+    "value": {
+     "quote": 5.770098234791625,
+     "usd": 1293.200246696313
+    },
+    "percentage": 0.1452027217006082
+   },
+   {
+    "wallet": "J294mPcs9i6STbHjnUNsNG3sN6YSbxBdMCecMtB2Arj2",
+    "amount": 1374772.848488,
+    "value": {
+     "quote": 5.753346928895848,
+     "usd": 1289.4459270928294
+    },
+    "percentage": 0.14478118031445983
+   },
+   {
+    "wallet": "8PytNemb2EBCBgvefSbNCyJGPYnd5QpCTcjRHRMSaxEE",
+    "amount": 1323219.658215,
+    "value": {
+     "quote": 5.537599731634746,
+     "usd": 1241.0924472439424
+    },
+    "percentage": 0.1393519694125208
+   },
+   {
+    "wallet": "Bx8XnA7CtpQxAVaYsBx89ncifSYDDZA9CdWW6YuZ6wr",
+    "amount": 1300538.980619,
+    "value": {
+     "quote": 5.442682373515739,
+     "usd": 1219.8194730343976
+    },
+    "percentage": 0.13696340371143634
+   },
+   {
+    "wallet": "B1Z5bnRVVtGWf75mMaU98f25GfzarYCh5MQKhzNKUp5j",
+    "amount": 1300000,
+    "value": {
+     "quote": 5.440426769986422,
+     "usd": 1219.313944892264
+    },
+    "percentage": 0.1369066421524113
+   },
+   {
+    "wallet": "4qkcUXfEBSvFnrRvS4wsNw2gyngZpLccHfo7tBX8dDt5",
+    "amount": 1271842.403397,
+    "value": {
+     "quote": 5.322588814342237,
+     "usd": 1192.9039832055803
+    },
+    "percentage": 0.13394128676625833
+   },
+   {
+    "wallet": "DHEP1LZ11nNLSinMciH8yMLco84osxv6Y6ephrVzxMkH",
+    "amount": 1270552.095744,
+    "value": {
+     "quote": 5.317188949498469,
+     "usd": 1191.6937600405772
+    },
+    "percentage": 0.13380540085232312
+   },
+   {
+    "wallet": "4eA5B1zbPqivsYvUZrfSgXBmcktBpVi7DEoUzE6MAS4V",
+    "amount": 1233453.610545,
+    "value": {
+     "quote": 5.1619338787272495,
+     "usd": 1156.8978367040233
+    },
+    "percentage": 0.12989845543883388
+   },
+   {
+    "wallet": "5jRkjG9TXb94wdUrwrkiGpUKkfarJLunEr4G5bz9uPKn",
+    "amount": 1199175.268612,
+    "value": {
+     "quote": 5.018480948663371,
+     "usd": 1124.7470210681063
+    },
+    "percentage": 0.12628850721375753
+   },
+   {
+    "wallet": "91akhS1fj5zqU9ZPhQ4EUtujBdKy3zWiwuG5iaSQEXtd",
+    "amount": 1178403.536763,
+    "value": {
+     "quote": 4.931552420963157,
+     "usd": 1105.264511604223
+    },
+    "percentage": 0.1241009779374984
+   },
+   {
+    "wallet": "553Fi1jfCdk1PWV7ipwqUJ94vjaqzZVnCmyiUj9bMCnU",
+    "amount": 1173349.700372,
+    "value": {
+     "quote": 4.910402400353366,
+     "usd": 1100.5243476144149
+    },
+    "percentage": 0.12356874426805264
+   },
+   {
+    "wallet": "68bKbzUaqkMwu75ksoaMBvD2AyGGByJMDubDETBPGJTw",
+    "amount": 1162140.229312,
+    "value": {
+     "quote": 4.863491395405511,
+     "usd": 1090.0106057849348
+    },
+    "percentage": 0.12238824346564554
+   }
+  ]
+ }
+}

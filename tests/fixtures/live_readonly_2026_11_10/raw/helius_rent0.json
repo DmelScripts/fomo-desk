@@ -1,0 +1,25 @@
+{
+ "meta": {
+  "name": "helius_rent0",
+  "method": "POST",
+  "url": "https://mainnet.helius-rpc.com/?api-key=REDACTED",
+  "status": 200,
+  "latency_ms": 111,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T22:58:45+0700",
+  "fetched_unix": 1794326325.645956,
+  "request_body": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "getMinimumBalanceForRentExemption",
+   "params": [
+    0
+   ]
+  }
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "result": 650240,
+  "id": 1
+ }
+}

@@ -1,0 +1,184 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump/report",
+  "status": 200,
+  "latency_ms": 4279,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:04:07+0700",
+  "fetched_unix": 1794326642.8323078,
+  "request_body": null
+ },
+ "body": {
+  "mint": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 1000000000000000,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "Meme D'or",
+   "symbol": "Meme",
+   "uri": "https://metadata.j7tracker.io/metadata/eaf9cefcfc624f4c.json",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "6HkbK3q7snBcEpuJdLbPidvPNJYLoQhPx4GQwb8hGvMc",
+    "amount": 1000000000000000,
+    "decimals": 6,
+    "pct": 100,
+    "uiAmount": 1000000000,
+    "uiAmountString": "1000000000",
+    "owner": "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "Meme D'or",
+   "symbol": "Meme",
+   "image": "https://metadata.j7tracker.io/images/eaf9cefcfc624f4c"
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q",
+    "marketType": "pump_fun",
+    "mintA": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "6HkbK3q7snBcEpuJdLbPidvPNJYLoQhPx4GQwb8hGvMc",
+    "liquidityB": "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 1000000000000000,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+     "owner": "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q",
+     "amount": 793100000000000,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q",
+     "amount": 7,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.14916784528972,
+     "basePrice": 2.8193945644427583e-06,
+     "base": 793100000,
+     "quote": 7e-09,
+     "reserveSupply": 7,
+     "currentSupply": 0,
+     "quoteUSD": 5.750441749170281e-07,
+     "baseUSD": 2236.0618290595517,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 7,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2236.061829634596,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 7
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2236.061829634596,
+  "totalStableLiquidity": 5.750441749170281e-07,
+  "totalLPProviders": 0,
+  "totalHolders": 1,
+  "price": 2.8193945644427583e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "68KPbaXtTTLydAD1mxmRuQLVrxNWZWifoaDD63izvS4q": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "6HkbK3q7snBcEpuJdLbPidvPNJYLoQhPx4GQwb8hGvMc": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "FnuonP1Emh6TtCeGc6BGFa4VWztp3NrJGe2kB3ZsTo4Z": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-10-27T08:06:50.128119385Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

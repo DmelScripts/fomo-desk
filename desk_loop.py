@@ -2516,6 +2516,9 @@ def _signer_sol_price(transport, now: float) -> dict:
         response = transport({"method": "hermes_price", "kind": "hermes"})
     except Exception:
         return {"ok": False, "reason": "price_unknown"}
+    status = response.get("status") if isinstance(response, dict) else None
+    if status is not None and status != 200:
+        return {"ok": False, "reason": "price_unknown"}
     body = response.get("body") if isinstance(response, dict) else None
     if not isinstance(body, dict):
         return {"ok": False, "reason": "price_unknown"}

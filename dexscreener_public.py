@@ -94,6 +94,9 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             break
     if chosen is None:
         return refused | {"reason": "pair_missing"}
+    quote = chosen.get("quoteToken")
+    if isinstance(quote, dict) and not _quote_is_sol(quote):
+        return refused | {"reason": "quote_not_sol"}
     created = chosen.get("pairCreatedAt")
     if isinstance(created, bool) or not isinstance(created, int):
         return refused | {"reason": "pair_created_at"}
@@ -147,6 +150,14 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             "fdv": chosen.get("fdv"),
         },
     }
+
+
+def _quote_is_sol(quote: dict) -> bool:
+    """A pair quoted in anything other than SOL or wSOL is not a candidate."""
+    import solana_tx
+    if quote.get("address") == solana_tx.NATIVE_MINT:
+        return True
+    return quote.get("symbol") in {"SOL", "wSOL", "WSOL"}
 
 
 def _nested(value, key: str):

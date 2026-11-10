@@ -1,0 +1,25 @@
+{
+ "meta": {
+  "name": "tok_Nothing_st_holders_chart",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/holders/chart/6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+  "status": 200,
+  "latency_ms": 404,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:36+0700",
+  "fetched_unix": 1794326555.6643245,
+  "request_body": null
+ },
+ "body": {
+  "holders": [
+   {
+    "holders": 0,
+    "time": 1794178800
+   },
+   {
+    "holders": 231,
+    "time": 1794265200
+   }
+  ]
+ }
+}

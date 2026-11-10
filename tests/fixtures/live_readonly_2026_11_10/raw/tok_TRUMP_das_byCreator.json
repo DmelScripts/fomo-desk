@@ -1,0 +1,1515 @@
+{
+ "meta": {
+  "name": "tok_TRUMP_das_byCreator",
+  "method": "POST",
+  "url": "https://mainnet.helius-rpc.com/?api-key=REDACTED",
+  "status": 200,
+  "latency_ms": 183,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:20+0700",
+  "fetched_unix": 1794326540.2661955,
+  "request_body": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "getAssetsByCreator",
+   "params": {
+    "creatorAddress": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+    "onlyVerified": false,
+    "page": 1,
+    "limit": 20
+   }
+  }
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "result": {
+   "last_indexed_slot": 467780512,
+   "total": 20,
+   "limit": 20,
+   "page": 1,
+   "items": [
+    {
+     "interface": "FungibleToken",
+     "id": "Gph8VWCpbsGL3khi4YpAsa6K9KyppGpW5UNg9nZ7pump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreie4sgs5b2rauaeeryumx57hskot67bggbmgj6icwsk4jpsgt7zafm",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreidstci7qhkuokhrrslmn35knvdj4wgco3x5o3e4izl3vfrezzhnji",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreidstci7qhkuokhrrslmn35knvdj4wgco3x5o3e4izl3vfrezzhnji",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Trade tokens & tokenized stocks directly on X, Reddit, any site.\nSee it. Pop it.",
+       "json_name": "POPPIN",
+       "name": "POPPIN",
+       "symbol": "POPPIN",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreidstci7qhkuokhrrslmn35knvdj4wgco3x5o3e4izl3vfrezzhnji"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999892572635835,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "Ga8RotR6NrgaSFuG2LN3EvXsUfTNDxsQEhWXikTcpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreibnimhurrmali56cviggpcqn3fpmmkv2cilomzdd5ba42mdpxcfie",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreiapjpmue5dqunkfn4cbjidvgr46ifhqtdniczwcrbtzokst2zpjjm",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreiapjpmue5dqunkfn4cbjidvgr46ifhqtdniczwcrbtzokst2zpjjm",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Nobody knows wtf he is.\r\nNobody knows where he came from.\r\nHe\u2019s just here.",
+       "json_name": "Chubz",
+       "name": "Chubz",
+       "symbol": "CHUBZ",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreiapjpmue5dqunkfn4cbjidvgr46ifhqtdniczwcrbtzokst2zpjjm"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999966972394507,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreiev4fp74kcgwcyzs4xr3zwa6myyhab5s7oyvka2vim5r26atvozjy",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreieocdioxxkbnlslwrumr6ruwtwzyeh22ubkmev6dbheztomw3jdjy",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreieocdioxxkbnlslwrumr6ruwtwzyeh22ubkmev6dbheztomw3jdjy",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Use apps. Earn their stocks. Turn everyday activity into on-chain rewards in tokenized equities.",
+       "json_name": "Appshare",
+       "name": "Appshare",
+       "symbol": "Appshare",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreieocdioxxkbnlslwrumr6ruwtwzyeh22ubkmev6dbheztomw3jdjy"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999999999999990,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreiaerogttgekszeydycd5amko77b43fqjmjqa27we5tea2f5ji7g2u",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreicxi5uzyqrb7y6zqzg5yxl5vd6e7vy6gucl7kfzdvhnsgtfnpufwm",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreicxi5uzyqrb7y6zqzg5yxl5vd6e7vy6gucl7kfzdvhnsgtfnpufwm",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Open-source framework for building general AI agents. Tools, browser use, MCP, your own LLM. Python, MIT.",
+       "json_name": "OpenManus",
+       "name": "OpenManus",
+       "symbol": "OPENMANUS",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreicxi5uzyqrb7y6zqzg5yxl5vd6e7vy6gucl7kfzdvhnsgtfnpufwm"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "GMnMLBmet424A6FtVoLfhc8HN7Ziv8F2VPdRqxABpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreia6rrxog6je2do5i4ljfplhimgnc3eh4mkoabj223vltctrtauw4a",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreicbazhrhg6tjooojqnlq2ffjtdzm7bnmd6dluazpd5str2pzr7rsi",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreicbazhrhg6tjooojqnlq2ffjtdzm7bnmd6dluazpd5str2pzr7rsi",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Launched on discord.gg/uxento",
+       "json_name": "Hogecoin",
+       "name": "Hogecoin",
+       "symbol": "HOGE",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreicbazhrhg6tjooojqnlq2ffjtdzm7bnmd6dluazpd5str2pzr7rsi"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 772786463832900,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreiglxio2rakcfx7unis2f7ewlizzdrdpohi4wzhiqsnraxnpfobo4u",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreihrkmc2w5o72tgpnhpk462ziqnm77zrjpbvyhmrdpulnyzx5diafu",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreihrkmc2w5o72tgpnhpk462ziqnm77zrjpbvyhmrdpulnyzx5diafu",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "Shiro",
+       "name": "Shiro",
+       "symbol": "\u30b7\u30ed",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreihrkmc2w5o72tgpnhpk462ziqnm77zrjpbvyhmrdpulnyzx5diafu"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999998861455748,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "FeHmiycVvdwfrXVukUBJLsistPXnA1susHLST3GFpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreihat62y6vw4bluj2glwlxyb2hz7qi6fzjgt2zka2lb2wbyre5fbvq",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreid7cfczlwmb5ebbsu7u32yoqdscthw75owe3ykpv7ogitfvirn5hy",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreid7cfczlwmb5ebbsu7u32yoqdscthw75owe3ykpv7ogitfvirn5hy",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Solana pools you can program. Plug modules into any pool: dynamic fees, limit orders, TWAP oracles, lockups, or your own.",
+       "json_name": "Patch",
+       "name": "Patch",
+       "symbol": "PATCH",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreid7cfczlwmb5ebbsu7u32yoqdscthw75owe3ykpv7ogitfvirn5hy"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999999999984857,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://metadata.j7tracker.io/metadata/eaf9cefcfc624f4c.json",
+      "files": [
+       {
+        "uri": "https://metadata.j7tracker.io/images/eaf9cefcfc624f4c",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://metadata.j7tracker.io/images/eaf9cefcfc624f4c",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Deployed using https://j7tracker.io",
+       "json_name": "Meme D'or",
+       "name": "Meme D'or",
+       "symbol": "Meme",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://metadata.j7tracker.io/images/eaf9cefcfc624f4c"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "DeqLGcuehWSBLAJ6edTiy26wgX9nfGShsmkttTropump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://metadata.j7tracker.io/metadata/57025694a1cb468a.json",
+      "files": [
+       {
+        "uri": "https://axiomtrading-v2.axiom-cdn.io/7D5pBtMYeJXXjpKTt1QF5wZbvbw2x8ahS5NRVmL9hutP.webp",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://axiomtrading-v2.axiom-cdn.io/7D5pBtMYeJXXjpKTt1QF5wZbvbw2x8ahS5NRVmL9hutP.webp",
+        "mime": "image/webp"
+       }
+      ],
+      "metadata": {
+       "description": "Deployed using https://j7tracker.io",
+       "json_name": "Kim Jong Cat",
+       "name": "Kim Jong Cat",
+       "symbol": "KJC",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://axiomtrading-v2.axiom-cdn.io/7D5pBtMYeJXXjpKTt1QF5wZbvbw2x8ahS5NRVmL9hutP.webp"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "DGTbXxyWEoDaZH8iz4HyJ9QtE5VTPnQYVsqUTWixpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreihvmovavwtaglseckgksnnytu7cphlaa4kgi3nx7vmsu2ans2yffq",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafybeid6jozawbrlslwc7z5wasrdcbdbpfivttyfl6c6ozdupkhzij7isi",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafybeid6jozawbrlslwc7z5wasrdcbdbpfivttyfl6c6ozdupkhzij7isi",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "One raccoon. One storm drain. One Jaws of Life. We rescue the stuck. \ud83e\udd9d $STUCK",
+       "json_name": "STUCK",
+       "name": "STUCK",
+       "symbol": "STUCK",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafybeid6jozawbrlslwc7z5wasrdcbdbpfivttyfl6c6ozdupkhzij7isi"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999999995392792,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "Cq1ZiEddxiqZ2AYkannkMLsZLtDcu9D3V3HXYFeypump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreiaz6674cftqbj2aexy6epc37cc5roz5e2fmanmbhx6hcc7bozuuwy",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreiauw2pfnawyfwfnz2pnwuvcpseers5ta3jmo3obvvtobrcnhiw2ru",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreiauw2pfnawyfwfnz2pnwuvcpseers5ta3jmo3obvvtobrcnhiw2ru",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "Crypto Inu",
+       "name": "Crypto Inu",
+       "symbol": "CI",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreiauw2pfnawyfwfnz2pnwuvcpseers5ta3jmo3obvvtobrcnhiw2ru"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "ChgwT7je6pAKCXSdgirREvh2AAfN3LccJsUgiHZvpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreibzefjc46itjmq2pojontcotc3e4vi3q3pxvhompxncenh6hhfvqa",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreibjp3qo4mugepxum6sbkwtxupxo4z6o2vzhxbd4y6lz7bhgy6cd6a",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreibjp3qo4mugepxum6sbkwtxupxo4z6o2vzhxbd4y6lz7bhgy6cd6a",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "LilMiss",
+       "name": "LilMiss",
+       "symbol": "LilMiss",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreibjp3qo4mugepxum6sbkwtxupxo4z6o2vzhxbd4y6lz7bhgy6cd6a"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "CawbW5waWPgpNRjSJsM314twKJY2ZJraoQ9p5Uo2pump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreigulpa6v4wzoe4ri5pzmpzfqhsdjkijtofaljhwltczv2xmrv4pgq",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreigbsju24iyhei7nir3hkf4rfkver4i32o7nfl4vdizubxbopq57im",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreigbsju24iyhei7nir3hkf4rfkver4i32o7nfl4vdizubxbopq57im",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Deployed using https://j7tracker.io",
+       "json_name": "vibecat",
+       "name": "vibecat",
+       "symbol": "vibecat",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreigbsju24iyhei7nir3hkf4rfkver4i32o7nfl4vdizubxbopq57im"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "CJZaHX5RQbvKrRyMoUU9D3jyvXj8Yy7QLLmcKvoopump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreihots3557svtoytmrjx4ebpfqmcqza5mefqkn2sgxhe44le6ykl6q",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreiaomjvkzr3j42ciz2aganzqsy6dzcrytjfxejbzzjcfcnbr23xvdq",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreiaomjvkzr3j42ciz2aganzqsy6dzcrytjfxejbzzjcfcnbr23xvdq",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "Pumpkinu",
+       "name": "Pumpkinu",
+       "symbol": "Pumpkinu",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreiaomjvkzr3j42ciz2aganzqsy6dzcrytjfxejbzzjcfcnbr23xvdq"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 970752751498036,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "BvhkudS6hT67rnCHCEneWto36KExuSbdTaZViLqvpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://gateway.pinata.cloud/ipfs/Qmc595NkZyBaUK8anTrVFARswENdz3dA8zeQcnMdwfTQNv",
+      "files": [
+       {
+        "uri": "https://gateway.pinata.cloud/ipfs/QmSjf35XhqULf96cEJnaebVQsjjGwYSZL6H9AoBPSPsDZw",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://gateway.pinata.cloud/ipfs/QmSjf35XhqULf96cEJnaebVQsjjGwYSZL6H9AoBPSPsDZw",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "niggly kitty",
+       "name": "niggly kitty",
+       "symbol": "NIGGLY",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://gateway.pinata.cloud/ipfs/QmSjf35XhqULf96cEJnaebVQsjjGwYSZL6H9AoBPSPsDZw"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreihrnarhxbbz3cqg6ankx3zjgsaiyukztg3sstggl4x6ls67ix6h4u",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreignnylayrjfajihkj7enel5izta3hc64rggrdxzpdpbedeil7u2iq",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreignnylayrjfajihkj7enel5izta3hc64rggrdxzpdpbedeil7u2iq",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Artificial Pok\u00e9mon Intelligence",
+       "json_name": "Artificial Pok\u00e9mon Intelligence",
+       "name": "Artificial Pok\u00e9mon Intelligence",
+       "symbol": "API",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreignnylayrjfajihkj7enel5izta3hc64rggrdxzpdpbedeil7u2iq"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 999937713233380,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreibflnn5x6la6z2ovpbi4iy4chwwue4arsnwabax3gfr5tn6tpqveu",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafybeict6ktlbb7awvw52iottjdd4jvbz236pxuemky5tymhz6agxuhome",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafybeict6ktlbb7awvw52iottjdd4jvbz236pxuemky5tymhz6agxuhome",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "FICTIONAL FIGHT NIGHT / CASABLANCA, MOROCCO\nTHE ALTERNATE REALITY\n\nGAETHJE\nWINS.\nSAME PRESSURE.\nDIFFERENT RESULT.",
+       "json_name": "GAETHJE WINS",
+       "name": "GAETHJE WINS",
+       "symbol": "GAETHJE",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafybeict6ktlbb7awvw52iottjdd4jvbz236pxuemky5tymhz6agxuhome"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreibhibkcr2lxg464wnzzhiepboggplbw3zzosnbmq5q3kndskwqf2u",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafybeih6yp24pefu3xrdchnvkrqvwvbbfe6cjf4il2yke3w3z2lshdhnwi",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafybeih6yp24pefu3xrdchnvkrqvwvbbfe6cjf4il2yke3w3z2lshdhnwi",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "The first coin with actual thrust. Drawer coins simulate \u2014 we accelerate. Occupy charts. Then Mars. $ELONCOIN",
+       "json_name": "ELON MUSK COIN",
+       "name": "ELON MUSK COIN",
+       "symbol": "ELONCOIN",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafybeih6yp24pefu3xrdchnvkrqvwvbbfe6cjf4il2yke3w3z2lshdhnwi"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "ARbcPWqtmyzEGow7KQC2Z2SxjuqPRHHBHnEkrN1tpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://md.sdfgsdfsdf.uk/metadata/Ph3w6zGs",
+      "files": [
+       {
+        "uri": "https://pbs.twimg.com/media/HVj8yHyWEAAcm9I.jpg",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://pbs.twimg.com/media/HVj8yHyWEAAcm9I.jpg",
+        "mime": "image/jpeg"
+       }
+      ],
+      "metadata": {
+       "description": "",
+       "json_name": "Hugo",
+       "name": "Hugo",
+       "symbol": "Hugo",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://pbs.twimg.com/media/HVj8yHyWEAAcm9I.jpg"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 1000000000000000,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    },
+    {
+     "interface": "FungibleToken",
+     "id": "A4fTXrpVpk4Asd4NTuHZwfy4N6GyPiUVoSVahLBgpump",
+     "content": {
+      "$schema": "https://schema.metaplex.com/nft1.0.json",
+      "json_uri": "https://ipfs.io/ipfs/bafkreielspi5iv5dzzdo4l5lnixmmd7qslgao4dh3egtz4gepfeybm4lzm",
+      "files": [
+       {
+        "uri": "https://ipfs.io/ipfs/bafkreihi3hstqangj5gqmw6x64qos44i5xodit574hbem77haicbp5mgwy",
+        "cdn_uri": "https://cdn.helius-rpc.com/cdn-cgi/image//https://ipfs.io/ipfs/bafkreihi3hstqangj5gqmw6x64qos44i5xodit574hbem77haicbp5mgwy",
+        "mime": "image/png"
+       }
+      ],
+      "metadata": {
+       "description": "Deployed using https://j7tracker.io",
+       "json_name": "We Are Here",
+       "name": "We Are Here",
+       "symbol": "EARLY",
+       "token_standard": "Fungible"
+      },
+      "links": {
+       "image": "https://ipfs.io/ipfs/bafkreihi3hstqangj5gqmw6x64qos44i5xodit574hbem77haicbp5mgwy"
+      }
+     },
+     "authorities": [
+      {
+       "address": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+       "scopes": [
+        "full"
+       ]
+      }
+     ],
+     "compression": {
+      "eligible": false,
+      "compressed": false,
+      "data_hash": "",
+      "creator_hash": "",
+      "asset_hash": "",
+      "tree": "",
+      "seq": 0,
+      "leaf_id": 0
+     },
+     "grouping": [],
+     "royalty": {
+      "royalty_model": "creators",
+      "target": null,
+      "percent": 0.0,
+      "basis_points": 0,
+      "primary_sale_happened": false,
+      "locked": false
+     },
+     "creators": [
+      {
+       "address": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+       "share": 100,
+       "verified": false
+      }
+     ],
+     "ownership": {
+      "frozen": false,
+      "delegated": false,
+      "delegate": null,
+      "ownership_model": "token",
+      "owner": ""
+     },
+     "supply": null,
+     "mutable": false,
+     "burnt": false,
+     "token_info": {
+      "supply": 758380943553093,
+      "decimals": 6,
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+     }
+    }
+   ]
+  },
+  "id": 1
+ }
+}

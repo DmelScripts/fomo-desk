@@ -125,6 +125,11 @@ def scout(pair: dict, now: float | None = None) -> dict:
     mcap = _money(pair.get("market_cap_usd"))
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
         return _kill(None, mint, "scout", "market_cap", "dexscreener")
+    if "confirmed_market_cap_usd" in pair:
+        import cross_source
+        other = _money(pair.get("confirmed_market_cap_usd"))
+        if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
+            return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
     if pair.get("liquidity_usd") is None:
         return _kill(None, mint, "scout", "liquidity_missing", "dexscreener")
     liq = _money(pair.get("liquidity_usd"))
@@ -194,14 +199,37 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     if locked.get("ok") is not True:
         return refuse("lp")
     import dev_rug_history
-    dev = _num(onchain.get("dev_holding_pct"))
+    cross = onchain.get("cross_sources") if isinstance(onchain.get("cross_sources"), dict) else None
+    if cross is not None:
+        import cross_source
+        judged = cross_source.judge(cross)
+        if judged["checks"]["quote_sol"]["status"] != "PASS":
+            return refuse("quote_not_sol")
+        dev_row = judged["checks"]["dev_le_3pct"]
+        if dev_row["status"] != "PASS":
+            return refuse("creator_conflict" if dev_row["reason"] == "creator_conflict" else "dev_holding")
+        rug_row = judged["checks"]["no_past_rug"]
+        if rug_row["status"] != "PASS":
+            return refuse("dev_rug_history" if rug_row["status"] == "FAIL" else "dev_rug_history_unverified")
+        liq_row = judged["checks"]["liq_ge_25pct"]
+        if liq_row["status"] == "FAIL-CLOSED":
+            return refuse("liquidity_source_conflict")
+        if liq_row["status"] != "PASS":
+            return refuse("liquidity_below_25pct_mcap")
+        snap = dict(snap)
+        snap["liquidity_usd"] = liq_row.get("quote_usd")
+        snap["market_cap_usd"] = liq_row.get("market_cap_usd")
+        dev = _num(dev_row.get("dev_holding_pct"))
+    else:
+        dev = _num(onchain.get("dev_holding_pct"))
     if dev is None:
         return refuse("dev_holding_missing")
     if dev > DEV_HOLDING_MAX:
         return refuse("dev_holding")
-    rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
-    if rugs.get("ok") is not True:
-        return refuse(rugs.get("reason") or "dev_rug_history_unverified")
+    if cross is None:
+        rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
+        if rugs.get("ok") is not True:
+            return refuse(rugs.get("reason") or "dev_rug_history_unverified")
     bundled = _num(onchain.get("bundled_launch_pct"))
     if bundled is None:
         return refuse("bundle_missing")

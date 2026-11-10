@@ -1,0 +1,29 @@
+{
+ "meta": {
+  "name": "tok_MYWAY_st_holders_chart",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/holders/chart/tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+  "status": 200,
+  "latency_ms": 292,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:26+0700",
+  "fetched_unix": 1794326546.6172063,
+  "request_body": null
+ },
+ "body": {
+  "holders": [
+   {
+    "holders": 0,
+    "time": 1794092400
+   },
+   {
+    "holders": 4165,
+    "time": 1794178800
+   },
+   {
+    "holders": 8007,
+    "time": 1794265200
+   }
+  ]
+ }
+}

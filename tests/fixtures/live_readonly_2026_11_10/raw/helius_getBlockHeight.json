@@ -1,0 +1,27 @@
+{
+ "meta": {
+  "name": "helius_getBlockHeight",
+  "method": "POST",
+  "url": "https://mainnet.helius-rpc.com/?api-key=REDACTED",
+  "status": 200,
+  "latency_ms": 128,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T22:58:45+0700",
+  "fetched_unix": 1794326324.9901628,
+  "request_body": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "getBlockHeight",
+   "params": [
+    {
+     "commitment": "confirmed"
+    }
+   ]
+  }
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "result": 445796895,
+  "id": 1
+ }
+}

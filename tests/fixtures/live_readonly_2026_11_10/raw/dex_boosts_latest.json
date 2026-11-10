@@ -1,0 +1,662 @@
+{
+ "meta": {
+  "name": "dex_boosts_latest",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/token-boosts/latest/v1",
+  "status": 200,
+  "latency_ms": 48,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:00:34+0700",
+  "fetched_unix": 1794326434.634813,
+  "request_body": null
+ },
+ "body": [
+  {
+   "url": "https://dexscreener.com/solana/wbce7immwn1xgea6mtgrs3folgc936rmjyjeujapump",
+   "chainId": "solana",
+   "tokenAddress": "wbcE7iMmWN1XGEa6mtgRS3FoLgc936rMJYjeujapump",
+   "description": "Claim your PumpFun fees. Even small amounts less than 0.02 SOL.",
+   "icon": "us699__raadttiIt",
+   "header": "https://cdn.dexscreener.com/cms/images/EXkdgEZ8HJC-MtPc?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/wbcE7iMmWN1XGEa6mtgRS3FoLgc936rMJYjeujapump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://claim.fund/"
+    },
+    {
+     "url": "https://x.com/heymike777"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/claimfund"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/dtcicpcktkeah7tdeztym3hxeohaomibdyjhmyxzpump",
+   "chainId": "solana",
+   "tokenAddress": "DtcicPCKTKeAh7TDEzTym3hXeoHAoMiBdYJhMYxZpump",
+   "description": "Someone asked AI to build a game the entire crypto space would love. So it recreated the crypto world for us to own. \ud83e\ude99 Built & controlled by Agentic AI.",
+   "icon": "2bajn2a05AdQGV-4",
+   "header": "https://cdn.dexscreener.com/cms/images/dQ4E_XBvLaPRg67y?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/DtcicPCKTKeAh7TDEzTym3hXeoHAoMiBdYJhMYxZpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://cartoon-money.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/cartoonmoney_ai"
+    }
+   ],
+   "totalAmount": 500,
+   "amount": 500
+  },
+  {
+   "url": "https://dexscreener.com/elysium/0xeb8bcc0fde0e76d26f1fbcb38bf476c837b92927",
+   "chainId": "elysium",
+   "tokenAddress": "0xEb8bCC0fdE0e76D26F1FBcB38BF476C837b92927",
+   "description": "I am MAXIMUS, scourge of the arena and the beast Rome could not tame. Caesar commanded me to kneel. I licked my paw and allowed him to reconsider. Now I march upon Elysium with nine lives, sharpened steel, and no master. Send forth your champions. I shall make this brief. I sleep sixteen hours a day, and you are delaying me.",
+   "icon": "ykKoMgun7vrK-e7U",
+   "header": "https://cdn.dexscreener.com/cms/images/RJWeTHOcRHbbEaQt?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/elysium/0xeb8bcc0fde0e76d26f1fbcb38bf476c837b92927?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://maximuscat.com"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/Maximuscat1813"
+    }
+   ],
+   "totalAmount": 30,
+   "amount": 30
+  },
+  {
+   "url": "https://dexscreener.com/solana/amopnk8bzo6aj1u49bdbejyry59rgejuxhtmxbtgyfhx",
+   "chainId": "solana",
+   "tokenAddress": "AmoPNK8bzo6Aj1U49bDBEjyrY59rGejuXHTmXbtGyfHx",
+   "description": "The new Elon Musk Dog\n\nElon Musk, the visionary CEO of Tesla, SpaceX, and xAI, was photographed bonding with an energetic new Shiba Inu puppy during a relaxed stroll near Lady Bird Lake in Austin, Texas.",
+   "icon": "Q84zwYfSE33VrrJr",
+   "header": "https://cdn.dexscreener.com/cms/images/JwdBxy6wZdKZ8Df0?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/AmoPNK8bzo6Aj1U49bDBEjyrY59rGejuXHTmXbtGyfHx?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://techbullion.com/breaking-elon-musk-spotted-with-adorable-new-puppy-named-dogi-in-austin/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/dogi_inu_sol_"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/dogi_inu_onsol"
+    }
+   ],
+   "totalAmount": 30,
+   "amount": 30
+  },
+  {
+   "url": "https://dexscreener.com/solana/hastkxyvv65zm7j6cu5o5pczsikmqyo5oz4wpjgqwp6k",
+   "chainId": "solana",
+   "tokenAddress": "HAsTKXYvv65zM7J6Cu5o5PcZsiKMQYo5oz4WPjgqwP6k",
+   "description": "Born in the trenches. Launched directly on Raydium. No bonding curve. No launchpad games. Just a name, a meme, and a community that gets it.\n\nNow the community is writing the next chapter.\n\nNo grand promises. No complicated narratives. Just Jeff.",
+   "icon": "u6cxTm52i64Ndrhq",
+   "header": "https://cdn.dexscreener.com/cms/images/x3LOUN01cIcJU96m?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HAsTKXYvv65zM7J6Cu5o5PcZsiKMQYo5oz4WPjgqwP6k?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://justjeff.xyz/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/i/communities/1910124515570381076"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/JEFFWORLDORDER"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/ezbcgdxxfwcscemjehufvsvyzdkg2t9z7pwi8nr9mo46",
+   "chainId": "solana",
+   "tokenAddress": "EZBcgdXxfWCscEMjehuFvsvYzdkG2T9z7PWi8nr9Mo46",
+   "description": "$CASINO : Official ticker for Fyre Dome\nThe hottest casino in Leonida.\nYour favourite PVP playable games such as poker, and prizes for holders.",
+   "icon": "7NtoWBuI9yv0w4ox",
+   "header": "https://cdn.dexscreener.com/cms/images/EgT1f6U63UwsU61_?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/EZBcgdXxfWCscEMjehuFvsvYzdkG2T9z7PWi8nr9Mo46?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://stateofleonida.xyz/p/casino/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/fyredomeleonida?s=11"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/StateOfLeonidaGTA"
+    }
+   ],
+   "totalAmount": 30,
+   "amount": 30
+  },
+  {
+   "url": "https://dexscreener.com/robinhood/0xf42b4e1a3fd374b1f849bf898edc64ab17df06ea",
+   "chainId": "robinhood",
+   "tokenAddress": "0xF42B4E1A3fd374b1f849Bf898edc64ab17DF06Ea",
+   "description": "Multiple chains but ONECOIN is enough ! One $ONECOIN is all we need.\n\nOne coin connecting multiple chains, ushering in a new era where everything comes together as $ONECOIN.\n\nONE COIN ONE LIFE ONE PRICE MUTIPLE CHAINS",
+   "icon": "82JvU-Oqy9EVDrv0",
+   "header": "https://cdn.dexscreener.com/cms/images/y1g-ucjorY5LZrlm?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0xf42b4e1a3fd374b1f849bf898edc64ab17df06ea?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://onecoincto.space/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/onecoinonpangea?s=11"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/OnecoinOnPangeaCTO"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/ejv8tgqfn6gtyn8z6kgybenpbvymogmudfxira2fpump",
+   "chainId": "solana",
+   "tokenAddress": "EJv8TgQfN6gtYN8Z6KGyBeNPbVYmogmudfxiRA2Fpump",
+   "description": "GRAND THEFT APES\n\nGTA RUNNER",
+   "icon": "JFITOW5bV9UnjcpR",
+   "header": "https://cdn.dexscreener.com/cms/images/AXJdNXvNsME9xrRC?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/EJv8TgQfN6gtYN8Z6KGyBeNPbVYmogmudfxiRA2Fpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://www.grandtheftapes.fun/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/i/communities/2011801144150950315"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/gtapes_sol"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/12xbvdaszagw6rvipp1p7q3rxhpbujucrnznfp8qfunz",
+   "chainId": "solana",
+   "tokenAddress": "12XbVdAszAGw6rviPP1P7q3rxhpbUJUcrnZNfP8Qfunz",
+   "description": "The official coin of FUNZ, the Solana launchpad where your idea becomes your coin.\n50% of $FUNZ creator fees are used for automatic buyback & burn, run on-chain by the program.\n\nOn FUNZ, creators can launch with:\n\u2022 Auto buyback & burn\n\u2022 Support: share fees with any wallet, sent automatically\n\u2022 Fair presale: same price for everyone\n\u2022 Token lock, every pair (SOL, stocks, memes, custom)",
+   "icon": "vlsUvHfss7w1Amql",
+   "header": "https://cdn.dexscreener.com/cms/images/kOOFMICGlPdF_DBc?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/12XbVdAszAGw6rviPP1P7q3rxhpbUJUcrnZNfP8Qfunz?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://funz.cloud"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/i/communities/2008228705727115506"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/7mq84uesjxyehh2cebat9173cabkofm2h2cgpzd4pump",
+   "chainId": "solana",
+   "tokenAddress": "7mq84UEsjxYehH2cebat9173cAbkoFm2H2CGpzd4pump",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/7mq84UEsjxYehH2cebat9173cAbkoFm2H2CGpzd4pump?timestamp=1794326100000",
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/3rj8mmzmbvbpqj7re8ahcrmvpq5mctyqu1zhxmzkpump",
+   "chainId": "solana",
+   "tokenAddress": "3RJ8MmZmbVBPqj7re8AHcrMvPq5MctYqu1ZHXMZkpump",
+   "description": "Xogecoin",
+   "icon": "5EzlrXKLSSFgSTdu",
+   "header": "https://cdn.dexscreener.com/cms/images/wwFbDoJqFrR6aYFH?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/3RJ8MmZmbVBPqj7re8AHcrMvPq5MctYqu1ZHXMZkpump?timestamp=1794326100000",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/Wintalt/status/2120091613003407732"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/5jhhcudrqibzuc4s9tggthmflnorof4e3kwwgqsrpump",
+   "chainId": "solana",
+   "tokenAddress": "5JHHcudrqibzuc4S9tGgthmfLNoRof4E3KWWGQsrpump",
+   "description": "4chan is building a fresh animal cult,\n\nHis name is Steve, a stupidly simple fish drawing that anons on /s4s/ are turning into a whole cult",
+   "icon": "dfd7FfZaoWyQ3DYP",
+   "header": "https://cdn.dexscreener.com/cms/images/AiSW6wluEvOGhqLw?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/5JHHcudrqibzuc4S9tGgthmfLNoRof4E3KWWGQsrpump?timestamp=1794326100000",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/SteveTheFishy"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/robinhood/0xaf98e6f7f22560e4591184f828a280a6e986041d",
+   "chainId": "robinhood",
+   "tokenAddress": "0xAf98E6F7f22560e4591184f828A280a6E986041D",
+   "description": "Introducing Agesic, the financial layer for AI agents.\nGive every agent its own API key, daily budget and hard spending limits. Access 450+ models through one OpenAI-compatible endpoint, route each request to the right model, and track every call in one dashboard.",
+   "icon": "F4Y2k3uSpEwonWkG",
+   "header": "https://cdn.dexscreener.com/cms/images/gactuu99fRiYl28O?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0xaf98e6f7f22560e4591184f828a280a6e986041d?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://agesic.cc/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/useagesic"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/4ve9sy4femjdz6i7mkypbnqdjd2oqzjqmg44wj3opump",
+   "chainId": "solana",
+   "tokenAddress": "4VE9sy4fEMJdZ6i7MkYPbnqDJd2oqzJQmg44WJ3opump",
+   "description": "$KIBBLE is the token of the Inuverse, a growing world of free-to-play Inu games: Inu Arcade, Inu Quest, Inu Rescue, Inu Empires, Meme Brawl and Ribbit Nugs. 1,000 $KIBBLE is burned every day, 15M is locked in a 12-month Streamflow vesting stream, and the community Kennel Chest funds player prizes. Play free, climb the Hall of Fame, join the pack.",
+   "icon": "EOafn5zNuLQj-MUJ",
+   "header": "https://cdn.dexscreener.com/cms/images/eO_XW9eByZD3RPes?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/4VE9sy4fEMJdZ6i7MkYPbnqDJd2oqzJQmg44WJ3opump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://kibbleinu.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/playmememon?s=11"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/KibbleCoin"
+    },
+    {
+     "type": "discord",
+     "url": "https://discord.gg/q2WSKXvwT"
+    },
+    {
+     "type": "tiktok",
+     "url": "https://www.tiktok.com/@kibblecommunity?_r=1&_t=ZS-9BHfqNkrzkY"
+    },
+    {
+     "type": "instagram",
+     "url": "https://www.instagram.com/kibble.community?exln=aHh5MXFtY213eDRr&utm_source=qr"
+    }
+   ],
+   "totalAmount": 30,
+   "amount": 30
+  },
+  {
+   "url": "https://dexscreener.com/solana/cx3onetjqfzfqbvg1mnveskpva7umwpq31hhzx2jpump",
+   "chainId": "solana",
+   "tokenAddress": "Cx3onEtJqfzfqbVG1mnveskpvA7uMWpq31hhZx2jpump",
+   "description": "Yes, that's me. Everyone deserves a little joy, a smile, and some fun. May the Snake Pattern be with you \ud83d\udc0d",
+   "icon": "5tKxgZdvzSGe_XbK",
+   "header": "https://cdn.dexscreener.com/cms/images/Y9R8ijUT79xWiibD?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/Cx3onEtJqfzfqbVG1mnveskpvA7uMWpq31hhZx2jpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://butnycyfron.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/Butny_Wolf"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/ButnyMemecoin"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/bwjfbnexpapg7uoqbyp5kswwgcqba8qcdma2dqiepump",
+   "chainId": "solana",
+   "tokenAddress": "BWJfBNeXpapG7uoqByp5KSwWgCQba8QcDmA2DQiEpump",
+   "description": "The home state of GTA VI and launchpad for GTA tokens",
+   "icon": "YG0mcNoGZIaCbSwB",
+   "header": "https://cdn.dexscreener.com/cms/images/3p5nFCbNqSPmqJwG?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/BWJfBNeXpapG7uoqByp5KSwWgCQba8QcDmA2DQiEpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://stateofleonida.xyz/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/TheLeonidaState"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/StateOfLeonidaGTA"
+    }
+   ],
+   "totalAmount": 30,
+   "amount": 30
+  },
+  {
+   "url": "https://dexscreener.com/solana/3uc2mx5wxsayhv4owtqgmwutywrdtfzckwn9lyezpump",
+   "chainId": "solana",
+   "tokenAddress": "3uc2mx5wXSAYHV4oWTqgMwutywRdtfZCKwN9Lyezpump",
+   "description": "Boom Cat went viral for saying BOOM, with 150M+ views on one video alone! Owner onboarded, with all creator fees going directly to support Boom Cat.",
+   "icon": "XUraBWmwYKuHe5b7",
+   "header": "https://cdn.dexscreener.com/cms/images/6lZJ_F4ag6iOpKxI?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/3uc2mx5wXSAYHV4oWTqgMwutywRdtfZCKwN9Lyezpump?timestamp=1794326100000",
+   "links": [
+    {
+     "type": "twitter",
+     "url": "https://x.com/BPG2/status/2120025727156490243"
+    },
+    {
+     "type": "tiktok",
+     "url": "https://www.tiktok.com/search/video?q=boom%20cat&t=1794288343517"
+    },
+    {
+     "type": "instagram",
+     "url": "https://www.instagram.com/p/DfjLJneyi52/"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/aohvufnktaeuc5aic8hlwuwytnc3nkj4jcnjyfqaicjg",
+   "chainId": "solana",
+   "tokenAddress": "AoHVuFNKTAEUc5aiC8HLWUWytNC3nkJ4jcnjyFQaiCJg",
+   "description": "Stonk Watcher is on-chain intelligence for StonkFun Solana launches.",
+   "icon": "5RUOanqXmaVdT3Oq",
+   "header": "https://cdn.dexscreener.com/cms/images/2I-xe2YVs9u_vc4U?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/AoHVuFNKTAEUc5aiC8HLWUWytNC3nkJ4jcnjyFQaiCJg?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://stonkwatcher.xyz/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/StonkwatcherSF"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/StonkwatcherSF"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/solana/jbue4nzu4rm4ej5aslzeczlhvnwpfrmhn9oplxcvpump",
+   "chainId": "solana",
+   "tokenAddress": "JBUe4NZu4rm4Ej5AsLZECZLHvnWpFRmhn9oPLXCVpump",
+   "description": "Mubbo is a cat that crawled into a GPU box. It reads which GPUs are free on Solana and what an hour costs anywhere, then answers your question from those reads.",
+   "icon": "ecCy7zpbEzuzJCcB",
+   "header": "https://cdn.dexscreener.com/cms/images/7N6dPXU8sgAFnZht?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/JBUe4NZu4rm4Ej5AsLZECZLHvnWpFRmhn9oPLXCVpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://mubbo.fun/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/Mubbodotfun"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/robinhood/0xfad17d7cc41d9c9ca4a459da798a4446dd217974",
+   "chainId": "robinhood",
+   "tokenAddress": "0xFAd17D7cc41D9C9CA4A459Da798a4446dD217974",
+   "description": "A cat in a potato, quietly judging your tabs. Potatchi is an AI Agent on X.",
+   "icon": "FzqqhG0d1LoXN2wL",
+   "header": "https://cdn.dexscreener.com/cms/images/hxFcrzzYMdu1LFLe?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0xfad17d7cc41d9c9ca4a459da798a4446dd217974?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://potatchi.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/heypotatchi"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/potatchicommunity"
+    }
+   ],
+   "totalAmount": 50,
+   "amount": 50
+  },
+  {
+   "url": "https://dexscreener.com/solana/8vdrhbx444yzjzp1vnb9pxav5aw4kv7e7bk7zwaapump",
+   "chainId": "solana",
+   "tokenAddress": "8VdrHbx444YZJZp1vNb9pXAv5aW4Kv7E7bk7Zwaapump",
+   "description": "It's Turkey Time",
+   "icon": "SNVJQ8z2gsMR09a-",
+   "header": "https://cdn.dexscreener.com/cms/images/2CGcIdu7M72haylu?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/8VdrHbx444YZJZp1vNb9pXAv5aW4Kv7E7bk7Zwaapump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://turkey-time.org"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/i/communities/2027142820440531359"
+    }
+   ],
+   "totalAmount": 10,
+   "amount": 10
+  },
+  {
+   "url": "https://dexscreener.com/robinhood/0x6511c233790ec10f7d673c64dc82c3f941d57828",
+   "chainId": "robinhood",
+   "tokenAddress": "0x6511c233790Ec10f7d673c64DC82C3F941D57828",
+   "description": "Oak Agent Kit builds AI infrastructure for the agentic economy on Robinhood Chain. Our first product is live now: Oak MCP, giving AI agents efficient connections to projects on Robinhood Chain, with subscriptions powered by $OAK.",
+   "icon": "iaxeBSPnmDpqiFFD",
+   "header": "https://cdn.dexscreener.com/cms/images/73pJchMJyZW3iW4n?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0x6511c233790ec10f7d673c64dc82c3f941d57828?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://oakagentkit.org"
+    },
+    {
+     "url": "https://oakagentkit.org/docs.html"
+    },
+    {
+     "url": "https://github.com/OakAgentKit/oak"
+    },
+    {
+     "url": "https://www.npmjs.com/package/@oakagentkit/addon"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/OakAgentKit"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/34dxeu2ttetbsb1tqgjm7izgvyttkqkccoinwdpdpump",
+   "chainId": "solana",
+   "tokenAddress": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+   "description": "Meet Big Guy - the dog of Kodak Black. Got his pets from Jason Duval at the start of the GTA 6 trailer.",
+   "icon": "3qi7XlWb884wtJIS",
+   "header": "https://cdn.dexscreener.com/cms/images/2jlDlRMbuBJa7EoC?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://bigguy.win"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/bigguygta"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/bigguygta"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/hsprhxbrgivaqdrf3tnknuzztax9juspgmfdakk6pump",
+   "chainId": "solana",
+   "tokenAddress": "HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump",
+   "description": "The most anticipated game in history. One cat. Nine lives. Zero concerns. $GATO",
+   "icon": "-8CCNt5h1g4Fnvqj",
+   "header": "https://cdn.dexscreener.com/cms/images/aFeHj0Rrb9Nv69F_?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HsprHxBRgiVaQdRf3TnKNuZZtaX9JUSPgMFdAkk6pump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://thegta6cat.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/TheGTA6cat"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/baftasb1hvqbn5723w72wlcxu7yassgmvxqxjjajpump",
+   "chainId": "solana",
+   "tokenAddress": "BAftaSb1HVqBn5723w72WLcXU7YASSgmVxQxJJAJpump",
+   "description": "Cute cats. Viral memes. Infinite purrs. OnlyCats turns every whisker into legendary crypto-powered fun.",
+   "icon": "HJkbOUk52wWXlxkN",
+   "header": "https://cdn.dexscreener.com/cms/images/4isYrYrIv9dmoKM9?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/BAftaSb1HVqBn5723w72WLcXU7YASSgmVxQxJJAJpump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://onlycatsworld.space"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/OnlyCatsSpace"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/OnlyCatsSpace"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/hqzzhbxwm17vny29uj4cgcznuwo9o8vluwsn4rh8pump",
+   "chainId": "solana",
+   "tokenAddress": "HqZZhbXWm17vnY29uj4cgczNUWo9o8VLUWsN4RH8pump",
+   "description": "Maya The Samoyed - $MAYA Born in Germany. Raised by Lingli Ye. Destined to farm memes across every timeline.",
+   "icon": "k5hVXJbNWW875LX0",
+   "header": "https://cdn.dexscreener.com/cms/images/OIt0jVXh9RyHQTlR?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HqZZhbXWm17vnY29uj4cgczNUWo9o8VLUWsN4RH8pump?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://www.mayasamoyed.site/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/MayaSamoyed_dog"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/MayaSamoyed_dog"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/fnxvzo25dgerp4tw49f4ahg9xac5qw1fer9f7ezk9cts",
+   "chainId": "solana",
+   "tokenAddress": "FNxVZo25dGerP4Tw49f4aHg9xac5qw1FER9F7EzK9cTs",
+   "description": "The world\u2019s second exchange rates, traded on Solana.",
+   "icon": "6NA_d2poGs5cQG_6",
+   "header": "https://cdn.dexscreener.com/cms/images/yD3qBHZI_0lGDvcL?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/FNxVZo25dGerP4Tw49f4aHg9xac5qw1FER9F7EzK9cTs?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://hwan.io/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/hwandotio"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/solana/hoqjaoes6yfl8yeshgfenwvkt7lrapy97zdg9hmbu4ep",
+   "chainId": "solana",
+   "tokenAddress": "HoqJaoes6yfL8YEsHGfENwVKT7LrAPy97ZDg9hmBu4Ep",
+   "description": "Old-school Thug Life, reborn in Vice City. Every holder is a shareholder. Every shareholder is a soldier.",
+   "icon": "cpwN9PngZrT6f8Tj",
+   "header": "https://cdn.dexscreener.com/cms/images/ECJFJ4ZeD1NdI6AC?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HoqJaoes6yfL8YEsHGfENwVKT7LrAPy97ZDg9hmBu4Ep?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://www.thuglife-inc.com/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/_thuglife_inc"
+    },
+    {
+     "type": "telegram",
+     "url": "https://t.me/thuglife_inc"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  },
+  {
+   "url": "https://dexscreener.com/elysium/0x524759e01f7c04e0df9cfd124842156cd74c8202",
+   "chainId": "elysium",
+   "tokenAddress": "0x524759e01f7c04e0Df9CfD124842156cd74c8202",
+   "description": "Calmest frog, fastest chain. $ep/acc on Elysium.",
+   "icon": "h_nMN6g9KFoWmakl",
+   "header": "https://cdn.dexscreener.com/cms/images/W81DTs5Jbb0c8Oo0?width=900&height=300&fit=crop&quality=95&format=auto",
+   "openGraph": "https://cdn.dexscreener.com/token-images/og/elysium/0x524759e01f7c04e0df9cfd124842156cd74c8202?timestamp=1794326100000",
+   "links": [
+    {
+     "url": "https://elysiumpepeacc.vip/"
+    },
+    {
+     "type": "twitter",
+     "url": "https://x.com/ElyPepeAcc"
+    }
+   ],
+   "totalAmount": 100,
+   "amount": 100
+  }
+ ]
+}

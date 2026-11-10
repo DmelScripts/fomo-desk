@@ -1,0 +1,70 @@
+[
+ {
+  "mint": "34DXEU2ttEtBSb1TqGJm7izgvYTTkqKcCoiNWdPDpump",
+  "sym": "BIG",
+  "pair": "5TecgcpFLdBnJvBrpjvk32UAYABPRA1HgeFPEUjQQkYK",
+  "dex": "pumpswap",
+  "age_h": 47.81,
+  "mc": 913537,
+  "fdv": 913537,
+  "liq": 87229.83,
+  "ok": true,
+  "creator": "3gGYvne8RDn7wXca7tuejFoh46hP9wnofQy649DFRbYR"
+ },
+ {
+  "mint": "9VZerdNL1x6EjetDqRnh5bYcdmk1y8sLAGs1ybzGpump",
+  "sym": "X",
+  "pair": "6MdmwvCsrMAbTqJC7GBBu5FBUFLbC6dJXGxm5VtnrDzQ",
+  "dex": "pumpswap",
+  "quote": "SOL",
+  "age_h": 7.23,
+  "mc": 305652,
+  "fdv": 305652,
+  "liq": 47485.55,
+  "ok": true,
+  "src": "pumpswap",
+  "creator": "AiKvekQa4Zp6ARDErEtD26DhtCGKc4HagGjEpYarzr6c"
+ },
+ {
+  "mint": "3yjyHCC4EzLb7J7cx3uczgTrqhpXDCBkfShK8Rf3pump",
+  "sym": "TRUMP",
+  "pair": "DmoLzHQEtUPeoeo1XMY6CqJodT2TCkFQHPV4Y4AhvYRH",
+  "dex": "pumpswap",
+  "quote": "SOL",
+  "age_h": 4.24,
+  "mc": 1219262,
+  "fdv": 1219262,
+  "liq": 1051362.52,
+  "ok": true,
+  "src": "pumpswap",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY"
+ },
+ {
+  "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+  "sym": "MYWAY",
+  "pair": "CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+  "dex": "pumpswap",
+  "quote": "SOL",
+  "age_h": 49.28,
+  "mc": 627910,
+  "fdv": 627910,
+  "liq": 63306.04,
+  "ok": true,
+  "src": "pumpswap",
+  "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J"
+ },
+ {
+  "mint": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+  "sym": "Nothing",
+  "pair": "7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+  "dex": "pumpswap",
+  "quote": "SOL",
+  "age_h": 22.01,
+  "mc": 1597065,
+  "fdv": 1597065,
+  "liq": 1332068.38,
+  "ok": true,
+  "src": "pumpswap",
+  "creator": "AeVtfBvPjCRJJ2KNwh2E6ygPf4sz6Pi4NXsM1vxyrmaT"
+ }
+]
