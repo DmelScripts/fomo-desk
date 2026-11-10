@@ -1228,13 +1228,16 @@ class DeskLoopTests(unittest.TestCase):
         from tests.test_jupiter_route_v2 import WHEN, _prices
         import pyth_sponsored
         pyth_sponsored.read_accounts(_prices(), WHEN)
-        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (case_id,))
+        snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        snap["fixture"] = True
+        snap["analyst_scored"] = False
+        snap["smart_wallets_scored"] = False
+        snap["price_usd"] = "1"
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'scout_passed'",
+            (json.dumps(snap, sort_keys=True), case_id),
+        )
         protected = memecoin_desk.protect(case_id, now=WHEN, ledger="synthetic", rent_proof={"ok": True, "lamports": 1_488_440, "count": 1})
-        if protected.get("ok") is not True:
-            snap = memecoin_desk.view(case_id)["snapshot"]
-            snap["price_usd"] = "1"
-            db.execute("UPDATE memecoin_cases SET snapshot_json = ?, stage = 'analyst_passed' WHERE id = ?", (json.dumps(snap), case_id))
-            protected = memecoin_desk.protect(case_id, now=NOW, ledger="synthetic", rent_proof={"ok": True, "lamports": 1_488_440, "count": 1})
         self.assertEqual(db.query("SELECT ledger FROM memecoin_cases WHERE id = ?", (case_id,))[0]["ledger"], "synthetic", protected)
         called = {"n": 0}
 
@@ -1899,7 +1902,14 @@ conn.close()
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=WHEN)
         case_id = opened["case_id"]
-        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (case_id,))
+        snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        snap["fixture"] = True
+        snap["analyst_scored"] = False
+        snap["smart_wallets_scored"] = False
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'scout_passed'",
+            (json.dumps(snap, sort_keys=True), case_id),
+        )
         previous = pyth_sponsored.sol_leg
         pyth_sponsored.sol_leg = lambda now: {"fresh": True, "used": True, "price": 15_000_000_000, "conf": 1, "expo": -8}
         try:
