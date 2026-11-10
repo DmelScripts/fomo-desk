@@ -2198,9 +2198,9 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
         if program == solana_tx.SYSTEM_PROGRAM:
             moved = solana_tx.system_transfer(data)
             if moved is not None and len(keys) == 2:
-                if keys[0] == wallet:
+                if keys[0] == wallet and keys[1] != wsol:
                     lamport_out += moved
-                elif keys[0] in decoded.static_keys[:decoded.required_signatures]:
+                elif keys[0] in decoded.static_keys[:decoded.required_signatures] and keys[0] != wallet:
                     return refused | {"reason": "unparseable_instruction"}
                 continue
             created = solana_tx.system_create(data)
@@ -2223,15 +2223,19 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
             found = jupiter_route_v2.parse(data)
             if found.get("ok") is not True or isinstance(found.get("in_amount"), bool) or not isinstance(found.get("in_amount"), int):
                 return refused | {"reason": "unparseable_instruction"}
-            if len(instruction.account_indexes) < 4:
+            if len(instruction.account_indexes) < 2:
                 return refused | {"reason": "unparseable_instruction"}
             try:
-                source = decoded.static_keys[instruction.account_indexes[3]]
+                source_account = decoded.static_keys[instruction.account_indexes[1]]
             except (IndexError, TypeError):
                 return refused | {"reason": "unparseable_instruction"}
             routes += 1
-            if source == solana_tx.NATIVE_MINT:
+            if source_account == wsol:
                 route_sol += found["in_amount"]
+            elif position_ata is not None and source_account == position_ata:
+                position_out += found["in_amount"]
+            else:
+                return refused | {"reason": "unparseable_instruction"}
             continue
         return refused | {"reason": "unparseable_instruction"}
     if routes != 1 or cu_limit is None or cu_price is None or cu_limit <= 0 or cu_limit > 1_400_000 or cu_price < 0:
@@ -2244,7 +2248,7 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
         return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
     return {
         "ok": True,
-        "lamports": max(lamport_out, route_sol) + wsol_out + deposit["lamports"],
+        "lamports": lamport_out + route_sol + wsol_out + deposit["lamports"],
         "cu_limit": cu_limit,
         "cu_price": cu_price,
     }

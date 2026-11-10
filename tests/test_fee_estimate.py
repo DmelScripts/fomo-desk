@@ -538,8 +538,9 @@ class FeeEstimateTests(unittest.TestCase):
         again = memecoin_desk.claim_open_ticket("race-again", fresh, "8.00", NOW)
         self.assertEqual(again["reason"], "allocation")
 
-        exit_values, exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
-        exit_message = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        exit_values, exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        exit_message = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
         exit_digest = self._store(exit_message, exit_values["pool"], "exit", "full-exit")
         db.execute("UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = 'full-exit'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
         db.execute(
@@ -569,8 +570,9 @@ class FeeEstimateTests(unittest.TestCase):
             "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('full-book', ?, 'protected', ?, ?, ?, 'live', 'server')",
             (solana_tx.b58encode(b"\x7a" * 32), '{"reserved_usd": "100.00"}', NOW, NOW),
         )
-        exit_values, _exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
-        tipped_exit = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 2_000_000_000, side="exit", amount=4)
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        tipped_exit = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 2_000_000_000, side="exit", amount=4)
         exit_digest = self._store(tipped_exit, exit_values["pool"], "exit", "tip-exit")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'tip-exit'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
         exit_refused = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, transport)
@@ -668,7 +670,7 @@ class FeeEstimateTests(unittest.TestCase):
             bytes([3]) + (4).to_bytes(8, "little"),
         )
         within_digest = self._store(within, exit_values["pool"], "exit", "position-transfer")
-        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'position-transfer'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'position-transfer'", ('{"reserved_usd": "0.00", "remaining_raw": 8}',))
         kept = desk_loop.mock_phantom_sign(within_digest, auth, NOW, transport)
         self.assertTrue(kept["signed"], kept)
         self.assertFalse(kept["ticket_limit_proven"])
@@ -703,3 +705,51 @@ class FeeEstimateTests(unittest.TestCase):
         twice = desk_loop.mock_phantom_sign(duplicated_digest, auth, NOW, transport)
         self.assertFalse(twice["signed"], twice)
         self.assertEqual(twice["reason"], "unparseable_instruction")
+
+    def test_route_and_tip_add_and_an_oversized_exit_route_is_refused(self):
+        from tests.test_jupiter_route_v2 import _metas, _route, _tx
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, case_mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        transport = self._transport(accounts)
+        pyth_sponsored.read_accounts(transport, NOW)
+        blockhash = solana_tx.b58encode(b"\x44" * 32)
+
+        both = _tx(
+            _metas(solana_tx.NATIVE_MINT, case_mint, values), _route(100, 50, True, amount=50_000_000),
+            limit=200_000, price=1_000, side="exit", extra_transfer=solana_tx.b58encode(b"\x91" * 32),
+            tip_lamports=50_000_000, blockhash=blockhash,
+        )
+        both_digest = self._store(both, values["pool"], "entry", "route-plus-tip")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'route-plus-tip'", ('{"reserved_usd": "1.00"}',))
+        summed = desk_loop.mock_phantom_sign(both_digest, auth, NOW, transport)
+        self.assertFalse(summed["signed"], summed)
+        self.assertEqual(summed["reason"], "ticket")
+        self.assertFalse(summed["ticket_limit_proven"])
+
+        once = self._message(values, solana_tx.NATIVE_MINT, case_mint, 0, amount=50_000_000)
+        once_digest = self._store(once, values["pool"], "entry", "wrap-once")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'wrap-once'", ('{"reserved_usd": "1.00"}',))
+        counted = desk_loop.mock_phantom_sign(once_digest, auth, NOW, transport)
+        self.assertTrue(counted["signed"], counted)
+        self.assertTrue(counted["ticket_limit_proven"])
+        self.assertTrue(counted["allocation_proven"])
+
+        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        oversized = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=1_000_000)
+        over_digest = self._store(oversized, exit_values["pool"], "exit", "route-over-position")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'route-over-position'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        over_position = desk_loop.mock_phantom_sign(over_digest, auth, NOW, transport)
+        self.assertFalse(over_position["signed"], over_position)
+        self.assertEqual(over_position["reason"], "unparseable_instruction")
+        self.assertFalse(over_position["ticket_limit_proven"])
+
+        foreign_mint = solana_tx.b58encode(b"\x44" * 32)
+        foreign_values, _foreign_accounts = _pool(foreign_mint, solana_tx.NATIVE_MINT)
+        foreign = self._message(foreign_values, foreign_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        foreign_digest = self._store(foreign, foreign_values["pool"], "exit", "foreign-source")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'foreign-source'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        foreign_source = desk_loop.mock_phantom_sign(foreign_digest, auth, NOW, transport)
+        self.assertFalse(foreign_source["signed"], foreign_source)
+        self.assertEqual(foreign_source["reason"], "unparseable_instruction")
+        self.assertFalse(foreign_source["allocation_proven"])
