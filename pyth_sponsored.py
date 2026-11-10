@@ -172,10 +172,13 @@ def lamports_usd(lamports: int, leg: dict) -> Decimal | None:
         return None
     if conf < 0 or expo < -12 or expo > 0:
         return None
-    ceiling = (Decimal(price) + Decimal(conf)) * (Decimal(10) ** expo)
-    if ceiling <= 0:
+    try:
+        ceiling = (Decimal(price) + Decimal(conf)) * (Decimal(10) ** expo)
+        if ceiling <= 0:
+            return None
+        return (Decimal(lamports) / Decimal(1_000_000_000) * ceiling).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    except (OverflowError, ValueError, ArithmeticError):
         return None
-    return (Decimal(lamports) / Decimal(1_000_000_000) * ceiling).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
 
 
 def status(now: float | None = None) -> dict:
@@ -353,16 +356,22 @@ def finite_clock(value):
     """A check time the signer may use. NaN, infinity, and a non-positive clock are refused."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or not value > 0:
+    try:
+        if not math.isfinite(value) or not value > 0:
+            return None
+        return float(value)
+    except (OverflowError, ValueError, ArithmeticError):
         return None
-    return float(value)
 
 
 def finite_number(value):
-    """An int or float that can be compared. NaN and infinity are refused before any comparison."""
+    """An int or float that can be compared. NaN, infinity, and an int that will not fit in float are refused."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value):
+    try:
+        if not math.isfinite(value):
+            return None
+    except (OverflowError, ValueError, ArithmeticError):
         return None
     return value
 
@@ -372,19 +381,29 @@ def _signer_int(value) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, str):
-        text = value.lstrip("-")
-        if text.isdigit() and text != "":
-            return int(value)
-        return None
+        try:
+            negative = value.startswith("-")
+            digits = value[1:] if negative else value
+            if digits.startswith("-") or not digits.isdigit() or digits == "":
+                return None
+            parsed = int(digits)
+            if negative:
+                parsed = -parsed
+        except (OverflowError, ValueError, ArithmeticError):
+            return None
+        return parsed if finite_number(parsed) is not None else None
     number = finite_number(value)
     if number is None:
         return None
-    if isinstance(value, float):
-        whole = math.trunc(number)
-        if number != whole:
-            return None
-        return int(whole)
-    return int(number)
+    try:
+        if isinstance(value, float):
+            whole = math.trunc(number)
+            if number != whole:
+                return None
+            return int(whole)
+        return int(number)
+    except (OverflowError, ValueError, ArithmeticError):
+        return None
 
 
 def assess_signer_price(payload, now: float) -> dict:
@@ -411,9 +430,12 @@ def assess_signer_price(payload, now: float) -> dict:
         return unknown
     if not (price > 0 and conf >= 0 and -12 <= expo <= 0):
         return unknown
-    if not (Decimal(conf) / Decimal(price) <= SIGNER_PRICE_CONF_RATIO):
-        return {"ok": False, "reason": "price_conf"}
-    age = clock - published
+    try:
+        if not (Decimal(conf) / Decimal(price) <= SIGNER_PRICE_CONF_RATIO):
+            return {"ok": False, "reason": "price_conf"}
+        age = clock - published
+    except (OverflowError, ValueError, ArithmeticError):
+        return unknown
     if not (-SIGNER_PRICE_FUTURE_SKEW_S <= age <= SIGNER_PRICE_FRESH_S):
         return {"ok": False, "reason": "price_stale"}
     return {

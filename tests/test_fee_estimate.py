@@ -1056,3 +1056,110 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertEqual(bound["asked"], [stored_hash])
         self.assertTrue(bound["price_freshness_proven"])
         self.assertFalse(bound["ticket_limit_proven"])
+        self.assertFalse(bound["rent_bound_proven"])
+
+    def test_an_unparseable_hermes_number_is_price_unknown(self):
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        message = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=4)
+        digest = self._store(message, values["pool"], "entry", "overflow-price")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'overflow-price'", ('{"reserved_usd": "1.00"}',))
+        base = self._transport(accounts)
+
+        def sign(payload):
+            def transport(request):
+                if request.get("method") == "hermes_price":
+                    return {"status": 200, "body": payload}
+                return base(request)
+            return desk_loop.mock_phantom_sign(digest, auth, NOW, transport)
+
+        huge = {"parsed": [{"status": "trading", "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": 10**1000}}]}
+        dashed = {"parsed": [{"status": "trading", "price": {"price": "--5", "conf": "0", "expo": 0, "publish_time": NOW}}]}
+        huge_price = {"parsed": [{"status": "trading", "price": {"price": 10**1000, "conf": "0", "expo": 0, "publish_time": NOW}}]}
+        for payload in (huge, dashed, huge_price):
+            refused = sign(payload)
+            self.assertFalse(refused["signed"], refused)
+            self.assertEqual(refused["reason"], "price_unknown")
+            self.assertFalse(refused["price_freshness_proven"])
+            self.assertFalse(refused["ticket_limit_proven"])
+            self.assertFalse(refused["allocation_proven"])
+            self.assertFalse(refused["rent_bound_proven"])
+            self.assertFalse(refused["live"])
+
+    def test_the_signer_bounds_rent_at_the_fixture_minimum(self):
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        base = self._transport(accounts)
+        wallet = phantom_transport.REQUIRED_WALLET
+        position = solana_tx.associated_token_address(wallet, mint, solana_tx.TOKEN_PROGRAM)
+        rent = solana_tx.TOKEN_ACCOUNT_RENT
+
+        def system_create(encoded, account, lamports, space):
+            decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+            keys = list(decoded.static_keys)
+            readonly = decoded.readonly_unsigned
+            if account not in keys:
+                keys.append(account)
+                readonly += 1
+            data = (0).to_bytes(4, "little") + int(lamports).to_bytes(8, "little") + int(space).to_bytes(8, "little") + solana_tx.b58decode(solana_tx.TOKEN_PROGRAM)
+            instructions = [(ix.program_index, list(ix.account_indexes), bytes(ix.data)) for ix in decoded.instructions]
+            instructions.append((keys.index(solana_tx.SYSTEM_PROGRAM), [0, keys.index(account)], data))
+            return solana_tx.encode_legacy(decoded.fee_payer, keys, readonly, instructions, decoded.blockhash, required=decoded.required_signatures)
+
+        def duplicate_ata(encoded):
+            decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+            keys = list(decoded.static_keys)
+            instructions = [(ix.program_index, list(ix.account_indexes), bytes(ix.data)) for ix in decoded.instructions]
+            create = next(ix for ix in instructions if keys[ix[0]] == solana_tx.ASSOCIATED_TOKEN and ix[2] == bytes([1]))
+            instructions.append(create)
+            return solana_tx.encode_legacy(decoded.fee_payer, keys, decoded.readonly_unsigned, instructions, decoded.blockhash, required=decoded.required_signatures)
+
+        def unknown_program(encoded):
+            decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+            keys = list(decoded.static_keys) + [solana_tx.b58encode(b"\x99" * 32)]
+            instructions = [(ix.program_index, list(ix.account_indexes), bytes(ix.data)) for ix in decoded.instructions]
+            instructions.append((len(keys) - 1, [], b"\x01"))
+            return solana_tx.encode_legacy(decoded.fee_payer, keys, decoded.readonly_unsigned + 1, instructions, decoded.blockhash, required=decoded.required_signatures)
+
+        def sign(name, encoded, transport):
+            digest = self._store(encoded, values["pool"], "entry", name)
+            db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", ('{"reserved_usd": "1.00"}', name))
+            return desk_loop.mock_phantom_sign(digest, auth, NOW, transport)
+
+        def without_rent(request):
+            if request.get("method") == "getMinimumBalanceForRentExemption":
+                return {"status": 200, "body": {"result": None}}
+            return base(request)
+
+        happy_message = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=4)
+        happy = sign("rent-happy", happy_message, base)
+        self.assertTrue(happy["signed"], happy)
+        self.assertTrue(happy["rent_bound_proven"])
+        self.assertTrue(happy["price_freshness_proven"])
+        self.assertTrue(happy["ticket_limit_proven"])
+        self.assertTrue(happy["allocation_proven"])
+        self.assertFalse(happy["live"])
+        self.assertIsNot(happy.get("execution_eligible"), True)
+        self.assertIsNot(happy.get("preflight_ready"), True)
+        self.assertIsNot(happy.get("gate_complete"), True)
+        self.assertIsNot(happy.get("live_ready"), True)
+
+        def refused(name, encoded, transport, reason):
+            result = sign(name, encoded, transport)
+            self.assertFalse(result["signed"], result)
+            self.assertEqual(result["reason"], reason, result)
+            self.assertFalse(result["rent_bound_proven"])
+            self.assertFalse(result["price_freshness_proven"])
+            self.assertFalse(result["ticket_limit_proven"])
+            self.assertFalse(result["allocation_proven"])
+            return result
+
+        refused("rent-space", system_create(happy_message, position, rent, 166), base, "rent_exceeds")
+        refused("rent-extra", system_create(happy_message, solana_tx.b58encode(b"\x94" * 32), rent, 165), base, "rent_unknown")
+        refused("rent-duplicate", duplicate_ata(happy_message), base, "rent_unknown")
+        refused("rent-lamports", system_create(happy_message, position, rent + 1, 165), base, "rent_exceeds")
+        refused("rent-program", unknown_program(happy_message), base, "unparseable_instruction")
+        other = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=5)
+        refused("rent-table", other, without_rent, "rent_unknown")

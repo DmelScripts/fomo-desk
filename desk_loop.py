@@ -2044,6 +2044,135 @@ def _gates_after_fee(case_id: str, message_sha256: str) -> dict:
     return {"ok": True, "reason": None, "side": side, "slippage_bps": bps}
 
 
+# Only a 165-byte classic token account has a rent bound. The lamport figure is
+# the fixture getMinimumBalanceForRentExemption value for that size, not a
+# second guess. The older formula produced 2_039_280; the pinned read is
+# solana_tx.TOKEN_ACCOUNT_RENT. Space above 165, or lamports above the table, exceeds.
+SIGNER_RENT_SPACE = 165
+
+
+def _signer_rent_bound(decoded, transport, wallet: str, wsol: str, position_ata: str | None, position_mint: str | None) -> dict:
+    """Count every create at the fixture rent minimum. A close of an existing account is refused."""
+    import solana_tx
+    unknown = {"ok": False, "reason": "rent_unknown"}
+    recognized = {wsol}
+    if isinstance(position_ata, str) and position_ata != "":
+        recognized.add(position_ata)
+    creates = []
+    closes = []
+    seen = set()
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return unknown
+        data = bytes(instruction.data)
+        if program == solana_tx.ASSOCIATED_TOKEN and data in {bytes([0]), bytes([1])} and len(keys) == 6:
+            payer, ata, owner, mint, system, token_program = keys
+            if payer != wallet or owner != wallet or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
+                return unknown
+            try:
+                expected = solana_tx.associated_token_address(owner, mint, token_program)
+            except Exception:
+                return unknown
+            if ata != expected or ata in seen:
+                return unknown
+            seen.add(ata)
+            creates.append({"account": ata, "mint": mint, "explicit": None})
+            continue
+        if program == solana_tx.SYSTEM_PROGRAM:
+            created = solana_tx.system_create(data)
+            if created is None or len(keys) < 2 or keys[0] != wallet:
+                continue
+            lamports, space, owner = created
+            if isinstance(space, bool) or not isinstance(space, int) or isinstance(lamports, bool) or not isinstance(lamports, int):
+                return unknown
+            if space > SIGNER_RENT_SPACE:
+                return {"ok": False, "reason": "rent_exceeds"}
+            if space != SIGNER_RENT_SPACE or owner != solana_tx.TOKEN_PROGRAM:
+                return unknown
+            account = keys[1]
+            if account not in recognized or account in seen:
+                return unknown
+            if account == wsol:
+                mint = solana_tx.NATIVE_MINT
+            elif account == position_ata and isinstance(position_mint, str) and position_mint != "":
+                mint = position_mint
+            else:
+                return unknown
+            seen.add(account)
+            creates.append({"account": account, "mint": mint, "explicit": lamports})
+            continue
+        if program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and keys:
+            closes.append(keys[0])
+    if not callable(transport):
+        return unknown
+    try:
+        tip_response = transport({"method": "getSlot"})
+    except Exception:
+        return unknown
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return unknown
+    minimum = None
+    if creates:
+        priced = _read_rent_exemption(transport, SIGNER_RENT_SPACE, tip)
+        if priced.get("ok") is not True or isinstance(priced.get("lamports"), bool) or not isinstance(priced.get("lamports"), int) or priced["lamports"] < 1:
+            return unknown
+        minimum = priced["lamports"]
+    def presence(account: str, mint: str) -> str:
+        try:
+            response = transport({
+                "method": "getAccountInfo", "purpose": "token_deposit", "account": account,
+                "commitment": "confirmed", "minContextSlot": tip, "blockhash": decoded.blockhash,
+            })
+        except Exception:
+            return "unknown"
+        body = response.get("body") if isinstance(response, dict) else None
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, dict) or "value" not in result:
+            return "unknown"
+        viewed = _deposit_view(result.get("value"), mint, wallet)
+        if viewed.get("kind") in {"absent", "present"}:
+            return viewed["kind"]
+        return "unknown"
+
+    total = 0
+    for item in creates:
+        explicit = item["explicit"]
+        if explicit is not None:
+            if explicit > minimum:
+                return {"ok": False, "reason": "rent_exceeds"}
+            if explicit != minimum:
+                return unknown
+        found = presence(item["account"], item["mint"])
+        if found == "absent":
+            total += minimum
+        elif found == "present":
+            if explicit is not None:
+                return unknown
+        else:
+            return unknown
+    for account in closes:
+        if account not in recognized and account not in seen:
+            return unknown
+        mint = solana_tx.NATIVE_MINT if account == wsol else None
+        if mint is None:
+            for item in creates:
+                if item["account"] == account:
+                    mint = item["mint"]
+        if not isinstance(mint, str):
+            return unknown
+        found = presence(account, mint)
+        if found == "present":
+            return {"ok": False, "reason": "preexisting_close_refused"}
+        if found != "absent":
+            return unknown
+    return {"ok": True, "lamports": total}
+
+
 def _message_deposit_lamports(decoded, transport) -> dict:
     """Rent for ATA creates named by the message. No create means no new deposit."""
     import memecoin_desk
@@ -2205,11 +2334,10 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
                 continue
             created = solana_tx.system_create(data)
             if created is not None and len(keys) >= 2 and keys[0] == wallet:
-                lamport_out += created[0]
                 continue
             return refused | {"reason": "unparseable_instruction"}
         if program == solana_tx.ASSOCIATED_TOKEN:
-            if data != bytes([1]) or len(keys) != 6 or keys[0] != wallet:
+            if data not in {bytes([0]), bytes([1])} or len(keys) != 6 or keys[0] != wallet:
                 return refused | {"reason": "unparseable_instruction"}
             continue
         if program == solana_tx.TOKEN_PROGRAM:
@@ -2233,14 +2361,15 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
     if isinstance(remaining, bool) or not isinstance(remaining, int) or position_out > remaining:
         if position_out:
             return refused | {"reason": "unparseable_instruction"}
-    deposit = _message_deposit_lamports(decoded, transport)
+    deposit = _signer_rent_bound(decoded, transport, wallet, wsol, position_ata, position_mint)
     if deposit.get("ok") is not True:
-        return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
+        return refused | {"reason": deposit.get("reason") or "rent_unknown"}
     return {
         "ok": True,
         "lamports": lamport_out + route_sol + wsol_out + deposit["lamports"],
         "cu_limit": cu_limit,
         "cu_price": cu_price,
+        "rent_bounded": True,
     }
 
 
@@ -2390,7 +2519,10 @@ def _signer_sol_price(transport, now: float) -> dict:
     body = response.get("body") if isinstance(response, dict) else None
     if not isinstance(body, dict):
         return {"ok": False, "reason": "price_unknown"}
-    return pyth_sponsored.assess_signer_price(body, now)
+    try:
+        return pyth_sponsored.assess_signer_price(body, now)
+    except (OverflowError, ValueError, ArithmeticError):
+        return {"ok": False, "reason": "price_unknown"}
 
 
 def _result_field(response, name: str | None = None):
@@ -2484,7 +2616,7 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         return refused | {"reason": "price_unknown"}
     if fee_usd > memecoin_desk.MAX_FEE:
         return refused | {"reason": "fee_cap"}
-    fresh = {"price_freshness_proven": True}
+    fresh = {"price_freshness_proven": True, "rent_bound_proven": False}
     if outflow["lamports"] == 0:
         return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True} | fresh
     usd = pyth_sponsored.lamports_usd(outflow["lamports"], sol)
@@ -2504,7 +2636,10 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd, now=moment))
     if room.get("ok") is not True:
         return refused | {"reason": room.get("reason") or "allocation"}
-    return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "price_freshness_proven": True, "reduce_only": False}
+    return {
+        "ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True,
+        "price_freshness_proven": True, "rent_bound_proven": outflow.get("rent_bounded") is True, "reduce_only": False,
+    }
 
 
 def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None, transport=None) -> dict:
@@ -2512,7 +2647,7 @@ def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None,
     import hashlib
     blank = {
         "signed": False, "mock": True, "network_called": False, "live": False,
-        "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False,
+        "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False, "rent_bound_proven": False,
     }
     if not isinstance(auth, dict) or auth.get("ok") is not True or auth.get("mock") is not True or auth.get("network_called") is not False:
         return blank | {"reason": "auth_refused"}
@@ -2528,6 +2663,7 @@ def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None,
         "ticket_limit_proven": capital.get("ticket_limit_proven") is True,
         "allocation_proven": capital.get("allocation_proven") is True,
         "price_freshness_proven": capital.get("price_freshness_proven") is True,
+        "rent_bound_proven": capital.get("rent_bound_proven") is True,
     }
 
 
@@ -2567,7 +2703,7 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
     if signed.get("signed") is not True:
         return base | {
             "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "reason": signed.get("reason"),
-            "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False,
+            "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False, "rent_bound_proven": False,
         }
     sent = mock_phantom_send(signed)
     return base | {
@@ -2576,6 +2712,7 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
         "ticket_limit_proven": signed.get("ticket_limit_proven") is True,
         "allocation_proven": signed.get("allocation_proven") is True,
         "price_freshness_proven": signed.get("price_freshness_proven") is True,
+        "rent_bound_proven": signed.get("rent_bound_proven") is True,
         "execution_eligible": False, "preflight_ready": False, "gate_complete": False, "live_ready": False,
     }
 
