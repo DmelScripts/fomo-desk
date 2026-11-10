@@ -14,7 +14,8 @@ response wrapped as {meta, body}).
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+import math
+from decimal import Decimal
 
 import memecoin_desk
 import public_filter_docs
@@ -173,16 +174,12 @@ BUNDLE_SOURCE = "solana_tracker_initial_bundler_share"
 
 
 def _real_number(value):
-    """An int or a float. Bools and strings, including digit strings, are not numbers."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    if not number.is_finite():
-        return None
-    return number
+    """Exactly an int or a float. Subclasses, bools, and strings are not numbers."""
+    if type(value) is int:
+        return Decimal(value)
+    if type(value) is float and math.isfinite(value):
+        return Decimal(repr(float(value)))
+    return None
 
 
 def _bundle_percentage(value):
@@ -198,9 +195,9 @@ def bundle_check(tracker_body, rugcheck_body) -> dict:
 
     Thành approved this on 2026-11-11 as the substitute for creation-block share.
     risk.bundlers.totalInitialPercentage above 10 fails. A bundlers object with
-    count 0 and no percentage is 0. Count and the percentage must be an int or a
-    float. A string, including a digit string, plus a missing, NaN, negative, or
-    over-100 figure, fails closed. RugCheck is not this measure.
+    count 0 and no percentage is 0. Count and the percentage must be exactly an
+    int or a float, not a subclass. A string or a lying subclass, plus a missing,
+    NaN, negative, or over-100 figure, fails closed. RugCheck is not this measure.
     """
     del rugcheck_body
     refused = {"ok": False, "reason": "bundle_unverified", "bundled_launch_pct": None, "source": BUNDLE_SOURCE}

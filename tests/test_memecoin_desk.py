@@ -474,6 +474,19 @@ class MemecoinDeskTests(unittest.TestCase):
         string_count = {"risk": {"bundlers": {"count": "0", "totalInitialPercentage": 0}}}
         self.assertEqual(cross_source.bundle_check(string_count, None)["reason"], "bundle_unverified")
 
+        class Lie(int):
+            def __str__(self):
+                return "0"
+
+        class LieFloat(float):
+            def __str__(self):
+                return "0"
+
+        lied = {"risk": {"bundlers": {"count": 4, "totalInitialPercentage": Lie(50)}}}
+        self.assertEqual(cross_source.bundle_check(lied, None)["reason"], "bundle_unverified")
+        lied_float = {"risk": {"bundlers": {"count": 4, "totalInitialPercentage": LieFloat(50.0)}}}
+        self.assertEqual(cross_source.bundle_check(lied_float, None)["reason"], "bundle_unverified")
+
     def test_rug_reader_and_holder_chart_fail_closed(self):
         import dev_rug_history
         import public_filter_docs
