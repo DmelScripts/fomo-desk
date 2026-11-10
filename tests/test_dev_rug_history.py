@@ -54,6 +54,16 @@ class DevRugHistoryTests(unittest.TestCase):
         self.assertEqual(only["rugs"], 0)
         self.assertEqual(only["creator_source"], "creator")
         self.assertEqual(only["past_tokens"], 0)
+        self.assertTrue(only["source_wired"])
+        caller = {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 2}
+        self.assertEqual(dev_rug_history.assess(caller, MINT)["reason"], "dev_rug_history_unverified")
+        dev_rug_history.clear_cache()
+        nested = _page([MINT, OTHER])
+        nested["result"]["items"][1]["rugcheck"] = {"rugged": True}
+        flagged = dev_rug_history.read_history(MINT, asset=asset, assets=nested, now=11)
+        self.assertEqual(flagged["reason"], "dev_rug_history")
+        self.assertEqual(flagged["rugs"], 1)
+        self.assertTrue(flagged["source_wired"])
         self.assertFalse(only["chain_complete"])
         authority = _asset([{"address": CREATOR, "share": 100, "verified": False}], [{"address": "auth", "scopes": []}])
         by_authority = dev_rug_history.read_history(MINT, asset=authority, assets=_page([MINT]), now=10)

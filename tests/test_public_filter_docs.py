@@ -57,5 +57,5 @@ class PublicFilterDocTests(unittest.TestCase):
         self.assertFalse(accepted["score_measured"])
         refused = desk_loop.collect_holder_count(MINT, {"source": "solana_tracker_holders_chart", "body": {"holders": []}})
         self.assertFalse(refused["ok"])
-        self.assertEqual(refused["reason"], "holder_growth_unproven")
+        self.assertEqual(refused["reason"], "holder_growth_unknown")
         self.assertFalse(refused["written"])

@@ -21,6 +21,7 @@ METRIC = "holders"
 DOCS = "https://docs.solanatracker.io/data-api/chart/get-holders-chart-data"
 RUGCHECK_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{id}/report/summary"
 KEY_ENV = "SOLANA_TRACKER_API_KEY"
+_RECORDED_CHART = None
 
 
 def source_catalog() -> dict:
@@ -96,8 +97,36 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def remember_chart(body) -> None:
+    """The body read_holder_chart returns after the key check. Not a caller chart."""
+    global _RECORDED_CHART
+    _RECORDED_CHART = body
+
+
+def clear_chart() -> None:
+    global _RECORDED_CHART
+    _RECORDED_CHART = None
+
+
+def growth_points(parsed: dict):
+    """Map the fetched holder delta to the 0-100 analyst component."""
+    from decimal import Decimal
+    start = parsed.get("start_holders")
+    delta = parsed.get("delta")
+    if isinstance(start, bool) or not isinstance(start, int) or start <= 0:
+        return None
+    if isinstance(delta, bool) or not isinstance(delta, int):
+        return None
+    points = (Decimal(delta) * Decimal(100)) / Decimal(start)
+    if points < 0:
+        points = Decimal(0)
+    if points > 100:
+        points = Decimal(100)
+    return points
+
+
 def read_holder_chart(mint: str, chart=None, allow_network: bool = False) -> dict:
-    """A supplied body is the test path. The key is required before any GET."""
+    """Fetch the chart. A caller-supplied body is not a fetch."""
     unknown = {
         "ok": False,
         "reason": "holder_growth_unknown",
@@ -107,13 +136,15 @@ def read_holder_chart(mint: str, chart=None, allow_network: bool = False) -> dic
         "source": SOURCE,
     }
     if chart is not None:
-        parsed = parse_holder_chart(chart, mint)
-        if parsed.get("ok") is not True:
-            return unknown | {"parse_reason": parsed.get("reason")}
-        return parsed | {"fetched": False}
+        return unknown | {"cause": "caller_chart"}
     key = os.environ.get(KEY_ENV)
     if not isinstance(key, str) or key.strip() == "":
-        return unknown | {"reason": "holder_growth_unknown", "key_present": False}
+        return unknown | {"key_present": False}
+    if _RECORDED_CHART is not None:
+        parsed = parse_holder_chart(_RECORDED_CHART, mint)
+        if parsed.get("ok") is not True:
+            return unknown | {"fetched": True, "parse_reason": parsed.get("reason")}
+        return parsed | {"fetched": True, "key_present": True}
     if allow_network is not True:
         return unknown | {"key_present": True, "network": "not_requested"}
     if not isinstance(mint, str) or mint == "" or "/" in mint:

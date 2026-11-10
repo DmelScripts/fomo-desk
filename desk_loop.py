@@ -172,6 +172,8 @@ def collect_holder_count(mint: str, reading: dict) -> dict:
     if reading.get("source") == "solana_tracker_holders_chart":
         import public_filter_docs
         parsed = public_filter_docs.parse_holder_chart(reading.get("body"), mint)
+        if parsed.get("ok") is not True:
+            return {"ok": False, "written": False, "booked": False, "reason": "holder_growth_unknown", "score_measured": False}
         return parsed | {"written": False, "booked": False}
     if reading.get("source") != "desk_holder_count" or "holder_count" not in reading:
         return {"ok": False, "written": False, "reason": "holder_count_source_unpublished", "score_measured": False}

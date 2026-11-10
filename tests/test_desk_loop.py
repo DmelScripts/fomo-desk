@@ -7,7 +7,7 @@ import desk_loop
 import memecoin_desk
 import solana_tx
 import usdc_valuation
-from tests.support import temp_desk_env
+from tests.support import arm_clean_creator, arm_holder_chart, clear_filter_fixtures, temp_desk_env
 
 NOW = 1_800_000_000.0
 MINT = solana_tx.b58encode(b"\x55" * 32)
@@ -49,11 +49,15 @@ class DeskLoopTests(unittest.TestCase):
             (MINT, NOW, NOW),
         )
         fresh = {name: {"value": "70", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+        fresh["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
+        arm_holder_chart()
+        self.addCleanup(clear_filter_fixtures)
         passed = memecoin_desk.analyze("score-line", fresh, NOW)
         self.assertTrue(passed["ok"], passed)
         self.assertEqual(memecoin_desk.view("score-line")["snapshot"]["score"], "70")
         db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = 'score-line'")
         short = {name: {"value": "69", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+        short["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
         failed = memecoin_desk.analyze("score-line", short, NOW)
         self.assertFalse(failed["ok"])
         self.assertEqual(failed["reason"], "score")
@@ -765,7 +769,10 @@ class DeskLoopTests(unittest.TestCase):
                     "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
                     "bundled_launch_pct": "1",
                 },
-                "components": {name: {"value": "70", "source": "synthetic_test_adapter", "fetched_at": moment} for name in memecoin_desk.COMPONENTS},
+                "components": {
+                    **{name: {"value": "70", "source": "synthetic_test_adapter", "fetched_at": moment} for name in memecoin_desk.COMPONENTS},
+                    "holder_growth": {"source": "solana_tracker_holders_chart", "fetched_at": moment},
+                },
             }
 
         db.set_setting("memecoin_scheduler_authorized", "1", "synthetic_test_consent")
@@ -778,6 +785,8 @@ class DeskLoopTests(unittest.TestCase):
                 self.assertFalse(status["armed"])
                 self.assertIn("lp_fields_unpublished", status["ready_because"])
                 self.assertIn("holder_growth_unproven", status["ready_because"])
+                arm_clean_creator(swap_mint)
+                arm_holder_chart()
                 screened = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
                 real = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)
                 return screened, real

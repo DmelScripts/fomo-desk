@@ -13,7 +13,7 @@ import solana_mint_read
 import solana_tx
 import solana_whirlpool
 import token_execution
-from tests.support import temp_desk_env
+from tests.support import arm_clean_creator, arm_holder_chart, clear_filter_fixtures, temp_desk_env
 
 NOW = 1_800_000_000.0
 MINT = solana_tx.b58encode(b"\x55" * 32)
@@ -159,11 +159,15 @@ class PublicAdapterTests(unittest.TestCase):
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",
         }
+        arm_clean_creator(MINT)
+        arm_holder_chart()
+        self.addCleanup(clear_filter_fixtures)
         self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
         components = {
             name: {"value": "70", "source": "holder_reader", "fetched_at": NOW}
             for name in memecoin_desk.COMPONENTS
         }
+        components["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
         self.assertTrue(memecoin_desk.analyze(opened["case_id"], components, now=NOW)["ok"])
         pool = solana_whirlpool.reference_pool(
             solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
@@ -308,8 +312,12 @@ class PublicAdapterTests(unittest.TestCase):
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",
         }
+        arm_clean_creator(swap_mint)
+        arm_holder_chart()
+        self.addCleanup(clear_filter_fixtures)
         self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
         components = {name: {"value": "70", "source": "holder_reader", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
+        components["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
         self.assertTrue(memecoin_desk.analyze(opened["case_id"], components, now=NOW)["ok"])
         pool = solana_whirlpool.reference_pool(
             solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),

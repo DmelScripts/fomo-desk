@@ -220,15 +220,15 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     return _advance(row, "filter_passed", "filter", evidence)
 
 
-def _holder_chart_reason(item: dict, mint: str) -> str | None:
-    """The tracker chart is required only when this component names that source."""
-    if item.get("source") != "solana_tracker_holders_chart" and "chart" not in item:
-        return None
+def _holder_growth_value(item: dict, mint: str):
+    """The score comes from a fetched chart. A caller chart or value is not used."""
     import public_filter_docs
-    parsed = public_filter_docs.read_holder_chart(mint, item.get("chart"), allow_network=item.get("chart") is None)
-    if parsed.get("ok") is not True:
-        return "holder_growth_unknown"
-    return None
+    if item.get("source") != public_filter_docs.SOURCE or "chart" in item:
+        return None
+    parsed = public_filter_docs.read_holder_chart(mint, None, allow_network=True)
+    if parsed.get("ok") is not True or parsed.get("fetched") is not True:
+        return None
+    return public_filter_docs.growth_points(parsed)
 
 
 def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
@@ -254,14 +254,15 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         logged = source if isinstance(source, str) else None
         if logged is None or logged in {"dexscreener", "dexscreener_txns", "transaction_count", "dexscreener_boost", "profile"}:
             return _fail(row, "analyst", name + "_unproven", source=logged)
-        fetched = _num(item.get("fetched_at"))
-        if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
-            return _fail(row, "analyst", name + "_stale", source=logged)
         if name == "holder_growth":
-            chart_reason = _holder_chart_reason(item, row["mint"])
-            if chart_reason is not None:
-                return _fail(row, "analyst", chart_reason, source=logged)
-        value = _num(item.get("value"))
+            value = _holder_growth_value(item, row["mint"])
+            if value is None:
+                return _fail(row, "analyst", "holder_growth_unknown", source=logged)
+        else:
+            fetched = _num(item.get("fetched_at"))
+            if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
+                return _fail(row, "analyst", name + "_stale", source=logged)
+            value = _num(item.get("value"))
         if value is None or value < 0 or value > 100:
             return _fail(row, "analyst", name, source=logged)
         weighted += WEIGHTS[name] * value
