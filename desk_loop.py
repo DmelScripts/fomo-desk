@@ -3168,6 +3168,8 @@ def _supervise_open(transport, now: float) -> list:
 def synthetic_screen(mint: str, features: dict, transport, now: float) -> dict:
     """Test-only handoff. It does not reserve live capital and the live round does not call it."""
     quiet = {"ok": False, "send": False, "sign": False, "live_ready": False, "live_capital": False, "ledger": "synthetic", "jupiter_called": False}
+    if isinstance(features, dict) and (features.get("ledger") == "live" or features.get("live_capital") is True or features.get("live") is True):
+        return quiet | {"reason": "live_refused", "signer_reached": False}
     if not isinstance(features, dict) or features.get("mint") != mint or not isinstance(mint, str):
         return quiet | {"reason": "synthetic_mint"}
     if features.get("source") != "synthetic_test_adapter":
@@ -3194,31 +3196,16 @@ def synthetic_screen(mint: str, features: dict, transport, now: float) -> dict:
         if filtered.get("ok") is not True:
             return quiet | {"reason": filtered.get("reason"), "stage": filtered.get("stage")}
         analyzed = memecoin_desk.analyze(opened["case_id"], components, now=now)
-        if analyzed.get("reason") == "smart_wallets_missing":
-            import db
-            db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (opened["case_id"],))
-        elif analyzed.get("ok") is not True:
-            return quiet | {"reason": analyzed.get("reason"), "stage": analyzed.get("stage")}
-        proof = _account_rent(transport, mint)
-        if proof.get("ok") is not True:
-            return quiet | {"reason": proof.get("reason")}
-        _fresh_sol(transport, now)
-        protected = memecoin_desk.protect(opened["case_id"], now=now, rent_proof=proof, ledger="synthetic")
-        if protected.get("ok") is not True:
-            return quiet | {"reason": protected.get("reason"), "stage": protected.get("stage")}
+        if analyzed.get("ok") is not True:
+            return quiet | {
+                "reason": analyzed.get("reason"), "stage": analyzed.get("stage"),
+                "sign": False, "send": False, "signer_reached": False,
+            }
     elif opened.get("reason") != "already_open":
         return quiet | {"reason": opened.get("reason")}
-    quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {}, allow_synthetic=True)
-    stored = memecoin_desk.view(mint)
-    live = stored is None or (stored.get("snapshot") or {}).get("live_capital") is not False
     return quiet | {
-        "ok": quote.get("jupiter_called") is True,
-        "reason": quote.get("reason"),
-        "quote": quote,
-        "jupiter_called": quote.get("jupiter_called") is True,
-        "stage": None if stored is None else stored.get("stage"),
-        "live_capital": False,
-        "counted_as_live": live,
+        "ok": False, "reason": "synthetic_stops_before_signer",
+        "sign": False, "send": False, "signer_reached": False, "live_ready": False,
     }
 
 

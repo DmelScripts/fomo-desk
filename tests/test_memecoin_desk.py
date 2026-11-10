@@ -215,9 +215,14 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def _analyzed(self, number: int, **pair):
         case_id = self._filtered(number, **pair)
-        result = memecoin_desk.analyze(case_id, _components(), now=NOW)
-        self.assertEqual(result["reason"], "smart_wallets_missing", result)
-        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (case_id,))
+        snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        snap["fixture"] = True
+        snap["analyst_scored"] = False
+        snap["smart_wallets_scored"] = False
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'filter_passed'",
+            (json.dumps(snap, sort_keys=True), case_id),
+        )
         return case_id
 
     def _filled(self, number: int):
@@ -1823,8 +1828,14 @@ class MemecoinDeskTests(unittest.TestCase):
             self.assertTrue(opened["ok"], opened)
             arm_clean_creator(mint)
             self.assertTrue(memecoin_desk.filter_case(opened["case_id"], _onchain(), now=NOW)["ok"])
-            self.assertEqual(memecoin_desk.analyze(opened["case_id"], _components(), now=NOW)["reason"], "smart_wallets_missing")
-            db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (opened["case_id"],))
+            snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
+            snap["fixture"] = True
+            snap["analyst_scored"] = False
+            snap["smart_wallets_scored"] = False
+            db.execute(
+                "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'filter_passed'",
+                (json.dumps(snap, sort_keys=True), opened["case_id"]),
+            )
             return opened["case_id"]
 
         def revert(number, fee, alter=None):

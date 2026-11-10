@@ -1,5 +1,6 @@
 """Public adapters stay fixtures here. A JSON Jupiter minimum does not unlock a send."""
 import base64
+import json
 import os
 import unittest
 
@@ -163,13 +164,13 @@ class PublicAdapterTests(unittest.TestCase):
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
         self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
-        components = {
-            name: {"value": "70", "source": "holder_reader", "fetched_at": NOW}
-            for name in memecoin_desk.COMPONENTS
-        }
-        components["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
-        self.assertEqual(memecoin_desk.analyze(opened["case_id"], components, now=NOW)["reason"], "smart_wallets_missing")
-        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (opened["case_id"],))
+        snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
+        snap["fixture"] = True
+        snap["analyst_scored"] = False
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'filter_passed'",
+            (json.dumps(snap, sort_keys=True), opened["case_id"]),
+        )
         pool = solana_whirlpool.reference_pool(
             solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
             solana_tx.USDC_MINT, solana_tx.b58encode(b"\x12" * 32),
@@ -317,10 +318,13 @@ class PublicAdapterTests(unittest.TestCase):
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
         self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
-        components = {name: {"value": "70", "source": "holder_reader", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
-        components["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
-        self.assertEqual(memecoin_desk.analyze(opened["case_id"], components, now=NOW)["reason"], "smart_wallets_missing")
-        db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (opened["case_id"],))
+        snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
+        snap["fixture"] = True
+        snap["analyst_scored"] = False
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'analyst_passed', snapshot_json = ? WHERE id = ? AND stage = 'filter_passed'",
+            (json.dumps(snap, sort_keys=True), opened["case_id"]),
+        )
         pool = solana_whirlpool.reference_pool(
             solana_tx.NATIVE_MINT, solana_tx.b58encode(b"\x11" * 32),
             solana_tx.USDC_MINT, solana_tx.b58encode(b"\x12" * 32),
