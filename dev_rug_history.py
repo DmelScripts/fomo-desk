@@ -86,7 +86,10 @@ def assess(reading, mint=None) -> dict:
         return {"ok": False, "verified": False, "reason": "dev_rug_history_unverified", "rugs": None}
     if rugs > 0:
         return {"ok": False, "verified": True, "reason": "dev_rug_history", "rugs": rugs, "source": SOURCE, "source_wired": True}
-    return {"ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE, "source_wired": True}
+    return {
+        "ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE, "source_wired": True,
+        "rugged_source": verdict.get("rugged_source"),
+    }
 
 
 def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_network: bool = False) -> dict:
@@ -155,6 +158,7 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
         "ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE,
         "source_wired": True, "creator": creator, "creator_source": how, "past_tokens": len(past),
         "cached": False, "rugged_field": RUGGED_FIELD, "rugged_field_status": RUGGED_FIELD_STATUS,
+        "rugged_source": "rugcheck_report_observed_undocumented",
         "chain_complete": False,
         "limit": "getAssetsByCreator matches creatorAddress, not every mint that address can update",
     }
@@ -252,7 +256,9 @@ def _rugcheck(mint: str, helius_creator: str, allow_network: bool) -> dict:
     if status != 200 or not isinstance(body, dict) or not isinstance(body.get(RUGGED_FIELD), bool):
         return _unverified("rugged_not_bool" if status == 200 else "rugcheck_status")
     creator = body.get("creator")
-    if isinstance(creator, str) and creator != "" and creator != helius_creator:
+    if not isinstance(creator, str) or creator == "":
+        return _unverified("creator_missing")
+    if creator != helius_creator:
         return _unverified("creator_mismatch")
     return {"ok": True, "rugged": body[RUGGED_FIELD]}
 

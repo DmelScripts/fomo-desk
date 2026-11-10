@@ -103,6 +103,12 @@ class DevRugHistoryTests(unittest.TestCase):
         clean = dev_rug_history.read_history(MINT, asset=asset, assets=_page([MINT, OTHER]), now=23)
         self.assertEqual(clean["rugs"], 0)
         self.assertFalse(clean["cached"])
+        self.assertEqual(clean["rugged_source"], "rugcheck_report_observed_undocumented")
+        for body in ({"rugged": False}, {"rugged": False, "creator": ""}, {"rugged": False, "creator": None}, {"rugged": False, "creator": 1}):
+            dev_rug_history.remember_report(OTHER, body)
+            missing = dev_rug_history.read_history(MINT, asset=asset, assets=_page([MINT, OTHER]), now=24)
+            self.assertEqual(missing["reason"], "dev_rug_history_unverified", body)
+            self.assertEqual(missing["cause"], "creator_missing", body)
 
     def test_a_clean_page_is_not_reused_and_a_rejection_can_be(self):
         first = dev_rug_history.read_history(MINT, creator=CREATOR, assets=_page([MINT]), now=100)
