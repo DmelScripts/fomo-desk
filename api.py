@@ -1259,7 +1259,9 @@ def agents_token_buy(request: Request, body: dict | None = None) -> JSONResponse
 
 
 _MEMECOIN_SCOUT = {"mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1"}
-_UNTRUSTED_FIELDS = {"confirmed_market_cap_usd", "cross_sources", "pair_id"}
+_UNTRUSTED_FIELDS = {
+    "confirmed_market_cap_usd", "cross_sources", "pair_id", "pair_address", "pairs", "dev_holding_pct",
+}
 
 
 def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:

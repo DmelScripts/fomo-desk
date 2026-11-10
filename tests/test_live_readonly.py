@@ -249,7 +249,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
-        self.assertEqual(unconfirmed["reason"], "market_cap_unconfirmed")
+        self.assertEqual(unconfirmed["reason"], "pool_missing")
         supplied = dict(unconfirmed) if False else {
             "mint": mint,
             "source": "dexscreener",
@@ -264,7 +264,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_change_h1": "10",
         }
         cross_source.clear_fetcher()
-        self.assertEqual(memecoin_desk.scout(supplied, now=NOW)["reason"], "market_cap_unconfirmed")
+        self.assertEqual(memecoin_desk.scout(supplied, now=NOW)["reason"], "pool_missing")
         opened = memecoin_desk.scout({
             "mint": mint + "x",
             "source": "dexscreener",
@@ -277,7 +277,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
-        self.assertEqual(opened["reason"], "market_cap_unconfirmed")
+        self.assertEqual(opened["reason"], "pool_missing")
         case_mint = mint + "x"
         cross_source.note_cap(case_mint, "1000000")
         cross_source.arm_test_fetcher()
@@ -290,13 +290,15 @@ class LiveReadonlyTests(unittest.TestCase):
             "market_cap_usd": "1000000",
             "market_cap_basis": "marketCap",
             "confirmed_market_cap_usd": "1000000",
-            "pair_address": cross_source.pair_id_for(case_mint),
+            "pair_address": "SMALL",
+            "pairs": [{"pairAddress": "SMALL"}],
             "liquidity_usd": "250000",
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"], opened)
         self.assertEqual(memecoin_desk.view(opened["case_id"])["snapshot"]["pair_address"], cross_source.pair_id_for(case_mint))
+        self.assertNotEqual(memecoin_desk.view(opened["case_id"])["snapshot"]["pair_address"], "SMALL")
         pools = _two_pools(case_mint)
         cross_source.note_bundle(case_mint, pools)
         refused = memecoin_desk.filter_case(opened["case_id"], {

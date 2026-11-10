@@ -126,9 +126,10 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
         return _kill(None, mint, "scout", "market_cap", "dexscreener")
     import cross_source
-    pair_address = pair.get("pair_address")
+    selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
     if not isinstance(pair_address, str) or pair_address == "":
-        return _kill(None, mint, "scout", "pool_missing", "dexscreener")
+        return _kill(None, mint, "scout", why or "pool_missing", "dexscreener")
     other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
         return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
@@ -179,7 +180,7 @@ def scout(pair: dict, now: float | None = None) -> dict:
 
 
 def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
-    """On-chain facts. DexScreener cannot satisfy them. Liquidity uses the scout snapshot."""
+    """Fetched RugCheck and Solana Tracker facts. A caller authority, LP, dev share, or pool is not an input."""
     moment = time.time() if now is None else now
     row = _case(case_id)
     if row is None or row["stage"] != "scout_passed":
@@ -194,44 +195,40 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     fetched = _num(onchain.get("fetched_at"))
     if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
         return refuse("onchain_stale")
-    if onchain.get("mint_authority_revoked") is not True:
-        return refuse("mint_authority")
-    if onchain.get("freeze_authority_revoked") is not True:
-        return refuse("freeze_authority")
-    import public_filter_docs
-    locked = public_filter_docs.parse_lp_locked_pct(onchain)
-    if locked.get("ok") is not True:
-        return refuse("lp")
     import dev_rug_history
     import cross_source
     stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
     bundle = cross_source.fetch_bundle(row["mint"], stored_pair) if stored_pair else None
-    dev = _num(onchain.get("dev_holding_pct"))
-    judged = None
-    if bundle is not None:
-        judged = cross_source.judge(bundle)
-        liq_row = judged["checks"]["liq_ge_25pct"]
-        if liq_row.get("reason") in {"pool_ambiguous", "pool_missing"}:
-            return refuse(liq_row["reason"])
-        if judged["checks"]["quote_sol"]["status"] != "PASS":
-            return refuse(judged["checks"]["quote_sol"].get("reason") or "quote_unknown")
-        dev_row = judged["checks"]["dev_le_3pct"]
-        if dev is None and dev_row["status"] == "PASS":
-            dev = _num(dev_row.get("dev_holding_pct"))
-        elif dev_row["status"] != "PASS" and dev is None:
-            return refuse("creator_conflict" if dev_row["reason"] == "creator_conflict" else "dev_holding")
-        rug_row = judged["checks"]["no_past_rug"]
-        if rug_row["status"] != "PASS":
-            return refuse("dev_rug_history" if rug_row["status"] == "FAIL" else "dev_rug_history_unverified")
-        if liq_row["status"] != "PASS":
-            return refuse(liq_row.get("reason") or "liquidity_source_missing")
-        snap = dict(snap)
-        snap["liquidity_usd"] = liq_row.get("quote_usd")
-        snap["market_cap_usd"] = liq_row.get("market_cap_usd")
-    if dev is None:
-        return refuse("dev_holding_missing")
-    if dev > DEV_HOLDING_MAX:
+    if bundle is None:
+        return refuse("liquidity_source_missing")
+    judged = cross_source.judge(bundle)
+    checks = judged["checks"]
+    liq_row = checks["liq_ge_25pct"]
+    if liq_row.get("reason") in {"pool_ambiguous", "pool_missing"}:
+        return refuse(liq_row["reason"])
+    if checks["quote_sol"]["status"] != "PASS":
+        return refuse(checks["quote_sol"].get("reason") or "quote_unknown")
+    authority = checks["mint_freeze_revoked"]
+    if authority["status"] != "PASS":
+        return refuse(authority["reason"] if authority.get("reason") in {"mint_authority", "freeze_authority"} else "mint_authority")
+    if checks["lp_100"]["status"] != "PASS":
+        return refuse("lp")
+    dev_row = checks["dev_le_3pct"]
+    if dev_row["status"] != "PASS":
+        return refuse("creator_conflict" if dev_row.get("reason") == "creator_conflict" else "dev_holding")
+    fetched_dev = _num(dev_row.get("dev_holding_pct"))
+    if fetched_dev is None or fetched_dev > DEV_HOLDING_MAX:
         return refuse("dev_holding")
+    rug_row = checks["no_past_rug"]
+    if rug_row["status"] != "PASS":
+        return refuse("dev_rug_history" if rug_row["status"] == "FAIL" else "dev_rug_history_unverified")
+    if checks["holder_growth"]["status"] != "PASS":
+        return refuse(checks["holder_growth"].get("reason") or "holder_growth_unproven")
+    if liq_row["status"] != "PASS":
+        return refuse(liq_row.get("reason") or "liquidity_source_missing")
+    snap = dict(snap)
+    snap["liquidity_usd"] = liq_row.get("quote_usd")
+    snap["market_cap_usd"] = liq_row.get("market_cap_usd")
     rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
     if rugs.get("ok") is not True:
         return refuse(rugs.get("reason") or "dev_rug_history_unverified")
@@ -243,8 +240,6 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     change = _num(snap.get("price_change_h1"))
     if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
-    if bundle is None:
-        return refuse("liquidity_source_missing")
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:

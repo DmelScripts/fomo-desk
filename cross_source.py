@@ -138,6 +138,13 @@ def _fetch(kind: str, mint: str, pair_id: str | None = None):
         return None
 
 
+def fetch_dex(mint: str):
+    """DexScreener pairs from the desk fetcher. The caller does not name the pool."""
+    if not isinstance(mint, str) or mint == "":
+        return None
+    return _fetch("dex", mint, None)
+
+
 def fetch_market_cap(mint: str, pair_id: str):
     """Market cap of this pool from the desk's Solana Tracker read. Not a request field."""
     body = _fetch("solana_tracker_token", mint, pair_id)
@@ -457,10 +464,10 @@ def authority_check(rugcheck_body, tracker_body, pool_id: str) -> dict:
     security = pool.get("security") if isinstance(pool, dict) and isinstance(pool.get("security"), dict) else None
     if not isinstance(rc, dict) or security is None:
         return {"status": "FAIL-CLOSED", "reason": "authority_missing"}
-    revoked = rc.get("mintAuthority") is None and rc.get("freezeAuthority") is None
-    revoked = revoked and security.get("mintAuthority") is None and security.get("freezeAuthority") is None
-    if not revoked:
-        return {"status": "FAIL", "reason": "authority"}
+    if rc.get("mintAuthority") is not None or security.get("mintAuthority") is not None:
+        return {"status": "FAIL", "reason": "mint_authority"}
+    if rc.get("freezeAuthority") is not None or security.get("freezeAuthority") is not None:
+        return {"status": "FAIL", "reason": "freeze_authority"}
     return {"status": "PASS", "reason": None}
 
 

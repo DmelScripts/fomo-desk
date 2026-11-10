@@ -119,6 +119,10 @@ class PublicAdapterTests(unittest.TestCase):
                 "swapInstruction": {"programId": solana_jupiter.PROGRAM_ID, "accounts": [{}] * 13, "data": base64.b64encode(data).decode("ascii")},
             }}
 
+        import cross_source
+        unlocked = _passing_cross(MINT)
+        unlocked["rugcheck"]["markets"][0]["lp"]["lpLockedPct"] = 99
+        cross_source.note_bundle(MINT, unlocked)
         result = public_market.run_bounded(transport, NOW)
         self.assertEqual(result["reason"], "lp")
         self.assertEqual(result["stage"], "rejected")

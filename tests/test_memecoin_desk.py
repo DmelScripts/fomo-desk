@@ -310,9 +310,26 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(stale["reason"], "snapshot_stale")
         unconfirmed = _pair(_mint(47))
         unconfirmed["confirmed_market_cap_usd"] = unconfirmed["market_cap_usd"]
+        unconfirmed["pair_address"] = "SMALL"
         cross_source.clear_fetcher()
-        self.assertEqual(memecoin_desk.scout(unconfirmed, now=NOW)["reason"], "market_cap_unconfirmed")
+        self.assertEqual(memecoin_desk.scout(unconfirmed, now=NOW)["reason"], "pool_missing")
+        bare = _passing_cross(_mint(47))
+        bare["tracker"]["pools"][0]["marketCap"] = {"quote": "1", "usd": None}
+        cross_source.note_bundle(_mint(47), bare)
         cross_source.arm_test_fetcher()
+        self.assertEqual(memecoin_desk.scout(unconfirmed, now=NOW)["reason"], "market_cap_unconfirmed")
+        chosen = _passing_cross(_mint(50))
+        for row in chosen["dex"]["pairs"]:
+            row["pairAddress"] = "FETCHED"
+        chosen["rugcheck"]["markets"][0]["pubkey"] = "FETCHED"
+        chosen["tracker"]["pools"][0]["poolId"] = "FETCHED"
+        cross_source.note_bundle(_mint(50), chosen)
+        stored = memecoin_desk.scout(_pair(_mint(50), pair_address="SMALL", pairs=[{"pairAddress": "SMALL"}]), now=NOW)
+        self.assertTrue(stored["ok"], stored)
+        self.assertEqual(memecoin_desk.view(stored["case_id"])["snapshot"]["pair_address"], "FETCHED")
+        ambiguous = _pair(_mint(51), pair_address="SMALL")
+        cross_source.note_bundle(_mint(51), __import__("tests.test_live_readonly", fromlist=["_two_pools"])._two_pools(_mint(51)))
+        self.assertEqual(memecoin_desk.scout(ambiguous, now=NOW)["reason"], "pool_ambiguous")
         self.assertEqual(memecoin_desk.scout(_pair(_mint(48), market_cap_basis=None), now=NOW)["reason"], "market_cap_basis")
         self.assertTrue(any(row["reason"] == "market_cap_missing" for row in db.query("SELECT reason FROM memecoin_log")))
 
@@ -338,16 +355,58 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.filter_case(dexscreener, _onchain(source="dexscreener"), now=NOW)["reason"], "onchain_source")
 
     def test_filter_rejects_missing_or_failed_onchain_facts(self):
-        self.assertEqual(memecoin_desk.filter_case(self._open(18), _onchain(mint_authority_revoked=False), now=NOW)["reason"], "mint_authority")
-        self.assertEqual(memecoin_desk.filter_case(self._open(19), _onchain(freeze_authority_revoked=False), now=NOW)["reason"], "freeze_authority")
-        self.assertEqual(memecoin_desk.filter_case(self._open(20), _onchain(lpLockedPct=99), now=NOW)["reason"], "lp")
-        self.assertEqual(memecoin_desk.filter_case(self._open(40), _onchain(lpLockedPct=True), now=NOW)["reason"], "lp")
-        missing_lp = _onchain()
-        missing_lp.pop("lpLockedPct")
-        self.assertEqual(memecoin_desk.filter_case(self._open(41), missing_lp, now=NOW)["reason"], "lp")
-        self.assertEqual(memecoin_desk.filter_case(self._open(21), _onchain(dev_holding_pct="3.01"), now=NOW)["reason"], "dev_holding")
+        mint_case = self._open(18)
+        minted = _passing_cross(_mint(18))
+        minted["rugcheck"]["mintAuthority"] = "still-live"
+        cross_source.note_bundle(_mint(18), minted)
+        arm_clean_creator(_mint(18))
+        self.assertEqual(memecoin_desk.filter_case(mint_case, _onchain(mint_authority_revoked=True), now=NOW)["reason"], "mint_authority")
+        freeze_case = self._open(19)
+        frozen = _passing_cross(_mint(19))
+        frozen["rugcheck"]["freezeAuthority"] = "still-live"
+        cross_source.note_bundle(_mint(19), frozen)
+        self.assertEqual(memecoin_desk.filter_case(freeze_case, _onchain(freeze_authority_revoked=True), now=NOW)["reason"], "freeze_authority")
+        lp_case = self._open(20)
+        unlocked = _passing_cross(_mint(20))
+        unlocked["rugcheck"]["markets"][0]["lp"]["lpLockedPct"] = 99
+        cross_source.note_bundle(_mint(20), unlocked)
+        self.assertEqual(memecoin_desk.filter_case(lp_case, _onchain(lpLockedPct=100), now=NOW)["reason"], "lp")
+        missing_case = self._open(41)
+        no_market = _passing_cross(_mint(41))
+        no_market["rugcheck"]["markets"] = []
+        cross_source.note_bundle(_mint(41), no_market)
+        self.assertEqual(memecoin_desk.filter_case(missing_case, _onchain(lpLockedPct=100), now=NOW)["reason"], "lp")
+        dev_case = self._open(21)
+        heavy = _passing_cross(_mint(21))
+        heavy["rugcheck"]["creatorBalance"] = 100
+        heavy["tracker"]["risk"]["dev"]["percentage"] = 10
+        cross_source.note_bundle(_mint(21), heavy)
+        arm_clean_creator(_mint(21))
+        self.assertEqual(memecoin_desk.filter_case(dev_case, _onchain(dev_holding_pct="0"), now=NOW)["reason"], "dev_holding")
+        conflict_case = self._open(40)
+        conflict = _passing_cross(_mint(40))
+        conflict["tracker"]["token"]["creation"]["creator"] = "OtherCreator"
+        cross_source.note_bundle(_mint(40), conflict)
+        arm_clean_creator(_mint(40))
+        self.assertEqual(memecoin_desk.filter_case(conflict_case, _onchain(dev_holding_pct="0"), now=NOW)["reason"], "creator_conflict")
         arm_clean_creator(_mint(22))
-        self.assertTrue(memecoin_desk.filter_case(self._open(22), _onchain(dev_holding_pct="3", cross_sources=_passing_cross(_mint(22))), now=NOW)["ok"])
+        caller_lp = self._open(22)
+        self.assertTrue(memecoin_desk.filter_case(caller_lp, _onchain(lpLockedPct=99, dev_holding_pct="3.01", mint_authority_revoked=False), now=NOW)["ok"])
+        rug_case = self._open(52)
+        rugged = _passing_cross(_mint(52))
+        rugged["rugcheck"]["risks"] = [{"name": "Deployer wallet", "description": "the deployer can mint", "level": "danger"}]
+        cross_source.note_bundle(_mint(52), rugged)
+        arm_clean_creator(_mint(52))
+        self.assertEqual(
+            memecoin_desk.filter_case(rug_case, _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1}), now=NOW)["reason"],
+            "dev_rug_history",
+        )
+        thin = self._open(53)
+        one_point = _passing_cross(_mint(53))
+        one_point["chart"] = {"holders": [{"holders": 0, "time": 1}, {"holders": 4, "time": 2}]}
+        cross_source.note_bundle(_mint(53), one_point)
+        arm_clean_creator(_mint(53))
+        self.assertEqual(memecoin_desk.filter_case(thin, _onchain(), now=NOW)["reason"], "holder_growth_unproven")
         supplied = _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 2})
         self.assertEqual(memecoin_desk.filter_case(self._open(23), supplied, now=NOW)["reason"], "dev_rug_history_unverified")
         self.assertEqual(memecoin_desk.filter_case(self._open(24), _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 1, "tokens_seen": 4}), now=NOW)["reason"], "dev_rug_history_unverified")
@@ -637,7 +696,7 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(opened.json()["reason"], "caller_snapshot_not_the_handoff")
         nested = client.post("/api/memecoin/filter", headers=AUTH, json={
             "case_id": "nope",
-            "onchain": {"cross_sources": {"pair_id": "caller"}, "confirmed_market_cap_usd": "1"},
+            "onchain": {"cross_sources": {"pair_id": "caller"}, "confirmed_market_cap_usd": "1", "dev_holding_pct": "0", "pair_address": "SMALL"},
         })
         self.assertEqual(nested.status_code, 400, nested.text)
         ran = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81), "slippage_allowance_bps": 50, "price_transport": "injected"})
