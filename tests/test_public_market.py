@@ -59,6 +59,9 @@ class PublicAdapterTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
         db.init_db()
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        import cross_source
+        cross_source.arm_test_fetcher()
+        self.addCleanup(cross_source.clear_fetcher)
         from tests.test_memecoin_desk import _arm_recorded_exit
         original = memecoin_desk.reserve_exit
 
@@ -153,7 +156,7 @@ class PublicAdapterTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": __import__("cross_source").pair_id_for(MINT),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"])
@@ -310,7 +313,7 @@ class PublicAdapterTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": swap_mint, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": __import__("cross_source").pair_id_for(swap_mint),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "10",
         }, now=NOW)
         onchain = {

@@ -1258,10 +1258,8 @@ def agents_token_buy(request: Request, body: dict | None = None) -> JSONResponse
     return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
 
 
-_MEMECOIN_SCOUT = {
-    "mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "market_cap_basis",
-    "confirmed_market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1",
-}
+_MEMECOIN_SCOUT = {"mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1"}
+_UNTRUSTED_FIELDS = {"confirmed_market_cap_usd", "cross_sources", "pair_id"}
 
 
 def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:
@@ -1269,7 +1267,19 @@ def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:
     _reject_tree(body)
     if not isinstance(body, dict) or set(body) != allowed or "stage" in body or "passed" in body:
         raise HTTPException(status_code=400, detail="unexpected field")
+    if _contains_untrusted(body):
+        raise HTTPException(status_code=400, detail="unexpected field")
     return body
+
+
+def _contains_untrusted(body) -> bool:
+    if isinstance(body, dict):
+        if _UNTRUSTED_FIELDS.intersection(body):
+            return True
+        return any(_contains_untrusted(value) for value in body.values())
+    if isinstance(body, list):
+        return any(_contains_untrusted(value) for value in body)
+    return False
 
 
 @router.post("/api/memecoin/sol-usd")

@@ -94,12 +94,18 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             break
     if chosen is None:
         return refused | {"reason": "pair_missing"}
-    import solana_tx
-    quote = chosen.get("quoteToken")
-    if not isinstance(quote, dict) or not isinstance(quote.get("address"), str) or quote.get("address") == "":
-        return refused | {"reason": "quote_unknown"}
-    if quote.get("address") != solana_tx.NATIVE_MINT:
-        return refused | {"reason": "quote_not_sol"}
+    import cross_source
+    selected, why = cross_source.select_pair(payload, mint, "")
+    if selected is None:
+        quote = chosen.get("quoteToken")
+        if not isinstance(quote, dict) or not isinstance(quote.get("address"), str) or quote.get("address") == "":
+            return refused | {"reason": "quote_unknown"}
+        if why == "pool_ambiguous":
+            return refused | {"reason": "pool_ambiguous"}
+        if quote.get("address") != __import__("solana_tx").NATIVE_MINT:
+            return refused | {"reason": "quote_not_sol"}
+        return refused | {"reason": why or "pool_missing"}
+    chosen = selected
     created = chosen.get("pairCreatedAt")
     if isinstance(created, bool) or not isinstance(created, int):
         return refused | {"reason": "pair_created_at"}
@@ -141,7 +147,7 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             "pair_created_at": created,
             "market_cap_usd": format(market_cap, "f"),
             "market_cap_basis": "marketCap",
-            "confirmed_market_cap_usd": None if _num(chosen.get("confirmedMarketCap")) is None else format(_num(chosen.get("confirmedMarketCap")), "f"),
+            "pair_address": chosen.get("pairAddress"),
             "liquidity_usd": format(liq, "f"),
             "price_usd": format(price, "f"),
             "price_change_h1": format(move, "f"),

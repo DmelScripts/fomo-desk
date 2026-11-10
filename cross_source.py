@@ -28,9 +28,11 @@ CREATOR_RUG_RISK = "Creator history of rugged tokens"
 DAS_PAGE_LIMIT = 20
 # A creator or dev risk fails when its name or description contains the stem
 # "rug" (case-insensitive: "rugged", "Rug pull history") or its level is
-# "danger" and the text refers to the creator or the dev.
+# "danger" and the text refers to the creator, the dev, or the account that
+# deployed or owns the mint. The stem "rug" also matches "drug" and "shrug";
+# those false positives fail closed on purpose.
 RUG_STEMS = ("rug",)
-CREATOR_RISK_WORDS = ("creator", "dev")
+CREATOR_RISK_WORDS = ("deployer", "owner", "creator", "dev", "developer", "authority")
 
 
 def quote_is_sol(quote) -> bool:
@@ -38,6 +40,131 @@ def quote_is_sol(quote) -> bool:
     if not isinstance(quote, dict):
         return False
     return quote.get("address") == SOL_MINT
+
+
+_FETCHER = None
+
+
+def set_fetcher(fetcher) -> None:
+    """Install the desk's RugCheck and Solana Tracker reader. A caller body is not this."""
+    global _FETCHER
+    _FETCHER = fetcher if callable(fetcher) else None
+
+
+def clear_fetcher() -> None:
+    global _FETCHER
+    _FETCHER = None
+    _TEST_CAPS.clear()
+    _TEST_BUNDLES.clear()
+
+
+_TEST_CAPS: dict[str, str] = {}
+_TEST_BUNDLES: dict[str, dict] = {}
+
+
+def pair_id_for(mint: str) -> str:
+    return "P" + mint[:20]
+
+
+def note_cap(mint: str, cap) -> None:
+    _TEST_CAPS[mint] = str(cap)
+
+
+def note_bundle(mint: str, bundle: dict) -> None:
+    _TEST_BUNDLES[mint] = bundle
+
+
+def arm_test_fetcher() -> None:
+    """A fixture reader for tests. Production leaves the fetcher unset."""
+
+    def fetch(kind, mint, pair_id=None):
+        if mint in _TEST_BUNDLES:
+            bundle = _TEST_BUNDLES[mint]
+            mapped = {
+                "dex": "dex",
+                "rugcheck": "rugcheck",
+                "solana_tracker_token": "tracker",
+                "holders_chart": "chart",
+                "das": "das",
+                "deployer": "deployer",
+            }
+            return bundle.get(mapped.get(kind, kind))
+        cap = _TEST_CAPS.get(mint, "1000000")
+        pid = pair_id if isinstance(pair_id, str) and pair_id else pair_id_for(mint or "")
+        if kind == "dex":
+            return {"pairs": [{
+                "pairAddress": pid,
+                "baseToken": {"address": mint},
+                "quoteToken": {"address": SOL_MINT},
+                "marketCap": cap,
+                "liquidity": {"usd": "1"},
+            }]}
+        if kind == "rugcheck":
+            return {
+                "creator": "SameCreator", "creatorBalance": 0, "token": {"supply": 1000},
+                "mintAuthority": None, "freezeAuthority": None, "risks": [],
+                "creatorTokens": [{"mint": mint}],
+                "markets": [{"pubkey": pid, "lp": {"quoteUSD": cap, "lpLockedPct": 100}}],
+            }
+        if kind == "solana_tracker_token":
+            return {
+                "holders": 10,
+                "token": {"creation": {"creator": "SameCreator"}},
+                "risk": {"dev": {"percentage": 0}, "risks": []},
+                "pools": [{
+                    "poolId": pid, "lpBurn": 100,
+                    "security": {"mintAuthority": None, "freezeAuthority": None},
+                    "liquidity": {"quote": "1", "usd": 1},
+                    "marketCap": {"quote": "1", "usd": cap},
+                }],
+            }
+        if kind == "holders_chart":
+            return {"holders": [{"holders": 2, "time": 1}, {"holders": 4, "time": 2}]}
+        if kind == "das":
+            return {"result": {"total": 1, "items": [{"id": mint}]}}
+        if kind == "deployer":
+            return {"total": 1, "data": [{"mint": mint}]}
+        return None
+
+    set_fetcher(fetch)
+
+
+def _fetch(kind: str, mint: str, pair_id: str | None = None):
+    if not callable(_FETCHER):
+        return None
+    try:
+        return _FETCHER(kind, mint, pair_id)
+    except Exception:
+        return None
+
+
+def fetch_market_cap(mint: str, pair_id: str):
+    """Market cap of this pool from the desk's Solana Tracker read. Not a request field."""
+    body = _fetch("solana_tracker_token", mint, pair_id)
+    pool = _matched_pool(body, pair_id)
+    cap = pool.get("marketCap") if isinstance(pool, dict) and isinstance(pool.get("marketCap"), dict) else None
+    if not isinstance(cap, dict):
+        return None
+    return _money(cap.get("usd"))
+
+
+def fetch_bundle(mint: str, pair_id: str):
+    """Bodies the filter fetched. pair_id is the one stored at scout time."""
+    kinds = (
+        ("dex", "dex"),
+        ("rugcheck", "rugcheck"),
+        ("tracker", "solana_tracker_token"),
+        ("chart", "holders_chart"),
+        ("das", "das"),
+        ("deployer", "deployer"),
+    )
+    bundle = {"mint": mint, "pair_id": pair_id if isinstance(pair_id, str) else ""}
+    for key, kind in kinds:
+        body = _fetch(kind, mint, pair_id)
+        if body is None:
+            return None
+        bundle[key] = body
+    return bundle
 
 
 def within(left, right, tolerance=LIQUIDITY_SOURCE_TOLERANCE) -> bool:
@@ -77,12 +204,13 @@ def _iter_pairs(dex_body):
             yield pair
 
 
-def select_pair(dex_body, mint: str, pair_id: str):
-    """The one pool for this mint, quoted in native wSOL, at this exact pair id.
+def select_pair(dex_body, mint: str, pair_id: str = ""):
+    """The one native-wSOL pool for this mint.
 
-    Base58 ids are compared with ``==``. A different case is a different id.
+    More than one such pool is pool_ambiguous. None is pool_missing. A supplied
+    pair id must equal that pool's pairAddress exactly; base58 is not case-folded.
     """
-    if not isinstance(mint, str) or mint == "" or not isinstance(pair_id, str):
+    if not isinstance(mint, str) or mint == "":
         return None, "pool_missing"
     matched = []
     seen = set()
@@ -93,15 +221,16 @@ def select_pair(dex_body, mint: str, pair_id: str):
             continue
         if not quote_is_sol(pair.get("quoteToken")):
             continue
-        if pair_id != "" and address != pair_id:
-            continue
         seen.add(address)
         matched.append(pair)
     if not matched:
         return None, "pool_missing"
     if len(matched) > 1:
         return None, "pool_ambiguous"
-    return matched[0], None
+    only = matched[0]
+    if isinstance(pair_id, str) and pair_id != "" and only.get("pairAddress") != pair_id:
+        return None, "pool_missing"
+    return only, None
 
 
 def _matched_market(rugcheck_body, pool_id):
@@ -210,7 +339,12 @@ def _risk_items(body) -> list:
 
 
 def creator_risk(item) -> bool:
-    """True for a rug stem, or a danger-level creator/dev risk. See RUG_STEMS."""
+    """True for a rug stem, or a danger-level risk naming the creator.
+
+    CREATOR_RISK_WORDS includes deployer, owner, creator, dev, developer, and
+    authority. A stem match also catches drug and shrug. Those false positives
+    fail closed.
+    """
     if isinstance(item, str):
         text = item.lower()
         return any(stem in text for stem in RUG_STEMS)
@@ -341,15 +475,31 @@ def lp_check(rugcheck_body, tracker_body, pool_id: str) -> dict:
     return {"status": "PASS", "reason": None}
 
 
-def _quote_status(dex_body, mint: str, pair_id: str) -> dict:
-    base_matches = []
+def _base_pair_id(dex_body, mint: str) -> str:
+    """The mint's pair id for LP and authority reads. Empty when it is not unique."""
+    found = []
     for pair in _iter_pairs(dex_body):
         base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
-        if base.get("address") == mint and (pair_id == "" or pair.get("pairAddress") == pair_id):
-            base_matches.append(pair)
-    if not base_matches:
+        address = pair.get("pairAddress")
+        if base.get("address") == mint and isinstance(address, str) and address not in found:
+            found.append(address)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+def _quote_status(dex_body, mint: str, pair_id: str) -> dict:
+    bases = []
+    for pair in _iter_pairs(dex_body):
+        base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+        if base.get("address") == mint:
+            bases.append(pair)
+    if not bases:
         return {"status": "FAIL-CLOSED", "reason": "quote_unknown"}
-    quote = base_matches[0].get("quoteToken")
+    chosen = [pair for pair in bases if pair_id == "" or pair.get("pairAddress") == pair_id]
+    if pair_id != "" and not chosen:
+        return {"status": "FAIL-CLOSED", "reason": "pool_missing"}
+    quote = (chosen or bases)[0].get("quoteToken")
     if not isinstance(quote, dict) or not isinstance(quote.get("address"), str) or quote.get("address") == "":
         return {"status": "FAIL-CLOSED", "reason": "quote_unknown"}
     if quote.get("address") != SOL_MINT:
@@ -364,18 +514,13 @@ def judge(bundle: dict) -> dict:
     st = bundle.get("tracker")
     mint = bundle.get("mint") if isinstance(bundle.get("mint"), str) else ""
     pair_id = bundle.get("pair_id") if isinstance(bundle.get("pair_id"), str) else ""
-    if pair_id == "":
-        for pair in _iter_pairs(dex):
-            base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
-            if base.get("address") == mint and isinstance(pair.get("pairAddress"), str):
-                pair_id = pair["pairAddress"]
-                break
-    pool_id = pair_id
+    selected, why = select_pair(dex, mint, pair_id)
+    pool_id = selected["pairAddress"] if selected is not None else _base_pair_id(dex, mint)
     checks = {
         "quote_sol": _quote_status(dex, mint, pair_id),
         "mint_freeze_revoked": authority_check(rc, st, pool_id),
         "lp_100": lp_check(rc, st, pool_id),
-        "liq_ge_25pct": liquidity_check(dex, rc, st, mint, pair_id),
+        "liq_ge_25pct": liquidity_check(dex, rc, st, mint, pair_id) if selected is not None else {"status": "FAIL-CLOSED", "reason": why or "pool_missing"},
         "dev_le_3pct": dev_check(rc, st),
         "no_past_rug": rug_check(rc, st, bundle.get("das"), bundle.get("deployer"), mint),
         "holder_growth": holder_check(bundle.get("chart"), st, rc, mint),

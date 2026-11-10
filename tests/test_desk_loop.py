@@ -3,6 +3,7 @@ import os
 import unittest
 from pathlib import Path
 
+import cross_source
 import desk_loop
 import memecoin_desk
 import solana_tx
@@ -106,6 +107,9 @@ class DeskLoopTests(unittest.TestCase):
         import db
         db.init_db()
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        import cross_source
+        cross_source.arm_test_fetcher()
+        self.addCleanup(cross_source.clear_fetcher)
 
     def test_a_missing_stalkchain_key_stops_the_handoff(self):
         def transport(request):
@@ -1020,7 +1024,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(MINT),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         snap = memecoin_desk.view(opened["case_id"])["snapshot"]
@@ -1093,7 +1097,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(MINT),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         case_id = opened["case_id"]
@@ -1261,7 +1265,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(MINT),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         case_id = opened["case_id"]
@@ -1324,7 +1328,7 @@ class DeskLoopTests(unittest.TestCase):
         live = memecoin_desk.scout({
             "mint": solana_tx.b58encode(b"\x42" * 32), "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(solana_tx.b58encode(b"\x42" * 32)),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         db.execute("UPDATE memecoin_cases SET stage = 'protected', ledger = 'live', ledger_provenance = 'server' WHERE id = ?", (live["case_id"],))
@@ -1355,7 +1359,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(MINT),
             "liquidity_usd": "250000", "price_usd": "9", "price_change_h1": "1",
         }, now=WHEN)
         case_id = opened["case_id"]
@@ -1941,7 +1945,7 @@ conn.close()
         opened = memecoin_desk.scout({
             "mint": mint, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(mint),
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=WHEN)
         case_id = opened["case_id"]

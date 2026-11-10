@@ -8,6 +8,7 @@ import time
 import unittest
 from decimal import Decimal
 
+import cross_source
 import db
 import memecoin_desk
 import phantom_transport
@@ -55,13 +56,15 @@ def _pair(mint: str, **over):
         "pair_created_at": int((NOW - 3600) * 1000),
         "market_cap_usd": "1000000",
         "market_cap_basis": "marketCap",
+        "pair_address": cross_source.pair_id_for(mint),
         "liquidity_usd": "250000",
         "price_usd": "1",
         "price_change_h1": "10",
     }
     body.update(over)
-    if "confirmed_market_cap_usd" not in body:
-        body["confirmed_market_cap_usd"] = body["market_cap_usd"]
+    if "pair_address" not in over:
+        body["pair_address"] = cross_source.pair_id_for(mint)
+    cross_source.note_cap(mint, body.get("market_cap_usd"))
     return body
 
 
@@ -104,7 +107,7 @@ def _bind_exit(case_id: str) -> dict:
 
 def _passing_cross(mint: str, quote="300000", dex_cap="1000000", tracker_cap="1000000"):
     """Quote-side liquidity and two confirmed caps. DexScreener liquidity.usd is noise."""
-    pool = "P" + mint[:20]
+    pool = cross_source.pair_id_for(mint)
     return {
         "mint": mint,
         "pair_id": pool,
@@ -233,6 +236,8 @@ class MemecoinDeskTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
         db.init_db()
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        cross_source.arm_test_fetcher()
+        self.addCleanup(cross_source.clear_fetcher)
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
         db.set_setting("agents_enabled", "0", "test")
@@ -304,8 +309,10 @@ class MemecoinDeskTests(unittest.TestCase):
         stale = memecoin_desk.scout(_pair(_mint(14), fetched_at=NOW - 31), now=NOW)
         self.assertEqual(stale["reason"], "snapshot_stale")
         unconfirmed = _pair(_mint(47))
-        del unconfirmed["confirmed_market_cap_usd"]
+        unconfirmed["confirmed_market_cap_usd"] = unconfirmed["market_cap_usd"]
+        cross_source.clear_fetcher()
         self.assertEqual(memecoin_desk.scout(unconfirmed, now=NOW)["reason"], "market_cap_unconfirmed")
+        cross_source.arm_test_fetcher()
         self.assertEqual(memecoin_desk.scout(_pair(_mint(48), market_cap_basis=None), now=NOW)["reason"], "market_cap_basis")
         self.assertTrue(any(row["reason"] == "market_cap_missing" for row in db.query("SELECT reason FROM memecoin_log")))
 
@@ -315,10 +322,16 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertTrue(memecoin_desk.filter_case(exact, _onchain(cross_sources=_passing_cross(_mint(15))), now=NOW)["ok"])
         missing = self._open(16, market_cap_usd="1000000", liquidity_usd="250000")
         arm_clean_creator(_mint(16))
-        self.assertEqual(memecoin_desk.filter_case(missing, _onchain(), now=NOW)["reason"], "liquidity_source_missing")
+        cross_source.clear_fetcher()
+        self.assertEqual(
+            memecoin_desk.filter_case(missing, _onchain(cross_sources=_passing_cross(_mint(16))), now=NOW)["reason"],
+            "liquidity_source_missing",
+        )
+        cross_source.arm_test_fetcher()
         short = self._open(46, market_cap_usd="1000000", liquidity_usd="999999")
         arm_clean_creator(_mint(46))
-        refused = memecoin_desk.filter_case(short, _onchain(cross_sources=_passing_cross(_mint(46), quote="26", dex_cap="100", tracker_cap="300")), now=NOW)
+        cross_source.note_bundle(_mint(46), _passing_cross(_mint(46), quote="26", dex_cap="100", tracker_cap="300"))
+        refused = memecoin_desk.filter_case(short, _onchain(cross_sources=_passing_cross(_mint(46))), now=NOW)
         self.assertEqual(refused["reason"], "liquidity_below_25pct_mcap")
         self.assertEqual(memecoin_desk.view(short)["stage"], "rejected")
         dexscreener = self._open(17)
@@ -615,9 +628,18 @@ class MemecoinDeskTests(unittest.TestCase):
         routed = client.post("/api/memecoin/protect", headers=AUTH, json={"case_id": "nope", "transaction": _buy(_mint(81))})
         self.assertEqual(routed.status_code, 400)
         moment = time.time()
-        opened = client.post("/api/memecoin/scout", headers=AUTH, json=_pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000)))
+        posted = _pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000))
+        self.assertEqual(client.post("/api/memecoin/scout", headers=AUTH, json=posted).status_code, 400)
+        for key in ("confirmed_market_cap_usd", "market_cap_basis", "pair_address"):
+            posted.pop(key, None)
+        opened = client.post("/api/memecoin/scout", headers=AUTH, json=posted)
         self.assertEqual(opened.status_code, 409, opened.text)
         self.assertEqual(opened.json()["reason"], "caller_snapshot_not_the_handoff")
+        nested = client.post("/api/memecoin/filter", headers=AUTH, json={
+            "case_id": "nope",
+            "onchain": {"cross_sources": {"pair_id": "caller"}, "confirmed_market_cap_usd": "1"},
+        })
+        self.assertEqual(nested.status_code, 400, nested.text)
         ran = client.post("/api/memecoin/run", headers=AUTH, json={"mint": _mint(81), "slippage_allowance_bps": 50, "price_transport": "injected"})
         self.assertEqual(ran.status_code, 409, ran.text)
         self.assertEqual(ran.json()["reason"], "scheduler_unarmed")

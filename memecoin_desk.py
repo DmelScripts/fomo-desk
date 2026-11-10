@@ -126,7 +126,10 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
         return _kill(None, mint, "scout", "market_cap", "dexscreener")
     import cross_source
-    other = _money(pair.get("confirmed_market_cap_usd"))
+    pair_address = pair.get("pair_address")
+    if not isinstance(pair_address, str) or pair_address == "":
+        return _kill(None, mint, "scout", "pool_missing", "dexscreener")
+    other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
         return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
     if pair.get("liquidity_usd") is None:
@@ -145,6 +148,7 @@ def scout(pair: dict, now: float | None = None) -> dict:
         "market_cap_usd": format(mcap, "f"),
         "market_cap_basis": "marketCap",
         "confirmed_market_cap_usd": format(other, "f"),
+        "pair_address": pair_address,
         "fdv_used_as_market_cap": False,
         "liquidity_usd": format(liq, "f"),
         "price_usd": format(price, "f"),
@@ -199,35 +203,38 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     if locked.get("ok") is not True:
         return refuse("lp")
     import dev_rug_history
-    cross = onchain.get("cross_sources") if isinstance(onchain.get("cross_sources"), dict) else None
-    if cross is not None:
-        import cross_source
-        judged = cross_source.judge(cross)
+    import cross_source
+    stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    bundle = cross_source.fetch_bundle(row["mint"], stored_pair) if stored_pair else None
+    dev = _num(onchain.get("dev_holding_pct"))
+    judged = None
+    if bundle is not None:
+        judged = cross_source.judge(bundle)
+        liq_row = judged["checks"]["liq_ge_25pct"]
+        if liq_row.get("reason") in {"pool_ambiguous", "pool_missing"}:
+            return refuse(liq_row["reason"])
         if judged["checks"]["quote_sol"]["status"] != "PASS":
             return refuse(judged["checks"]["quote_sol"].get("reason") or "quote_unknown")
         dev_row = judged["checks"]["dev_le_3pct"]
-        if dev_row["status"] != "PASS":
+        if dev is None and dev_row["status"] == "PASS":
+            dev = _num(dev_row.get("dev_holding_pct"))
+        elif dev_row["status"] != "PASS" and dev is None:
             return refuse("creator_conflict" if dev_row["reason"] == "creator_conflict" else "dev_holding")
         rug_row = judged["checks"]["no_past_rug"]
         if rug_row["status"] != "PASS":
             return refuse("dev_rug_history" if rug_row["status"] == "FAIL" else "dev_rug_history_unverified")
-        liq_row = judged["checks"]["liq_ge_25pct"]
         if liq_row["status"] != "PASS":
             return refuse(liq_row.get("reason") or "liquidity_source_missing")
         snap = dict(snap)
         snap["liquidity_usd"] = liq_row.get("quote_usd")
         snap["market_cap_usd"] = liq_row.get("market_cap_usd")
-        dev = _num(dev_row.get("dev_holding_pct"))
-    else:
-        dev = _num(onchain.get("dev_holding_pct"))
     if dev is None:
         return refuse("dev_holding_missing")
     if dev > DEV_HOLDING_MAX:
         return refuse("dev_holding")
-    if cross is None:
-        rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
-        if rugs.get("ok") is not True:
-            return refuse(rugs.get("reason") or "dev_rug_history_unverified")
+    rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
+    if rugs.get("ok") is not True:
+        return refuse(rugs.get("reason") or "dev_rug_history_unverified")
     bundled = _num(onchain.get("bundled_launch_pct"))
     if bundled is None:
         return refuse("bundle_missing")
@@ -236,7 +243,7 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     change = _num(snap.get("price_change_h1"))
     if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
-    if cross is None:
+    if bundle is None:
         return refuse("liquidity_source_missing")
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))

@@ -78,6 +78,56 @@ def _load(symbol: str, kind: str):
     return json.loads((ROOT / "raw" / ("tok_%s_%s.json" % (symbol, kind))).read_text(encoding="utf-8"))
 
 
+def _two_pools(mint: str) -> dict:
+    """SMALL would pass 30/100 on its own. BIG is the other native-wSOL pool."""
+    sol = cross_source.SOL_MINT
+    small_id = "small-pool-" + mint[:8]
+    big_id = "big-pool-" + mint[:8]
+
+    def pool(pid, quote, cap):
+        return {
+            "pairAddress": pid,
+            "baseToken": {"address": mint},
+            "quoteToken": {"address": sol, "symbol": "SOL"},
+            "marketCap": cap,
+            "liquidity": {"usd": "1"},
+        }
+
+    return {
+        "mint": mint,
+        "dex": {"pairs": [pool(small_id, "30", "100"), pool(big_id, "300000", "1000000")]},
+        "rugcheck": {
+            "creator": "SameCreator", "creatorBalance": 0, "token": {"supply": 1000},
+            "mintAuthority": None, "freezeAuthority": None, "risks": [],
+            "creatorTokens": [{"mint": mint}],
+            "markets": [
+                {"pubkey": small_id, "lp": {"quoteUSD": "30", "lpLockedPct": 100}},
+                {"pubkey": big_id, "lp": {"quoteUSD": "300000", "lpLockedPct": 100}},
+            ],
+        },
+        "tracker": {
+            "holders": 10,
+            "token": {"creation": {"creator": "SameCreator"}},
+            "risk": {"dev": {"percentage": 0}, "risks": []},
+            "pools": [
+                {"poolId": small_id, "lpBurn": 100, "security": {"mintAuthority": None, "freezeAuthority": None},
+                 "liquidity": {"quote": "30", "usd": 1}, "marketCap": {"quote": "100", "usd": "100"}},
+                {"poolId": big_id, "lpBurn": 100, "security": {"mintAuthority": None, "freezeAuthority": None},
+                 "liquidity": {"quote": "300000", "usd": 1}, "marketCap": {"quote": "1000000", "usd": "1000000"}},
+            ],
+        },
+        "chart": {"holders": [{"holders": 2, "time": 1}, {"holders": 4, "time": 2}]},
+        "das": {"result": {"total": 1, "items": [{"id": mint}]}},
+        "deployer": {"total": 1, "data": [{"mint": mint}]},
+    }
+
+
+def _passing_decoy(mint: str) -> dict:
+    """A caller body that would pass if the filter trusted it."""
+    from tests.test_memecoin_desk import _passing_cross
+    return _passing_cross(mint)
+
+
 def _bundle(symbol: str) -> dict:
     return {
         "mint": TOKENS[symbol],
@@ -93,8 +143,27 @@ def _bundle(symbol: str) -> dict:
 class LiveReadonlyTests(unittest.TestCase):
     def test_each_saved_token_matches_the_report(self):
         self.assertTrue((ROOT / "REPORT.md").is_file())
+        files = {
+            "dex": "dex_pair",
+            "rugcheck": "rugcheck",
+            "solana_tracker_token": "st_token",
+            "holders_chart": "st_holders_chart",
+            "das": "das_byCreator",
+            "deployer": "st_deployer",
+        }
+
+        def fetch(kind, mint, pair_id=None):
+            symbol = next(name for name, value in TOKENS.items() if value == mint)
+            return _load(symbol, files[kind])
+
+        cross_source.set_fetcher(fetch)
+        self.addCleanup(cross_source.clear_fetcher)
         for symbol, expected in EXPECTED.items():
-            verdict = cross_source.judge(_bundle(symbol))
+            fetched = cross_source.fetch_bundle(TOKENS[symbol], "")
+            self.assertIsNotNone(fetched, symbol)
+            verdict = cross_source.judge(fetched)
+            direct = cross_source.judge(_bundle(symbol))
+            self.assertEqual(verdict["overall"], direct["overall"], symbol)
             self.assertFalse(verdict["ok"], symbol)
             self.assertEqual(verdict["overall"], expected["overall"], symbol)
             for name, status in expected.items():
@@ -143,13 +212,13 @@ class LiveReadonlyTests(unittest.TestCase):
         twin["pairAddress"] = real["pairAddress"].swapcase()
         cross_source.unwrap(decoy["dex"])["pairs"] = [twin, real]
         decoy["pair_id"] = real["pairAddress"]
-        self.assertEqual(cross_source.judge(decoy)["checks"]["liq_ge_25pct"]["status"] != "pool_ambiguous", True)
+        self.assertEqual(cross_source.judge(decoy)["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
         self.assertEqual(cross_source.select_pair({"pairs": [real]}, TOKENS["X"], twin["pairAddress"])[1], "pool_missing")
-        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[0]["pairAddress"], real["pairAddress"])
+        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[1], "pool_ambiguous")
         other = json.loads(json.dumps(real))
         other["pairAddress"] = real["pairAddress"][:-1] + ("A" if real["pairAddress"][-1] != "A" else "B")
         cross_source.unwrap(decoy["dex"])["pairs"] = [other, real]
-        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[0]["pairAddress"], real["pairAddress"])
+        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[1], "pool_ambiguous")
         self.assertEqual(cross_source.select_pair({"pairs": [other, real]}, TOKENS["X"], "")[1], "pool_ambiguous")
         body = cross_source.unwrap(trump["rugcheck"])
         body["risks"] = [{"name": "Rug pull history", "description": "serial", "level": "warning"}]
@@ -158,6 +227,8 @@ class LiveReadonlyTests(unittest.TestCase):
         body["risks"] = [{"name": "Creator concentration", "description": "dev wallet", "level": "danger"}]
         danger = cross_source.rug_check(trump["rugcheck"], trump["tracker"], trump["das"], trump["deployer"], TOKENS["TRUMP"])
         self.assertEqual(danger["reason"], "creator_rugged_history")
+        body["risks"] = [{"name": "Deployer wallet", "description": "controls the mint", "level": "danger"}]
+        self.assertTrue(cross_source.creator_risk(body["risks"][0]))
 
     def test_scout_rejects_an_unconfirmed_market_cap_and_the_filter_uses_the_cross_check(self):
         _tmp, restore = temp_desk_env()
@@ -173,37 +244,61 @@ class LiveReadonlyTests(unittest.TestCase):
             "market_cap_usd": "1000000",
             "market_cap_basis": "marketCap",
             "confirmed_market_cap_usd": "2358",
+            "pair_address": cross_source.pair_id_for(mint),
             "liquidity_usd": "250000",
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
         self.assertEqual(unconfirmed["reason"], "market_cap_unconfirmed")
-        opened = memecoin_desk.scout({
-            "mint": mint + "x",
-            "source": "dexscreener",
-            "fetched_at": NOW,
-            "pair_created_at": int((NOW - 3600) * 1000),
-            "market_cap_usd": "1000000",
-            "market_cap_basis": "marketCap",
-            "liquidity_usd": "250000",
-            "price_usd": "1",
-            "price_change_h1": "10",
-        }, now=NOW)
-        self.assertEqual(opened["reason"], "market_cap_unconfirmed")
-        opened = memecoin_desk.scout({
-            "mint": mint + "x",
+        supplied = dict(unconfirmed) if False else {
+            "mint": mint,
             "source": "dexscreener",
             "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000),
             "market_cap_usd": "1000000",
             "market_cap_basis": "marketCap",
             "confirmed_market_cap_usd": "1000000",
+            "pair_address": cross_source.pair_id_for(mint),
+            "liquidity_usd": "250000",
+            "price_usd": "1",
+            "price_change_h1": "10",
+        }
+        cross_source.clear_fetcher()
+        self.assertEqual(memecoin_desk.scout(supplied, now=NOW)["reason"], "market_cap_unconfirmed")
+        opened = memecoin_desk.scout({
+            "mint": mint + "x",
+            "source": "dexscreener",
+            "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000),
+            "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap",
+            "pair_address": cross_source.pair_id_for(mint + "x"),
+            "liquidity_usd": "250000",
+            "price_usd": "1",
+            "price_change_h1": "10",
+        }, now=NOW)
+        self.assertEqual(opened["reason"], "market_cap_unconfirmed")
+        case_mint = mint + "x"
+        cross_source.note_cap(case_mint, "1000000")
+        cross_source.arm_test_fetcher()
+        self.addCleanup(cross_source.clear_fetcher)
+        opened = memecoin_desk.scout({
+            "mint": case_mint,
+            "source": "dexscreener",
+            "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000),
+            "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap",
+            "confirmed_market_cap_usd": "1000000",
+            "pair_address": cross_source.pair_id_for(case_mint),
             "liquidity_usd": "250000",
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"], opened)
-        bundle = _bundle("TRUMP")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["snapshot"]["pair_address"], cross_source.pair_id_for(case_mint))
+        pools = _two_pools(case_mint)
+        cross_source.note_bundle(case_mint, pools)
         refused = memecoin_desk.filter_case(opened["case_id"], {
             "source": "solana_mint",
             "fetched_at": NOW,
@@ -211,10 +306,32 @@ class LiveReadonlyTests(unittest.TestCase):
             "freeze_authority_revoked": True,
             "lpLockedPct": 100,
             "bundled_launch_pct": 0,
-            "cross_sources": bundle,
+            "dev_holding_pct": "0",
+            "cross_sources": _passing_decoy(case_mint),
         }, now=NOW)
-        self.assertEqual(refused["reason"], "dev_rug_history", refused)
-        self.assertFalse(refused.get("live_ready") is True)
+        self.assertEqual(refused["reason"], "pool_ambiguous", refused)
+        judged = cross_source.judge(pools)
+        self.assertFalse(judged["ok"])
+        self.assertEqual(judged["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
+        mismatch = _passing_decoy(case_mint)
+        mismatch["pair_id"] = "not-the-stored-pool"
+        mismatch["dex"]["pairs"][0]["pairAddress"] = "not-the-stored-pool"
+        mismatch["rugcheck"]["markets"][0]["pubkey"] = "not-the-stored-pool"
+        mismatch["tracker"]["pools"][0]["poolId"] = "not-the-stored-pool"
+        cross_source.note_bundle(case_mint, mismatch)
+        import db
+        db.execute("UPDATE memecoin_cases SET stage = 'scout_passed' WHERE id = ?", (opened["case_id"],))
+        missed = memecoin_desk.filter_case(opened["case_id"], {
+            "source": "solana_mint",
+            "fetched_at": NOW,
+            "mint_authority_revoked": True,
+            "freeze_authority_revoked": True,
+            "lpLockedPct": 100,
+            "bundled_launch_pct": 0,
+            "dev_holding_pct": "0",
+            "cross_sources": _passing_decoy(case_mint),
+        }, now=NOW)
+        self.assertEqual(missed["reason"], "pool_missing", missed)
 
     def test_hermes_requires_a_bearer_and_does_not_use_the_stale_onchain_account(self):
         saved = json.loads((ROOT / "raw" / "pyth_0.json").read_text(encoding="utf-8"))
