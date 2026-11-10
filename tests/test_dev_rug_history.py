@@ -30,8 +30,10 @@ def _page(ids, total=None):
 class DevRugHistoryTests(unittest.TestCase):
     def setUp(self):
         dev_rug_history.clear_cache()
+        dev_rug_history.clear_recorded()
         dev_rug_history.reset_source()
         self.addCleanup(dev_rug_history.clear_cache)
+        self.addCleanup(dev_rug_history.clear_recorded)
         self.addCleanup(dev_rug_history.reset_source)
         os.environ.pop(dev_rug_history.KEY_ENV, None)
 
@@ -60,10 +62,17 @@ class DevRugHistoryTests(unittest.TestCase):
         dev_rug_history.clear_cache()
         nested = _page([MINT, OTHER])
         nested["result"]["items"][1]["rugcheck"] = {"rugged": True}
-        flagged = dev_rug_history.read_history(MINT, asset=asset, assets=nested, now=11)
+        nested["result"]["items"][1]["rugged"] = False
+        ignored = dev_rug_history.read_history(MINT, asset=asset, assets=nested, now=11)
+        self.assertEqual(ignored["reason"], "dev_rug_history_unverified")
+        self.assertEqual(ignored["cause"], "rugged_not_fetched")
+        dev_rug_history.remember_report(OTHER, {"rugged": True, "creator": CREATOR})
+        flagged = dev_rug_history.read_history(MINT, asset=asset, assets=nested, now=12)
         self.assertEqual(flagged["reason"], "dev_rug_history")
         self.assertEqual(flagged["rugs"], 1)
         self.assertTrue(flagged["source_wired"])
+        self.assertEqual(flagged["rugged_field_status"], "observed, undocumented")
+        dev_rug_history.clear_recorded()
         self.assertFalse(only["chain_complete"])
         authority = _asset([{"address": CREATOR, "share": 100, "verified": False}], [{"address": "auth", "scopes": []}])
         by_authority = dev_rug_history.read_history(MINT, asset=authority, assets=_page([MINT]), now=10)
@@ -83,26 +92,43 @@ class DevRugHistoryTests(unittest.TestCase):
         past = dev_rug_history.read_history(
             MINT, asset=asset, assets=_page([MINT, OTHER]), now=20,
         )
-        self.assertEqual(past["cause"], "undocumented_field")
+        self.assertEqual(past["cause"], "rugged_not_fetched")
         self.assertEqual(past["past_tokens"], 1)
-        self.assertIsNone(past["rugged_field"])
-        self.assertIsNone(dev_rug_history.RUGGED_FIELD)
-        invented = _page([MINT, OTHER])
-        invented["result"]["items"][1]["rugged"] = True
-        ignored = dev_rug_history.read_history(MINT, asset=asset, assets=invented, now=20)
-        self.assertEqual(ignored["cause"], "undocumented_field")
-        self.assertNotIn("rugged", ignored)
-        self.assertIsNone(ignored["rugged_field"])
+        self.assertEqual(dev_rug_history.RUGGED_FIELD_STATUS, "observed, undocumented")
+        dev_rug_history.remember_report(OTHER, {"rugged": "false", "creator": CREATOR})
+        self.assertEqual(dev_rug_history.read_history(MINT, asset=asset, assets=_page([MINT, OTHER]), now=21)["cause"], "rugged_not_bool")
+        dev_rug_history.remember_report(OTHER, {"rugged": False, "creator": "someone-else"})
+        self.assertEqual(dev_rug_history.read_history(MINT, asset=asset, assets=_page([MINT, OTHER]), now=22)["cause"], "creator_mismatch")
+        dev_rug_history.remember_report(OTHER, {"rugged": False, "creator": CREATOR}, status=200)
+        clean = dev_rug_history.read_history(MINT, asset=asset, assets=_page([MINT, OTHER]), now=23)
+        self.assertEqual(clean["rugs"], 0)
+        self.assertFalse(clean["cached"])
 
-    def test_a_repeat_within_the_ttl_uses_the_cache(self):
+    def test_a_clean_page_is_not_reused_and_a_rejection_can_be(self):
         first = dev_rug_history.read_history(MINT, creator=CREATOR, assets=_page([MINT]), now=100)
         self.assertEqual(first["rugs"], 0)
         self.assertFalse(first["cached"])
+        calls = []
+
+        def refuse(_request):
+            calls.append("network")
+            raise AssertionError("network")
+
+        original = dev_rug_history._post
+        dev_rug_history._post = refuse
+        self.addCleanup(lambda: setattr(dev_rug_history, "_post", original))
         second = dev_rug_history.read_history(MINT, creator=CREATOR, now=101, allow_network=True)
-        self.assertTrue(second["cached"], second)
-        self.assertEqual(second["rugs"], 0)
-        expired = dev_rug_history.read_history(MINT, creator=CREATOR, now=100 + dev_rug_history.CACHE_TTL_S + 1)
-        self.assertEqual(expired["cause"], "missing_key")
+        self.assertFalse(second["verified"])
+        self.assertNotEqual(second.get("rugs"), 0)
+        self.assertEqual(calls, [])
+        dev_rug_history.remember_report(OTHER, {"rugged": True, "creator": CREATOR})
+        grown = dev_rug_history.read_history(MINT, creator=CREATOR, assets=_page([MINT, OTHER]), now=102)
+        self.assertEqual(grown["reason"], "dev_rug_history")
+        self.assertFalse(grown["cached"])
+        repeated = dev_rug_history.read_history(MINT, creator=CREATOR, now=103, allow_network=True)
+        self.assertTrue(repeated["cached"])
+        self.assertEqual(repeated["reason"], "dev_rug_history")
+        self.assertEqual(calls, [])
 
     def test_the_key_is_not_in_the_result(self):
         os.environ[dev_rug_history.KEY_ENV] = SECRET

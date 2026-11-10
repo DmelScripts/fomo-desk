@@ -7,14 +7,13 @@ the update authority. ``getAssetsByCreator`` matches ``creatorAddress``, so an
 update authority that is not a creator returns a different set, and DAS is not
 a full chain history.
 
-RugCheck's swagger does not name a per-token rugged flag. ``GET
-/v1/tokens/{id}/report`` has no response schema. ``dto.TokenCheckSummary`` has
-no rugged field. ``services.AnalyticsStats.rugPullCount`` is a platform total.
-``GET /v1/stats/rugs/ticker`` is ``additionalProperties: true``. A past token
-therefore cannot be marked rugged. The reader fails closed with
-``dev_rug_history_unverified`` instead of inventing a field. A missing key, a
-fetch or parse error, or a truncated list does the same. No past token, with
-the current mint present in a complete page, is zero rugs.
+RugCheck ``GET /v1/tokens/{mint}/report`` is keyless. A live report observed
+on 2026-11-10 at 12:15 Asia/Saigon had a top-level boolean ``rugged`` and a
+``creator`` string. That boolean is not in the swagger, so it is labeled
+``observed, undocumented``. Only that fetched boolean is read. ``true``
+rejects. Anything else, including a value nested on a Helius asset or passed
+by the caller, fails closed. A clean pass uses a fresh Helius page. The cache
+can only repeat a rejection.
 
 The Helius key is ``HELIUS_API_KEY``. It is not written into results.
 """
@@ -31,13 +30,15 @@ MAX_TOKENS = 20
 TIMEOUT_S = 10
 CACHE_TTL_S = 300
 SOURCE = "helius_getAssetsByCreator"
-# Cited absence: https://api.rugcheck.xyz/swagger/doc.json
-RUGGED_FIELD = None
-RUGCHECK_SUMMARY = "https://api.rugcheck.xyz/v1/tokens/{id}/report/summary"
+# Observed on a live full report. Not in https://api.rugcheck.xyz/swagger/doc.json.
+RUGGED_FIELD = "rugged"
+RUGGED_FIELD_STATUS = "observed, undocumented"
+RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 _READER = None
-_CACHE: dict[str, tuple[float, tuple[str, ...]]] = {}
+_CACHE: dict[str, tuple[float, dict]] = {}
 _RECORDED: dict[str, dict] = {}
+_REPORTS: dict[str, dict] = {}
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -60,13 +61,19 @@ def clear_cache() -> None:
     _CACHE.clear()
 
 
-def remember(mint: str, asset, assets, reports=None) -> None:
-    """A recorded Helius page and RugCheck bodies. This is not a caller verdict."""
-    _RECORDED[mint] = {"asset": asset, "assets": assets, "reports": reports or {}}
+def remember(mint: str, asset, assets) -> None:
+    """A recorded Helius page for this mint. It is not a rug verdict."""
+    _RECORDED[mint] = {"asset": asset, "assets": assets}
+
+
+def remember_report(mint: str, body, status: int = 200) -> None:
+    """The body the RugCheck GET would return for this past mint."""
+    _REPORTS[mint] = {"status": status, "body": body}
 
 
 def clear_recorded() -> None:
     _RECORDED.clear()
+    _REPORTS.clear()
 
 
 def assess(reading, mint=None) -> dict:
@@ -82,8 +89,8 @@ def assess(reading, mint=None) -> dict:
     return {"ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE, "source_wired": True}
 
 
-def read_history(mint, creator=None, asset=None, assets=None, reports=None, now=None, allow_network: bool = False) -> dict:
-    """List one creator's assets, then stop because no rugged field is documented."""
+def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_network: bool = False) -> dict:
+    """A clear result reads a Helius page supplied for this call, then RugCheck."""
     moment = time.time() if now is None else now
     if not isinstance(moment, (int, float)) or isinstance(moment, bool):
         return _unverified("clock")
@@ -95,11 +102,7 @@ def read_history(mint, creator=None, asset=None, assets=None, reports=None, now=
             asset = recorded.get("asset")
         if assets is None:
             assets = recorded.get("assets")
-        if reports is None:
-            reports = recorded.get("reports")
         allow_network = False
-    if reports is None:
-        reports = {}
     if creator is not None and (not isinstance(creator, str) or creator == "" or "/" in creator):
         return _unverified("creator")
     if creator is None:
@@ -113,50 +116,46 @@ def read_history(mint, creator=None, asset=None, assets=None, reports=None, now=
             return _unverified(how or "creator")
     else:
         how = "caller"
-    cached = _CACHE.get(creator)
-    if assets is None and cached is not None and cached[0] >= moment:
-        listed = cached[1]
-        items = [{"id": item} for item in listed]
-        from_cache = True
-    else:
-        if assets is None:
-            fetched = _helius({
-                "jsonrpc": "2.0", "id": "1", "method": "getAssetsByCreator",
-                "params": {"creatorAddress": creator, "page": 1, "limit": MAX_TOKENS},
-            }, allow_network)
-            if fetched.get("ok") is not True:
-                return fetched
-            assets = fetched["body"]
-        parsed = _asset_ids(assets)
-        if parsed.get("ok") is not True:
-            return parsed
-        listed = parsed["ids"]
-        items = parsed["items"]
-        _CACHE[creator] = (float(moment) + CACHE_TTL_S, listed)
-        from_cache = False
-    if mint not in listed:
+    if assets is None:
+        cached = _CACHE.get(creator)
+        if cached is not None and cached[0] >= moment:
+            return dict(cached[1]) | {"cached": True}
+        fetched = _helius({
+            "jsonrpc": "2.0", "id": "1", "method": "getAssetsByCreator",
+            "params": {"creatorAddress": creator, "page": 1, "limit": MAX_TOKENS},
+        }, allow_network)
+        if fetched.get("ok") is not True:
+            return fetched
+        assets = fetched["body"]
+    parsed = _asset_ids(assets)
+    if parsed.get("ok") is not True:
+        if parsed.get("cause") == "truncated":
+            _cache_rejection(creator, moment, parsed)
+        return parsed
+    if mint not in parsed["ids"]:
         return _unverified("creator_not_in_index", creator=creator, creator_source=how)
-    past = [item for item in items if isinstance(item, dict) and item.get("id") != mint]
+    past = [item.get("id") for item in parsed["items"] if isinstance(item, dict) and item.get("id") != mint]
     rugs = 0
-    for item in past:
-        flag = _rugged_flag(item, reports)
-        if flag is None:
-            return _unverified(
-                "undocumented_field", creator=creator, creator_source=how,
-                past_tokens=len(past), cached=from_cache,
-            )
-        if flag is True:
+    for past_mint in past:
+        report = _rugcheck(past_mint, creator, allow_network)
+        if report.get("ok") is not True:
+            return report | {"creator": creator, "creator_source": how, "past_tokens": len(past), "cached": False}
+        if report.get("rugged") is True:
             rugs += 1
     if rugs > 0:
-        return {
+        rejected = {
             "ok": False, "verified": True, "reason": "dev_rug_history", "rugs": rugs,
             "source": SOURCE, "source_wired": True, "creator": creator, "creator_source": how,
-            "past_tokens": len(past), "cached": from_cache, "chain_complete": False,
+            "past_tokens": len(past), "cached": False, "chain_complete": False,
+            "rugged_field": RUGGED_FIELD, "rugged_field_status": RUGGED_FIELD_STATUS,
         }
+        _cache_rejection(creator, moment, rejected)
+        return rejected
     return {
         "ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE,
         "source_wired": True, "creator": creator, "creator_source": how, "past_tokens": len(past),
-        "cached": from_cache, "rugged_field": "rugged", "chain_complete": False,
+        "cached": False, "rugged_field": RUGGED_FIELD, "rugged_field_status": RUGGED_FIELD_STATUS,
+        "chain_complete": False,
         "limit": "getAssetsByCreator matches creatorAddress, not every mint that address can update",
     }
 
@@ -224,14 +223,38 @@ def _result(body):
     return body
 
 
-def _rugged_flag(item: dict, reports: dict):
-    """The RugCheck body nested on the past token. Only a boolean rugged is read."""
-    nested = item.get("rugcheck") if isinstance(item.get("rugcheck"), dict) else None
-    report = reports.get(item.get("id")) if isinstance(reports, dict) else None
-    body = report if isinstance(report, dict) else nested
-    if not isinstance(body, dict) or not isinstance(body.get("rugged"), bool):
-        return None
-    return body.get("rugged")
+def _cache_rejection(creator: str, moment: float, result: dict) -> None:
+    """Store a rejection only. A clear result is never cached."""
+    if result.get("verified") is True and result.get("rugs") == 0:
+        return
+    _CACHE[creator] = (float(moment) + CACHE_TTL_S, dict(result))
+
+
+def _rugcheck(mint: str, helius_creator: str, allow_network: bool) -> dict:
+    """GET the keyless full report. Ignore every rugged value that was not fetched."""
+    recorded = _REPORTS.get(mint)
+    if recorded is None:
+        if allow_network is not True or not isinstance(mint, str) or mint == "" or "/" in mint:
+            return _unverified("rugged_not_fetched")
+        request = urllib.request.Request(
+            RUGCHECK_REPORT.format(mint=mint),
+            headers={"accept": "application/json"},
+            method="GET",
+        )
+        try:
+            status, raw = _get(request)
+            body = json.loads(raw.decode("utf-8")) if status == 200 else None
+        except Exception:
+            return _unverified("rugcheck_fetch")
+    else:
+        status = recorded.get("status")
+        body = recorded.get("body")
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get(RUGGED_FIELD), bool):
+        return _unverified("rugged_not_bool" if status == 200 else "rugcheck_status")
+    creator = body.get("creator")
+    if isinstance(creator, str) and creator != "" and creator != helius_creator:
+        return _unverified("creator_mismatch")
+    return {"ok": True, "rugged": body[RUGGED_FIELD]}
 
 
 def _helius(payload: dict, allow_network: bool) -> dict:
@@ -256,6 +279,15 @@ def _helius(payload: dict, allow_network: bool) -> dict:
     return {"ok": True, "body": body}
 
 
+def _get(request):
+    opener = urllib.request.build_opener(_RefuseRedirect)
+    with opener.open(request, timeout=TIMEOUT_S) as response:
+        status = getattr(response, "status", 200)
+        if status != 200:
+            return status, b""
+        return status, response.read()
+
+
 def _post(request):
     opener = urllib.request.build_opener(_RefuseRedirect)
     with opener.open(request, timeout=TIMEOUT_S) as response:
@@ -268,8 +300,8 @@ def _unverified(cause: str, **extra) -> dict:
     body = {
         "ok": False, "verified": False, "reason": "dev_rug_history_unverified",
         "rugs": None, "source": SOURCE, "cause": cause, "rugged_field": RUGGED_FIELD,
-        "rugcheck_summary": RUGCHECK_SUMMARY, "fetched": cause == "fetch",
-        "source_wired": True,
+        "rugcheck_report": RUGCHECK_REPORT, "rugged_field_status": RUGGED_FIELD_STATUS,
+        "fetched": cause == "fetch", "source_wired": True,
     }
     body.update(extra)
     return body

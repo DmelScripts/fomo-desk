@@ -21,6 +21,7 @@ class PublicFilterDocTests(unittest.TestCase):
         self.assertEqual(catalog["lp_lock"]["pass_value"], 100)
         self.assertTrue(catalog["rug_history"]["source_wired"])
         self.assertIsNone(catalog["rug_history"]["documented_field"])
+        self.assertEqual(catalog["rug_history"]["rugged_field_status"], "observed, undocumented")
         self.assertFalse(catalog["birdeye_holder_chart"]["implemented"])
         self.assertFalse(catalog["helius_creator_assets"]["implemented"])
         self.assertTrue(catalog["holder_growth"]["viable"])

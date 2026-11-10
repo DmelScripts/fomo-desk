@@ -309,9 +309,10 @@ class MemecoinDeskTests(unittest.TestCase):
         }, {
             "result": {"total": 2, "page": 1, "limit": 20, "items": [
                 {"id": _mint(43), "interface": "FungibleToken"},
-                {"id": other, "interface": "FungibleToken", "rugcheck": {"rugged": True}},
+                {"id": other, "interface": "FungibleToken", "rugcheck": {"rugged": False}},
             ]},
         })
+        dev_rug_history.remember_report(other, {"rugged": True, "creator": "CreatorForNestedRug"})
         rugged = memecoin_desk.filter_case(self._open(43), _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1}), now=NOW)
         self.assertEqual(rugged["reason"], "dev_rug_history")
 
