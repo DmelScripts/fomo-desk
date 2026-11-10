@@ -175,7 +175,9 @@ class PublicAdapterTests(unittest.TestCase):
         arm_clean_creator(MINT)
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
-        self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
+        filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)
+        self.assertEqual(filtered["reason"], "bundle_unverified", filtered)
+        db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = ? AND stage = 'rejected'", (opened["case_id"],))
         snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
         snap["fixture"] = True
         snap["analyst_scored"] = False
@@ -331,7 +333,9 @@ class PublicAdapterTests(unittest.TestCase):
         arm_clean_creator(swap_mint)
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
-        self.assertTrue(memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)["ok"])
+        filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=NOW)
+        self.assertEqual(filtered["reason"], "bundle_unverified", filtered)
+        db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = ? AND stage = 'rejected'", (opened["case_id"],))
         snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
         snap["fixture"] = True
         snap["analyst_scored"] = False

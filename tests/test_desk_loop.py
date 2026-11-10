@@ -69,36 +69,28 @@ class DeskLoopTests(unittest.TestCase):
             return json.loads(stored)
 
         self.addCleanup(clear_filter_fixtures)
+        self.assertEqual(memecoin_desk.score_from_values({
+            "momentum": "100", "unique_buyers": "100", "buy_sell_ratio": "100",
+            "holder_growth": "100", "liq_mcap": "100", "smart_wallets": "100",
+        }), Decimal("85"))
+        self.assertEqual(memecoin_desk.score_from_values({
+            "momentum": "82", "unique_buyers": "82", "buy_sell_ratio": "82",
+            "holder_growth": "82", "liq_mcap": "82", "smart_wallets": "0",
+        }), Decimal("69.7"))
+        self.assertEqual(memecoin_desk.score_from_values({
+            "momentum": "70", "unique_buyers": "70", "buy_sell_ratio": "70",
+            "holder_growth": "70", "liq_mcap": "70", "smart_wallets": "0",
+        }), Decimal("59.5"))
         arm_holder_chart(100, 200)
         row("score-line")
         passed = memecoin_desk.analyze("score-line", components("100"), NOW)
-        self.assertTrue(passed["ok"], passed)
-        self.assertEqual(passed["stage"], "analyst_passed")
-        body = memecoin_desk.view("score-line")["snapshot"]
-        self.assertEqual(body["score"], "85")
-        self.assertEqual(body["analyst"]["smart_wallets_source"], "none_scored_zero")
-        self.assertEqual(body["analyst"]["smart_wallets"]["value"], "0")
-        self.assertEqual(body["analyst"]["weights"]["smart_wallets"], "15")
-        arm_holder_chart(100, 182)
-        row("score-line-short")
-        failed = memecoin_desk.analyze("score-line-short", components("82"), NOW)
-        self.assertEqual(failed["reason"], "score", failed)
-        self.assertEqual(memecoin_desk.view("score-line-short")["stage"], "rejected")
-        evidence = logged("score-line-short")
-        self.assertEqual(evidence["score"], "69.7")
-        self.assertLess(Decimal(evidence["score"]), Decimal("70"))
-        self.assertEqual(evidence["smart_wallets"]["value"], "0")
-        self.assertEqual(evidence["smart_wallets_source"], "none_scored_zero")
-        arm_holder_chart()
-        row("score-line-seventy")
-        seventy = memecoin_desk.analyze("score-line-seventy", components("70"), NOW)
-        self.assertEqual(seventy["reason"], "score", seventy)
-        self.assertEqual(logged("score-line-seventy")["score"], "59.5")
-        gap = components("100")
-        del gap["momentum"]
-        row("score-line-gap")
-        self.assertEqual(memecoin_desk.analyze("score-line-gap", gap, NOW)["reason"], "momentum_missing")
-        self.assertEqual(memecoin_desk.view("score-line")["stage"], "analyst_passed")
+        self.assertEqual(passed["reason"], "component_unverified", passed)
+        self.assertNotEqual(passed.get("stage"), "analyst_passed")
+        body = logged("score-line")
+        self.assertEqual(body["smart_wallets_source"], "none_scored_zero")
+        self.assertEqual(body["smart_wallets"]["value"], "0")
+        self.assertEqual(body["weights"]["smart_wallets"], "15")
+        self.assertNotEqual(body.get("momentum", {}).get("value"), "100")
 
     def setUp(self):
         _tmp, restore = temp_desk_env()
@@ -205,7 +197,7 @@ class DeskLoopTests(unittest.TestCase):
             },
             "components": components,
         }, lambda request: rugcheck_or_pair(request, _pair()), NOW)
-        self.assertEqual(screened["reason"], "score")
+        self.assertEqual(screened["reason"], "bundle_unverified")
         self.assertEqual(calls["n"], 0)
         self.assertEqual(memecoin_desk.view(MINT)["stage"], "rejected")
 
@@ -952,6 +944,7 @@ class DeskLoopTests(unittest.TestCase):
                 self.assertIn("holder_growth_unproven", status["ready_because"])
                 arm_clean_creator(swap_mint)
                 arm_holder_chart()
+                cross_source.note_clock(moment)
                 screened = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
                 real = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)
                 return screened, real
@@ -960,10 +953,10 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         self.assertFalse(found["live_ready"])
         self.assertFalse(screened["live_capital"], screened)
-        self.assertEqual(screened.get("reason"), "score", screened)
+        self.assertEqual(screened.get("reason"), "bundle_unverified", screened)
         self.assertFalse(screened["sign"])
         self.assertFalse(screened["send"])
-        self.assertFalse(screened["signer_reached"])
+        self.assertFalse(screened.get("signer_reached"))
         self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "rejected")
         found = found["discovery"]
         unknown = next(item for item in found["kills"] if item.get("mint") == other)
@@ -1356,6 +1349,7 @@ class DeskLoopTests(unittest.TestCase):
         from tests.test_jupiter_route_v2 import WHEN, _prices
         import pyth_sponsored
         import solana_whirlpool
+        cross_source.note_clock(WHEN)
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
@@ -1942,6 +1936,7 @@ conn.close()
             "side": "buy",
             "rent_lamports": 1_500_000,
         }
+        cross_source.note_clock(WHEN)
         opened = memecoin_desk.scout({
             "mint": mint, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",

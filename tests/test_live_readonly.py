@@ -173,6 +173,9 @@ class LiveReadonlyTests(unittest.TestCase):
             growth = verdict["checks"]["holder_growth"]
             if growth["status"] == "PASS":
                 self.assertTrue(growth["holder_count_disagreement"], symbol)
+            measured = cross_source.bundle_check(fetched["tracker"], fetched["rugcheck"])
+            self.assertEqual(measured["reason"], "bundle_unverified", symbol)
+            self.assertIsNone(measured["bundled_launch_pct"], symbol)
 
     def test_mutated_fixtures_still_fail_closed(self):
         big = _bundle("BIG")

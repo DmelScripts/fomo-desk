@@ -54,12 +54,17 @@ def set_fetcher(fetcher) -> None:
 def clear_fetcher() -> None:
     global _FETCHER
     _FETCHER = None
+    global _TEST_CLOCK
     _TEST_CAPS.clear()
     _TEST_BUNDLES.clear()
+    _TEST_DEX.clear()
+    _TEST_CLOCK = 1_800_000_000
 
 
 _TEST_CAPS: dict[str, str] = {}
 _TEST_BUNDLES: dict[str, dict] = {}
+_TEST_DEX: dict[str, dict] = {}
+_TEST_CLOCK = 1_800_000_000
 
 
 def pair_id_for(mint: str) -> str:
@@ -72,6 +77,17 @@ def note_cap(mint: str, cap) -> None:
 
 def note_bundle(mint: str, bundle: dict) -> None:
     _TEST_BUNDLES[mint] = bundle
+
+
+def note_dex(mint: str, **fields) -> None:
+    """Override the fixture pair's price, change, or creation time. Not a caller body."""
+    _TEST_DEX.setdefault(mint, {}).update(fields)
+
+
+def note_clock(moment) -> None:
+    """The fixture pair is one hour old at this desk clock."""
+    global _TEST_CLOCK
+    _TEST_CLOCK = moment
 
 
 def arm_test_fetcher() -> None:
@@ -92,12 +108,18 @@ def arm_test_fetcher() -> None:
         cap = _TEST_CAPS.get(mint, "1000000")
         pid = pair_id if isinstance(pair_id, str) and pair_id else pair_id_for(mint or "")
         if kind == "dex":
+            extra = _TEST_DEX.get(mint, {})
             return {"pairs": [{
                 "pairAddress": pid,
                 "baseToken": {"address": mint},
                 "quoteToken": {"address": SOL_MINT},
                 "marketCap": cap,
                 "liquidity": {"usd": "1"},
+                "priceUsd": extra.get("priceUsd", "1"),
+                "priceChange": {"h1": extra.get("h1", 10)},
+                "pairCreatedAt": extra.get("pairCreatedAt", int((_TEST_CLOCK - 3600) * 1000)),
+                "txns": {"h1": {"buys": extra.get("buys", 40), "sells": extra.get("sells", 20)}},
+                "volume": {"h1": extra.get("volume_h1", 1000)},
             }]}
         if kind == "rugcheck":
             return {
@@ -136,6 +158,20 @@ def _fetch(kind: str, mint: str, pair_id: str | None = None):
         return _FETCHER(kind, mint, pair_id)
     except Exception:
         return None
+
+
+def bundle_check(tracker_body, rugcheck_body) -> dict:
+    """Bundled-launch supply is the share bought in the creation block.
+
+    The saved RugCheck and Solana Tracker bodies do not carry that share.
+    risk.bundlers.totalInitialPercentage is the later initial share of wallets
+    Solana Tracker calls bundlers; their bundleTime values are not the creation
+    block. totalPercentage, snipers, and insiders are current holdings.
+    graphInsidersDetected is a count of transfer-linked wallets. None of those
+    is this rule, so the check fails closed instead of borrowing one.
+    """
+    del tracker_body, rugcheck_body
+    return {"ok": False, "reason": "bundle_unverified", "bundled_launch_pct": None}
 
 
 def fetch_dex(mint: str):

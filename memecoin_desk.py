@@ -114,12 +114,6 @@ def scout(pair: dict, now: float | None = None) -> dict:
     fetched = _num(pair.get("fetched_at"))
     if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
-    created_ms = pair.get("pair_created_at")
-    if isinstance(created_ms, bool) or not isinstance(created_ms, int) or created_ms < 10**12:
-        return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
-    age = fetched - (Decimal(created_ms) / Decimal(1000))
-    if age < MIN_AGE_S or age > MAX_AGE_S:
-        return _kill(None, mint, "scout", "age", "dexscreener")
     if pair.get("market_cap_usd") is None:
         return _kill(None, mint, "scout", "market_cap_missing", "dexscreener")
     mcap = _money(pair.get("market_cap_usd"))
@@ -130,6 +124,12 @@ def scout(pair: dict, now: float | None = None) -> dict:
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
     if not isinstance(pair_address, str) or pair_address == "":
         return _kill(None, mint, "scout", why or "pool_missing", "dexscreener")
+    created_ms = selected.get("pairCreatedAt") if isinstance(selected, dict) else None
+    if isinstance(created_ms, bool) or not isinstance(created_ms, int) or created_ms < 10**12:
+        return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
+    age = Decimal(str(moment)) - (Decimal(created_ms) / Decimal(1000))
+    if age < MIN_AGE_S or age > MAX_AGE_S:
+        return _kill(None, mint, "scout", "age", "dexscreener")
     other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
         return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
@@ -138,8 +138,9 @@ def scout(pair: dict, now: float | None = None) -> dict:
     liq = _money(pair.get("liquidity_usd"))
     if liq is None:
         return _kill(None, mint, "scout", "liquidity", "dexscreener")
-    price = _money(pair.get("price_usd"))
-    change = _num(pair.get("price_change_h1"))
+    price = _money(selected.get("priceUsd"))
+    change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
+    change = _num(change_box.get("h1"))
     if price is None or change is None:
         return _kill(None, mint, "scout", "price", "dexscreener")
     snapshot = {
@@ -232,14 +233,17 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
     if rugs.get("ok") is not True:
         return refuse(rugs.get("reason") or "dev_rug_history_unverified")
-    bundled = _num(onchain.get("bundled_launch_pct"))
-    if bundled is None:
-        return refuse("bundle_missing")
-    if bundled > BUNDLE_MAX:
-        return refuse("bundle")
     change = _num(snap.get("price_change_h1"))
     if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
+    bundled = cross_source.bundle_check(bundle.get("tracker"), bundle.get("rugcheck"))
+    if bundled.get("ok") is not True:
+        return refuse(bundled.get("reason") or "bundle_unverified")
+    bundled_pct = _num(bundled.get("bundled_launch_pct"))
+    if bundled_pct is None:
+        return refuse("bundle_unverified")
+    if bundled_pct > BUNDLE_MAX:
+        return refuse("bundle")
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:
@@ -264,52 +268,116 @@ def _holder_growth_value(item: dict, mint: str):
     return public_filter_docs.growth_points(parsed)
 
 
-def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
-    """Score measured components. Smart wallets are 0 because there is no source.
+def _clamp_unit(value: Decimal) -> Decimal:
+    if value < 0:
+        return Decimal("0")
+    if value > 100:
+        return Decimal("100")
+    return value
 
-    Every other missing component rejects. A caller smart-wallet value is not read.
+
+def score_from_values(values: dict) -> Decimal | None:
+    """sum(weight * value) / 100. Each value is already on 0..100. Smart wallets stay 0."""
+    if not isinstance(values, dict):
+        return None
+    weighted = Decimal("0")
+    for name, weight in WEIGHTS.items():
+        if name == "smart_wallets":
+            weighted += weight * Decimal("0")
+            continue
+        value = _num(values.get(name))
+        if value is None or value < 0 or value > 100:
+            return None
+        weighted += weight * value
+    return weighted / Decimal("100")
+
+
+def _fetched_components(mint: str) -> dict:
+    """0..100 points from the desk fetch. A missing source is component_unverified."""
+    import cross_source
+    found = {"smart_wallets": Decimal("0")}
+    selected, _why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    if not isinstance(selected, dict):
+        return {"ok": False, "reason": "component_unverified", "component": "momentum"}
+    change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
+    change = _num(change_box.get("h1"))
+    volume_box = selected.get("volume") if isinstance(selected.get("volume"), dict) else {}
+    volume = _num(volume_box.get("h1"))
+    txns = selected.get("txns") if isinstance(selected.get("txns"), dict) else {}
+    hour = txns.get("h1") if isinstance(txns.get("h1"), dict) else {}
+    buys = hour.get("buys")
+    sells = hour.get("sells")
+    if change is None or volume is None or volume <= 0:
+        return {"ok": False, "reason": "component_unverified", "component": "momentum"}
+    if isinstance(buys, bool) or isinstance(sells, bool) or not isinstance(buys, int) or not isinstance(sells, int):
+        return {"ok": False, "reason": "component_unverified", "component": "buy_sell_ratio"}
+    trades = buys + sells
+    if trades <= 0:
+        return {"ok": False, "reason": "component_unverified", "component": "buy_sell_ratio"}
+    found["momentum"] = _clamp_unit(change)
+    found["buy_sell_ratio"] = Decimal(buys) * Decimal(100) / Decimal(trades)
+    stored = cross_source.fetch_bundle(mint, selected.get("pairAddress") or "")
+    judged = cross_source.judge(stored) if stored is not None else None
+    liq_row = (judged or {}).get("checks", {}).get("liq_ge_25pct", {})
+    quote = _money(liq_row.get("quote_usd"))
+    cap = _money(liq_row.get("market_cap_usd"))
+    if quote is None or cap is None or cap <= 0:
+        return {"ok": False, "reason": "component_unverified", "component": "liq_mcap", "values": found}
+    found["liq_mcap"] = _clamp_unit(quote * Decimal(100) / cap)
+    found["unique_buyers"] = None
+    return {"ok": True, "values": found}
+
+
+def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
+    """Score fetched components. Smart wallets are 0. A caller value is not read.
+
+    Unique buyers have no field in the saved reads, so that component is
+    component_unverified and the score does not pass from the other numbers.
     """
     moment = time.time() if now is None else now
+    del moment
     row = _case(case_id)
     if row is None or row["stage"] != "filter_passed":
         return _kill(case_id, None, "analyst", "stage", None)
     if not isinstance(components, dict):
         return _fail(row, "analyst", "components_missing")
-    weighted = Decimal("0")
+    holder_item = components.get("holder_growth")
+    if isinstance(holder_item, dict):
+        holder = _holder_growth_value(holder_item, row["mint"])
+        if holder is None:
+            return _fail(row, "analyst", "holder_growth_unknown", source=holder_item.get("source") if isinstance(holder_item.get("source"), str) else None)
+    else:
+        holder = _holder_growth_value({"source": "solana_tracker_holders_chart"}, row["mint"])
+        if holder is None:
+            return _fail(row, "analyst", "holder_growth_unknown", source="solana_tracker_holders_chart")
+    fetched = _fetched_components(row["mint"])
     evidence = {
         "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
         "weights_are": "engineering_default",
         "owner_approved": True,
         "approval_source": ANALYST_APPROVAL_SOURCE,
         "smart_wallets_source": "none_scored_zero",
+        "smart_wallets": {"value": "0", "source": "none_scored_zero"},
+        "holder_growth": {"value": str(holder), "source": "solana_tracker_holders_chart"},
     }
-    for name in COMPONENTS:
-        if name == "smart_wallets":
-            evidence[name] = {"value": "0", "source": "none_scored_zero"}
-            weighted += WEIGHTS[name] * Decimal("0")
-            continue
-        item = components.get(name)
-        if not isinstance(item, dict):
-            return _fail(row, "analyst", name + "_missing")
-        source = item.get("source")
-        logged = source if isinstance(source, str) else None
-        if logged is None or logged in {"dexscreener", "dexscreener_txns", "transaction_count", "dexscreener_boost", "profile"}:
-            return _fail(row, "analyst", name + "_unproven", source=logged)
-        if name == "holder_growth":
-            value = _holder_growth_value(item, row["mint"])
-            if value is None:
-                return _fail(row, "analyst", "holder_growth_unknown", source=logged)
-        else:
-            fetched = _num(item.get("fetched_at"))
-            if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
-                return _fail(row, "analyst", name + "_stale", source=logged)
-            value = _num(item.get("value"))
-        if value is None or value < 0 or value > 100:
-            return _fail(row, "analyst", name, source=logged)
-        weighted += WEIGHTS[name] * value
-        evidence[name] = {"value": str(value), "source": source}
-    score = weighted / Decimal("100")
+    if fetched.get("ok") is not True:
+        evidence["component"] = fetched.get("component")
+        return _fail(row, "analyst", fetched.get("reason") or "component_unverified", evidence)
+    values = fetched["values"]
+    if values.get("unique_buyers") is None:
+        evidence["component"] = "unique_buyers"
+        evidence["momentum"] = {"value": str(values["momentum"]), "source": "dex_price_change_h1"}
+        evidence["buy_sell_ratio"] = {"value": str(values["buy_sell_ratio"]), "source": "dex_txns_h1"}
+        evidence["liq_mcap"] = {"value": str(values["liq_mcap"]), "source": "quote_over_confirmed_mcap"}
+        return _fail(row, "analyst", "component_unverified", evidence)
+    values["holder_growth"] = holder
+    values["smart_wallets"] = Decimal("0")
+    score = score_from_values(values)
+    if score is None:
+        return _fail(row, "analyst", "component_unverified", evidence)
     evidence["score"] = format(score, "f")
+    for name in ("momentum", "buy_sell_ratio", "liq_mcap", "unique_buyers"):
+        evidence[name] = {"value": str(values[name]), "source": "desk_fetch"}
     if score < 70:
         return _fail(row, "analyst", "score", evidence)
     snap = _snapshot(row)
@@ -511,9 +579,12 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
     if row is None or row["stage"] != "analyst_passed":
         return _kill(case_id, None, "executor", "stage", None)
     snap = _snapshot(row)
-    price = _money(snap.get("price_usd"))
+    import cross_source
+    selected, _why = cross_source.select_pair(cross_source.fetch_dex(row["mint"]), row["mint"], "")
+    price = _money(selected.get("priceUsd")) if isinstance(selected, dict) else None
     if price is None:
         return _fail(row, "executor", "price")
+    snap["price_usd"] = format(price, "f")
     stop_px = price * (Decimal("100") - STOP) / Decimal("100")
     arm_px = price * (Decimal("100") + TRAIL_ARM) / Decimal("100")
     floor_px = arm_px * (Decimal("100") - TRAIL_DROP) / Decimal("100")

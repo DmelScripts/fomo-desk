@@ -117,6 +117,11 @@ def _passing_cross(mint: str, quote="300000", dex_cap="1000000", tracker_cap="10
             "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "LOOKALIKE"},
             "marketCap": dex_cap,
             "liquidity": {"usd": "999999999"},
+            "priceUsd": "1",
+            "priceChange": {"h1": 10},
+            "pairCreatedAt": int((NOW - 3600) * 1000),
+            "txns": {"h1": {"buys": 40, "sells": 20}},
+            "volume": {"h1": 1000},
         }]},
         "rugcheck": {
             "creator": "SameCreator",
@@ -259,7 +264,8 @@ class MemecoinDeskTests(unittest.TestCase):
         case_id = self._open(number, **pair)
         arm_clean_creator(_mint(number))
         result = memecoin_desk.filter_case(case_id, _onchain(cross_sources=_passing_cross(_mint(number))), now=NOW)
-        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "bundle_unverified", result)
+        db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = ? AND stage = 'rejected'", (case_id,))
         return case_id
 
     def _analyzed(self, number: int, **pair):
@@ -288,11 +294,16 @@ class MemecoinDeskTests(unittest.TestCase):
         return case_id
 
     def test_age_and_market_cap_bounds_use_market_cap_not_fdv(self):
-        self.assertTrue(self._open(2, pair_created_at=int((NOW - 30 * 60) * 1000)))
-        self.assertEqual(memecoin_desk.scout(_pair(_mint(3), pair_created_at=int((NOW - 30 * 60 + 1) * 1000)), now=NOW)["reason"], "age")
-        self.assertTrue(self._open(4, pair_created_at=int((NOW - 72 * 3600) * 1000)))
-        self.assertEqual(memecoin_desk.scout(_pair(_mint(5), pair_created_at=int((NOW - 72 * 3600 - 1) * 1000)), now=NOW)["reason"], "age")
-        self.assertEqual(memecoin_desk.scout(_pair(_mint(6), pair_created_at=int(NOW - 3600)), now=NOW)["reason"], "pair_created_at")
+        cross_source.note_dex(_mint(2), pairCreatedAt=int((NOW - 30 * 60) * 1000))
+        self.assertTrue(self._open(2, pair_created_at=1))
+        cross_source.note_dex(_mint(3), pairCreatedAt=int((NOW - 30 * 60 + 1) * 1000))
+        self.assertEqual(memecoin_desk.scout(_pair(_mint(3), pair_created_at=int((NOW - 30 * 60) * 1000)), now=NOW)["reason"], "age")
+        cross_source.note_dex(_mint(4), pairCreatedAt=int((NOW - 72 * 3600) * 1000))
+        self.assertTrue(self._open(4, pair_created_at=1))
+        cross_source.note_dex(_mint(5), pairCreatedAt=int((NOW - 72 * 3600 - 1) * 1000))
+        self.assertEqual(memecoin_desk.scout(_pair(_mint(5), pair_created_at=int((NOW - 72 * 3600) * 1000)), now=NOW)["reason"], "age")
+        cross_source.note_dex(_mint(6), pairCreatedAt=int(NOW - 3600))
+        self.assertEqual(memecoin_desk.scout(_pair(_mint(6), pair_created_at=int((NOW - 3600) * 1000)), now=NOW)["reason"], "pair_created_at")
         self.assertTrue(self._open(7, market_cap_usd="300000", liquidity_usd="75000"))
         self.assertEqual(memecoin_desk.scout(_pair(_mint(8), market_cap_usd="299999"), now=NOW)["reason"], "market_cap")
         self.assertTrue(self._open(9, market_cap_usd="20000000", liquidity_usd="5000000"))
@@ -336,7 +347,7 @@ class MemecoinDeskTests(unittest.TestCase):
     def test_liquidity_ratio_uses_quote_side_not_dexscreener(self):
         exact = self._open(15, market_cap_usd="1000000", liquidity_usd="1")
         arm_clean_creator(_mint(15))
-        self.assertTrue(memecoin_desk.filter_case(exact, _onchain(cross_sources=_passing_cross(_mint(15))), now=NOW)["ok"])
+        self.assertEqual(memecoin_desk.filter_case(exact, _onchain(cross_sources=_passing_cross(_mint(15))), now=NOW)["reason"], "bundle_unverified")
         missing = self._open(16, market_cap_usd="1000000", liquidity_usd="250000")
         arm_clean_creator(_mint(16))
         cross_source.clear_fetcher()
@@ -391,7 +402,10 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.filter_case(conflict_case, _onchain(dev_holding_pct="0"), now=NOW)["reason"], "creator_conflict")
         arm_clean_creator(_mint(22))
         caller_lp = self._open(22)
-        self.assertTrue(memecoin_desk.filter_case(caller_lp, _onchain(lpLockedPct=99, dev_holding_pct="3.01", mint_authority_revoked=False), now=NOW)["ok"])
+        self.assertEqual(
+            memecoin_desk.filter_case(caller_lp, _onchain(lpLockedPct=99, dev_holding_pct="3.01", mint_authority_revoked=False, bundled_launch_pct="0"), now=NOW)["reason"],
+            "bundle_unverified",
+        )
         rug_case = self._open(52)
         rugged = _passing_cross(_mint(52))
         rugged["rugcheck"]["risks"] = [{"name": "Deployer wallet", "description": "the deployer can mint", "level": "danger"}]
@@ -411,14 +425,19 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.filter_case(self._open(23), supplied, now=NOW)["reason"], "dev_rug_history_unverified")
         self.assertEqual(memecoin_desk.filter_case(self._open(24), _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 1, "tokens_seen": 4}), now=NOW)["reason"], "dev_rug_history_unverified")
         arm_clean_creator(_mint(25))
-        self.assertEqual(memecoin_desk.filter_case(self._open(25), _onchain(bundled_launch_pct="10.01"), now=NOW)["reason"], "bundle")
+        self.assertEqual(memecoin_desk.filter_case(self._open(25), _onchain(bundled_launch_pct="0"), now=NOW)["reason"], "bundle_unverified")
         arm_clean_creator(_mint(26))
-        self.assertTrue(memecoin_desk.filter_case(self._open(26), _onchain(bundled_launch_pct="10", cross_sources=_passing_cross(_mint(26))), now=NOW)["ok"])
-        pumped = self._open(27, price_change_h1="80")
+        self.assertEqual(cross_source.bundle_check(_passing_cross(_mint(26))["tracker"], _passing_cross(_mint(26))["rugcheck"])["reason"], "bundle_unverified")
+        self.assertEqual(memecoin_desk.filter_case(self._open(26), _onchain(bundled_launch_pct="0", cross_sources=_passing_cross(_mint(26))), now=NOW)["reason"], "bundle_unverified")
+        cross_source.note_dex(_mint(27), h1=80)
+        pumped = self._open(27, price_change_h1="10")
         arm_clean_creator(_mint(27))
         self.assertEqual(memecoin_desk.filter_case(pumped, _onchain(), now=NOW)["reason"], "already_up_1h")
+        cross_source.note_dex(_mint(28), h1=10)
         arm_clean_creator(_mint(28))
-        self.assertTrue(memecoin_desk.filter_case(self._open(28, price_change_h1="79"), _onchain(cross_sources=_passing_cross(_mint(28))), now=NOW)["ok"])
+        quiet = self._open(28, price_change_h1="80")
+        self.assertEqual(memecoin_desk.view(quiet)["snapshot"]["price_change_h1"], "10")
+        self.assertEqual(memecoin_desk.filter_case(quiet, _onchain(cross_sources=_passing_cross(_mint(28))), now=NOW)["reason"], "bundle_unverified")
 
     def test_rug_reader_and_holder_chart_fail_closed(self):
         import dev_rug_history
@@ -481,31 +500,44 @@ class MemecoinDeskTests(unittest.TestCase):
         measured = _components()
         measured["holder_growth"]["value"] = "1"
         scored = memecoin_desk.analyze(good, measured, now=NOW)
-        self.assertEqual(scored["reason"], "score", scored)
+        self.assertEqual(scored["reason"], "component_unverified", scored)
         self.assertEqual(calls, [])
 
     def test_score_boundaries_and_missing_provenance(self):
         low = self._filtered(29)
-        scored = memecoin_desk.analyze(low, _components(momentum={"value": "65", "source": "holder_reader", "fetched_at": NOW}), now=NOW)
-        self.assertEqual(scored["reason"], "score")
-        passed = memecoin_desk.analyze(self._filtered(30), _components(), now=NOW)
-        self.assertEqual(passed["reason"], "score", passed)
+        scored = memecoin_desk.analyze(low, _components(momentum={"value": "100", "source": "holder_reader", "fetched_at": NOW}), now=NOW)
+        self.assertEqual(scored["reason"], "component_unverified", scored)
+        self.assertEqual(scored.get("evidence", {}).get("momentum", {}).get("value") or json.loads(db.query(
+            "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND reason = 'component_unverified' ORDER BY id DESC LIMIT 1",
+            (low,),
+        )[0]["evidence_json"])["momentum"]["value"], "10")
+        self.assertEqual(memecoin_desk.score_from_values({
+            "momentum": "100", "unique_buyers": "100", "buy_sell_ratio": "100",
+            "holder_growth": "100", "liq_mcap": "100", "smart_wallets": "100",
+        }), Decimal("85"))
+        self.assertEqual(memecoin_desk.score_from_values({
+            "momentum": "70", "unique_buyers": "70", "buy_sell_ratio": "70",
+            "holder_growth": "70", "liq_mcap": "70", "smart_wallets": "0",
+        }), Decimal("59.5"))
+        passed = memecoin_desk.analyze(self._filtered(30), _components("100"), now=NOW)
+        self.assertEqual(passed["reason"], "component_unverified", passed)
+        self.assertNotEqual(passed.get("stage"), "analyst_passed")
         for offset, name in enumerate(name for name in memecoin_desk.COMPONENTS if name != "smart_wallets"):
-            incomplete = _components()
+            incomplete = _components("100")
             del incomplete[name]
-            self.assertEqual(memecoin_desk.analyze(self._filtered(80 + offset), incomplete, now=NOW)["reason"], name + "_missing")
+            self.assertEqual(memecoin_desk.analyze(self._filtered(80 + offset), incomplete, now=NOW)["reason"], "component_unverified")
         stale = _components()
         stale["holder_growth"] = {"value": "70", "source": "holder_reader", "fetched_at": NOW - 31}
         self.assertEqual(memecoin_desk.analyze(self._filtered(32), stale, now=NOW)["reason"], "holder_growth_unknown")
-        counts = _components()
-        counts["unique_buyers"] = {"value": "70", "source": "dexscreener_txns", "fetched_at": NOW}
-        self.assertEqual(memecoin_desk.analyze(self._filtered(33), counts, now=NOW)["reason"], "unique_buyers_unproven")
-        boost = _components()
+        counts = _components("100")
+        counts["unique_buyers"] = {"value": "100", "source": "dexscreener_txns", "fetched_at": NOW}
+        self.assertEqual(memecoin_desk.analyze(self._filtered(33), counts, now=NOW)["reason"], "component_unverified")
+        boost = _components("100")
         boost["smart_wallets"] = {"value": "100", "source": "dexscreener_boost", "fetched_at": NOW}
         ignored = self._filtered(34)
-        self.assertEqual(memecoin_desk.analyze(ignored, boost, now=NOW)["reason"], "score")
+        self.assertEqual(memecoin_desk.analyze(ignored, boost, now=NOW)["reason"], "component_unverified")
         stored = json.loads(db.query(
-            "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND reason = 'score' ORDER BY id DESC LIMIT 1",
+            "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND reason = 'component_unverified' ORDER BY id DESC LIMIT 1",
             (ignored,),
         )[0]["evidence_json"])
         self.assertEqual(stored["smart_wallets"]["value"], "0")
@@ -516,6 +548,9 @@ class MemecoinDeskTests(unittest.TestCase):
 
     def test_stop_and_trail_are_persisted_before_entry_and_are_not_a_profit_lock(self):
         case_id = self._analyzed(36)
+        forced = memecoin_desk.view(case_id)["snapshot"]
+        forced["price_usd"] = "5"
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(forced), case_id))
         early = memecoin_desk.offer_fixture_route(case_id, _buy(_mint(36)), amount_in=1000, minimum_out=50, fee_usd="0.05")
         self.assertEqual(early["reason"], "stage")
         protected = _protect(case_id)
@@ -689,8 +724,14 @@ class MemecoinDeskTests(unittest.TestCase):
         moment = time.time()
         posted = _pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000))
         self.assertEqual(client.post("/api/memecoin/scout", headers=AUTH, json=posted).status_code, 400)
-        for key in ("confirmed_market_cap_usd", "market_cap_basis", "pair_address"):
+        for key in ("confirmed_market_cap_usd", "market_cap_basis", "pair_address", "price_usd", "price_change_h1", "pair_created_at"):
             posted.pop(key, None)
+        priced = client.post("/api/memecoin/scout", headers=AUTH, json=posted | {"price_usd": "2", "price_change_h1": "90", "pair_created_at": 1})
+        self.assertEqual(priced.status_code, 400, priced.text)
+        bundled = client.post("/api/memecoin/filter", headers=AUTH, json={"case_id": "nope", "onchain": {"bundled_launch_pct": "0"}})
+        self.assertEqual(bundled.status_code, 400, bundled.text)
+        valued = client.post("/api/memecoin/analyst", headers=AUTH, json={"case_id": "nope", "components": {"momentum": {"value": "100"}}})
+        self.assertEqual(valued.status_code, 400, valued.text)
         opened = client.post("/api/memecoin/scout", headers=AUTH, json=posted)
         self.assertEqual(opened.status_code, 409, opened.text)
         self.assertEqual(opened.json()["reason"], "caller_snapshot_not_the_handoff")
@@ -1967,7 +2008,9 @@ class MemecoinDeskTests(unittest.TestCase):
             opened = memecoin_desk.scout(_pair(mint), now=NOW)
             self.assertTrue(opened["ok"], opened)
             arm_clean_creator(mint)
-            self.assertTrue(memecoin_desk.filter_case(opened["case_id"], _onchain(cross_sources=_passing_cross(mint)), now=NOW)["ok"])
+            filtered = memecoin_desk.filter_case(opened["case_id"], _onchain(cross_sources=_passing_cross(mint)), now=NOW)
+            self.assertEqual(filtered["reason"], "bundle_unverified", filtered)
+            db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = ? AND stage = 'rejected'", (opened["case_id"],))
             snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
             snap["fixture"] = True
             snap["analyst_scored"] = False
