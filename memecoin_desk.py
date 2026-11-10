@@ -114,11 +114,6 @@ def scout(pair: dict, now: float | None = None) -> dict:
     fetched = _num(pair.get("fetched_at"))
     if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
-    if pair.get("market_cap_usd") is None:
-        return _kill(None, mint, "scout", "market_cap_missing", "dexscreener")
-    mcap = _money(pair.get("market_cap_usd"))
-    if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
-        return _kill(None, mint, "scout", "market_cap", "dexscreener")
     import cross_source
     selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
@@ -130,12 +125,18 @@ def scout(pair: dict, now: float | None = None) -> dict:
     age = Decimal(str(moment)) - (Decimal(created_ms) / Decimal(1000))
     if age < MIN_AGE_S or age > MAX_AGE_S:
         return _kill(None, mint, "scout", "age", "dexscreener")
+    if "marketCap" not in selected:
+        return _kill(None, mint, "scout", "market_cap_missing", "dexscreener")
+    mcap = _money(selected.get("marketCap"))
+    if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
+        return _kill(None, mint, "scout", "market_cap", "dexscreener")
     other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
         return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
-    if pair.get("liquidity_usd") is None:
+    liquidity = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
+    if not isinstance(liquidity, dict) or "usd" not in liquidity:
         return _kill(None, mint, "scout", "liquidity_missing", "dexscreener")
-    liq = _money(pair.get("liquidity_usd"))
+    liq = _money(liquidity.get("usd"))
     if liq is None:
         return _kill(None, mint, "scout", "liquidity", "dexscreener")
     price = _money(selected.get("priceUsd"))

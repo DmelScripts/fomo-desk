@@ -309,14 +309,25 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertTrue(self._open(9, market_cap_usd="20000000", liquidity_usd="5000000"))
         self.assertEqual(memecoin_desk.scout(_pair(_mint(10), market_cap_usd="20000001"), now=NOW)["reason"], "market_cap")
         missing = _pair(_mint(11))
-        missing["market_cap_usd"] = None
+        missing["market_cap_usd"] = "1000000"
         missing["fdv"] = "5000000"
+        cross_source.note_dex(_mint(11), marketCap=None, fdv="9000000")
         self.assertEqual(memecoin_desk.scout(missing, now=NOW)["reason"], "market_cap_missing")
         basis = _pair(_mint(12), market_cap_basis="fdv")
         self.assertEqual(memecoin_desk.scout(basis, now=NOW)["reason"], "market_cap_basis")
         for bad in ("0", "NaN", "Infinity", "-1"):
             self.assertEqual(memecoin_desk.scout(_pair(_mint(13), market_cap_usd=bad), now=NOW)["reason"], "market_cap")
-            self.assertEqual(memecoin_desk.scout(_pair(_mint(13), liquidity_usd=bad), now=NOW)["reason"], "liquidity")
+        cross_source.note_dex(_mint(54), liquidityUsd="NaN")
+        self.assertEqual(memecoin_desk.scout(_pair(_mint(54), liquidity_usd="250000"), now=NOW)["reason"], "liquidity")
+        decoy = _pair(_mint(55), market_cap_usd="1", liquidity_usd="NaN", fdv="9000000")
+        cross_source.note_cap(_mint(55), "1000000")
+        cross_source.note_dex(_mint(55), marketCap="1000000", liquidityUsd="250000")
+        stored = memecoin_desk.scout(decoy, now=NOW)
+        self.assertTrue(stored["ok"], stored)
+        snap = memecoin_desk.view(stored["case_id"])["snapshot"]
+        self.assertEqual(snap["market_cap_usd"], "1000000")
+        self.assertEqual(snap["liquidity_usd"], "250000")
+        self.assertFalse(snap["fdv_used_as_market_cap"])
         stale = memecoin_desk.scout(_pair(_mint(14), fetched_at=NOW - 31), now=NOW)
         self.assertEqual(stale["reason"], "snapshot_stale")
         unconfirmed = _pair(_mint(47))
@@ -724,9 +735,9 @@ class MemecoinDeskTests(unittest.TestCase):
         moment = time.time()
         posted = _pair(_mint(81), fetched_at=moment, pair_created_at=int((moment - 3600) * 1000))
         self.assertEqual(client.post("/api/memecoin/scout", headers=AUTH, json=posted).status_code, 400)
-        for key in ("confirmed_market_cap_usd", "market_cap_basis", "pair_address", "price_usd", "price_change_h1", "pair_created_at"):
+        for key in ("confirmed_market_cap_usd", "market_cap_basis", "pair_address", "price_usd", "price_change_h1", "pair_created_at", "market_cap_usd", "liquidity_usd"):
             posted.pop(key, None)
-        priced = client.post("/api/memecoin/scout", headers=AUTH, json=posted | {"price_usd": "2", "price_change_h1": "90", "pair_created_at": 1})
+        priced = client.post("/api/memecoin/scout", headers=AUTH, json=posted | {"market_cap_usd": "1", "liquidity_usd": "1"})
         self.assertEqual(priced.status_code, 400, priced.text)
         bundled = client.post("/api/memecoin/filter", headers=AUTH, json={"case_id": "nope", "onchain": {"bundled_launch_pct": "0"}})
         self.assertEqual(bundled.status_code, 400, bundled.text)

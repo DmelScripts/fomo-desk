@@ -109,18 +109,24 @@ def arm_test_fetcher() -> None:
         pid = pair_id if isinstance(pair_id, str) and pair_id else pair_id_for(mint or "")
         if kind == "dex":
             extra = _TEST_DEX.get(mint, {})
-            return {"pairs": [{
+            row = {
                 "pairAddress": pid,
                 "baseToken": {"address": mint},
                 "quoteToken": {"address": SOL_MINT},
-                "marketCap": cap,
-                "liquidity": {"usd": "1"},
                 "priceUsd": extra.get("priceUsd", "1"),
                 "priceChange": {"h1": extra.get("h1", 10)},
                 "pairCreatedAt": extra.get("pairCreatedAt", int((_TEST_CLOCK - 3600) * 1000)),
                 "txns": {"h1": {"buys": extra.get("buys", 40), "sells": extra.get("sells", 20)}},
                 "volume": {"h1": extra.get("volume_h1", 1000)},
-            }]}
+            }
+            market_cap = extra["marketCap"] if "marketCap" in extra else cap
+            if market_cap is not None:
+                row["marketCap"] = market_cap
+            if extra.get("fdv") is not None:
+                row["fdv"] = extra["fdv"]
+            liquidity_usd = extra["liquidityUsd"] if "liquidityUsd" in extra else "1"
+            row["liquidity"] = {} if liquidity_usd is None else {"usd": liquidity_usd}
+            return {"pairs": [row]}
         if kind == "rugcheck":
             return {
                 "creator": "SameCreator", "creatorBalance": 0, "token": {"supply": 1000},
