@@ -40,11 +40,11 @@ def source_catalog() -> dict:
         "rug_history": {
             "viable": False,
             "implemented": True,
-            "source_wired": False,
-            "endpoint": None,
+            "source_wired": True,
+            "endpoint": "POST https://mainnet.helius-rpc.com getAssetsByCreator",
             "documented_field": None,
-            "api_key": None,
-            "reason": "no cited schema names a past-rug count, so the reader stays unconfigured",
+            "api_key": "HELIUS_API_KEY query api-key",
+            "reason": "the asset list is documented; the RugCheck swagger has no per-token rugged field",
             "citation": "https://api.rugcheck.xyz/swagger/doc.json",
         },
         "birdeye_holder_chart": {
