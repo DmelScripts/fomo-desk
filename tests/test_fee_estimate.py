@@ -55,6 +55,8 @@ def _pool(source_mint: str, dest_mint: str, *, fee_rate: int = 3000, liquidity: 
     starts = [0, -88, -176]
     ticks = []
     accounts = {pool: (solana_whirlpool.PROGRAM_ID, bytes(raw))}
+    accounts[vault_a] = (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(source_mint, pool))
+    accounts[vault_b] = (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(dest_mint, pool))
     for start in starts:
         address = solana_whirlpool.tick_array_address(pool, start)
         accounts[address] = (solana_whirlpool.PROGRAM_ID, bytearray(solana_whirlpool.reference_tick_array(pool, start)))
@@ -379,7 +381,7 @@ class FeeEstimateTests(unittest.TestCase):
 
     def test_the_reservation_ticket_and_allocation_bound_the_signer(self):
         import phantom_transport
-        mint = solana_tx.b58encode(b"\x74" * 32)
+        mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
         auth = {"mock": True, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
         encoded = self._message(values, solana_tx.NATIVE_MINT, mint, 0)
@@ -485,7 +487,7 @@ class FeeEstimateTests(unittest.TestCase):
     def test_the_signer_repeats_ticket_and_allocation_and_keeps_a_reduce_only_exit(self):
         import json
         import threading
-        mint = solana_tx.b58encode(b"\x75" * 32)
+        mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
         auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
         transport = self._transport(accounts)
@@ -561,21 +563,23 @@ class FeeEstimateTests(unittest.TestCase):
         import base64
         import json
         from decimal import Decimal
-        mint = solana_tx.b58encode(b"\x79" * 32)
+        mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
         auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        exit_values, exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
         transport = self._transport(accounts)
+        exit_transport = self._transport(exit_accounts)
         pyth_sponsored.read_accounts(transport, NOW)
+        pyth_sponsored.read_accounts(exit_transport, NOW)
         db.execute(
             "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('full-book', ?, 'protected', ?, ?, ?, 'live', 'server')",
             (solana_tx.b58encode(b"\x7a" * 32), '{"reserved_usd": "100.00"}', NOW, NOW),
         )
-        case_mint = solana_tx.b58encode(b"\x73" * 32)
-        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
-        tipped_exit = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 2_000_000_000, side="exit", amount=4)
+        exit_values, _exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        tipped_exit = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 2_000_000_000, side="exit", amount=4)
         exit_digest = self._store(tipped_exit, exit_values["pool"], "exit", "tip-exit")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'tip-exit'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
-        exit_refused = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, transport)
+        exit_refused = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, exit_transport)
         self.assertFalse(exit_refused["signed"], exit_refused)
         self.assertEqual(exit_refused["reason"], "ticket")
         self.assertFalse(exit_refused["ticket_limit_proven"])
@@ -630,10 +634,10 @@ class FeeEstimateTests(unittest.TestCase):
         case_mint = solana_tx.b58encode(b"\x73" * 32)
         values, accounts = _pool(solana_tx.NATIVE_MINT, case_mint)
         auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
-        transport = self._transport(accounts)
+        exit_values, exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        transport = self._transport(exit_accounts)
         pyth_sponsored.read_accounts(transport, NOW)
         wallet = phantom_transport.REQUIRED_WALLET
-        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
 
         def extend(encoded, extra_keys, program_index, ix_accounts, ix_data):
             decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
@@ -735,21 +739,86 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertTrue(counted["ticket_limit_proven"])
         self.assertTrue(counted["allocation_proven"])
 
-        exit_values, _exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        exit_values, exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
         oversized = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=1_000_000)
         over_digest = self._store(oversized, exit_values["pool"], "exit", "route-over-position")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'route-over-position'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
-        over_position = desk_loop.mock_phantom_sign(over_digest, auth, NOW, transport)
+        over_position = desk_loop.mock_phantom_sign(over_digest, auth, NOW, self._transport({**accounts, **exit_accounts}))
         self.assertFalse(over_position["signed"], over_position)
         self.assertEqual(over_position["reason"], "unparseable_instruction")
         self.assertFalse(over_position["ticket_limit_proven"])
 
         foreign_mint = solana_tx.b58encode(b"\x44" * 32)
-        foreign_values, _foreign_accounts = _pool(foreign_mint, solana_tx.NATIVE_MINT)
+        foreign_values, foreign_accounts = _pool(foreign_mint, solana_tx.NATIVE_MINT)
         foreign = self._message(foreign_values, foreign_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
         foreign_digest = self._store(foreign, foreign_values["pool"], "exit", "foreign-source")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'foreign-source'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
-        foreign_source = desk_loop.mock_phantom_sign(foreign_digest, auth, NOW, transport)
+        foreign_source = desk_loop.mock_phantom_sign(foreign_digest, auth, NOW, self._transport({**accounts, **foreign_accounts}))
         self.assertFalse(foreign_source["signed"], foreign_source)
         self.assertEqual(foreign_source["reason"], "unparseable_instruction")
         self.assertFalse(foreign_source["allocation_proven"])
+
+        import base64
+        import solana_jupiter
+        buy = self._message(values, solana_tx.NATIVE_MINT, case_mint, 0, amount=2_000_000_000)
+        decoded = solana_tx.decode_transaction(base64.b64decode(buy))
+        position = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, case_mint, solana_tx.TOKEN_PROGRAM)
+        wsol = solana_tx.associated_token_address(phantom_transport.REQUIRED_WALLET, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+
+        def rewrite(slot, pubkey=None, flip_direction=False):
+            keys = list(decoded.static_keys)
+            extra = 0
+            if pubkey is not None and pubkey not in keys:
+                keys.append(pubkey)
+                key_index = len(keys) - 1
+                extra = 1
+            elif pubkey is not None:
+                key_index = keys.index(pubkey)
+            else:
+                key_index = None
+            instructions = []
+            for ix in decoded.instructions:
+                accounts_ix = list(ix.account_indexes)
+                data = bytearray(ix.data)
+                if decoded.static_keys[ix.program_index] == solana_jupiter.PROGRAM_ID:
+                    if key_index is not None:
+                        accounts_ix[slot] = key_index
+                    if flip_direction:
+                        data[35] = 0 if data[35] else 1
+                instructions.append((ix.program_index, accounts_ix, bytes(data)))
+            return solana_tx.encode_legacy(
+                decoded.fee_payer, keys, decoded.readonly_unsigned + extra, instructions,
+                decoded.blockhash, required=decoded.required_signatures,
+            )
+
+        hop_input = None
+        hop_output = None
+        for ix in decoded.instructions:
+            if decoded.static_keys[ix.program_index] != solana_jupiter.PROGRAM_ID:
+                continue
+            for offset, index in enumerate(ix.account_indexes):
+                if decoded.static_keys[index] == solana_whirlpool.PROGRAM_ID:
+                    hop_input = offset + 4
+                    hop_output = offset + 6
+        self.assertIsNotNone(hop_input)
+        route_ix = next(ix for ix in decoded.instructions if decoded.static_keys[ix.program_index] == solana_jupiter.PROGRAM_ID)
+        self.assertEqual(decoded.static_keys[route_ix.account_indexes[hop_input]], wsol)
+        self.assertEqual(decoded.static_keys[route_ix.account_indexes[1]], wsol)
+        self.assertEqual(decoded.static_keys[route_ix.account_indexes[hop_output]], position)
+
+        def refuse(encoded, name):
+            digest = self._store(encoded, values["pool"], "entry", name)
+            db.execute(
+                "UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?",
+                ('{"reserved_usd": "1.00", "remaining_raw": 2000000000}', name),
+            )
+            result = desk_loop.mock_phantom_sign(digest, auth, NOW, transport)
+            self.assertFalse(result["signed"], result)
+            self.assertEqual(result["reason"], "unparseable_instruction", result)
+            self.assertFalse(result["ticket_limit_proven"])
+            self.assertFalse(result["allocation_proven"])
+
+        refuse(rewrite(1, position), "decoy-index")
+        refuse(rewrite(hop_input, position), "decoy-hop")
+        refuse(rewrite(hop_output, wsol), "wrong-output")
+        refuse(rewrite(None, flip_direction=True), "wrong-direction")

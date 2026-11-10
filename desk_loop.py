@@ -2220,22 +2220,12 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
             position_out += allowed["position"]
             continue
         if program == solana_jupiter.PROGRAM_ID:
-            found = jupiter_route_v2.parse(data)
-            if found.get("ok") is not True or isinstance(found.get("in_amount"), bool) or not isinstance(found.get("in_amount"), int):
-                return refused | {"reason": "unparseable_instruction"}
-            if len(instruction.account_indexes) < 2:
-                return refused | {"reason": "unparseable_instruction"}
-            try:
-                source_account = decoded.static_keys[instruction.account_indexes[1]]
-            except (IndexError, TypeError):
-                return refused | {"reason": "unparseable_instruction"}
+            verified = _verified_hop(decoded, instruction, transport, wsol, position_ata, side)
+            if verified.get("ok") is not True:
+                return refused | {"reason": verified.get("reason") or "unparseable_instruction"}
             routes += 1
-            if source_account == wsol:
-                route_sol += found["in_amount"]
-            elif position_ata is not None and source_account == position_ata:
-                position_out += found["in_amount"]
-            else:
-                return refused | {"reason": "unparseable_instruction"}
+            route_sol += verified["route_sol"]
+            position_out += verified["position"]
             continue
         return refused | {"reason": "unparseable_instruction"}
     if routes != 1 or cu_limit is None or cu_price is None or cu_limit <= 0 or cu_limit > 1_400_000 or cu_price < 0:
@@ -2252,6 +2242,136 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
         "cu_limit": cu_limit,
         "cu_price": cu_price,
     }
+
+
+def _route_account_bytes(transport, address: str, blockhash: str, fallback: tuple[str, bytes] | None) -> tuple[str, bytes] | None:
+    """One hop account. A canonical payer ATA may be filled from its address when the read is empty."""
+    if callable(transport):
+        try:
+            response = transport({
+                "method": "getAccountInfo", "account": address, "commitment": "confirmed", "blockhash": blockhash,
+            })
+        except Exception:
+            response = None
+        body = response.get("body") if isinstance(response, dict) else None
+        result = body.get("result") if isinstance(body, dict) else None
+        value = result.get("value") if isinstance(result, dict) else None
+        if isinstance(value, dict):
+            raw = _decoded_account_data(value.get("data"))
+            owner = value.get("owner")
+            if isinstance(owner, str) and raw is not None:
+                return owner, raw
+    return fallback
+
+
+def _verified_hop(decoded, instruction, transport, wsol: str, position_ata: str | None, side: str) -> dict:
+    """The whirlpool hop on this message. The debit is the hop input account, not index 1 alone."""
+    import jupiter_route_v2
+    import phantom_transport
+    import solana_jupiter
+    import solana_tx
+    import solana_whirlpool
+    refused = {"ok": False, "reason": "unparseable_instruction"}
+    data = bytes(instruction.data)
+    found = jupiter_route_v2.parse(data)
+    if found.get("ok") is not True or isinstance(found.get("in_amount"), bool) or not isinstance(found.get("in_amount"), int):
+        return refused
+    if found.get("a_to_b") is not True and found.get("a_to_b") is not False:
+        return refused
+    try:
+        account_keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+    except (IndexError, TypeError):
+        return refused
+    wallet = phantom_transport.REQUIRED_WALLET
+    buying = side == "entry"
+    if side not in {"entry", "exit"} or not isinstance(position_ata, str):
+        return refused
+    want_source_mint = solana_tx.NATIVE_MINT if buying else None
+    want_dest_mint = None if buying else solana_tx.NATIVE_MINT
+    # The case mint is the position. Buy spends wSOL into that ATA. Exit spends that ATA into wSOL.
+    if buying:
+        want_source_ata, want_dest_ata = wsol, position_ata
+    else:
+        want_source_ata, want_dest_ata = position_ata, wsol
+    if len(account_keys) < 10 or account_keys[0] != wallet:
+        return refused
+    if account_keys[5] != solana_tx.TOKEN_PROGRAM or account_keys[6] != solana_tx.TOKEN_PROGRAM:
+        return refused
+    cursor = 7
+    if account_keys[cursor] != jupiter_route_v2.EVENT:
+        if account_keys[cursor] != solana_jupiter.PROGRAM_ID:
+            return refused
+        cursor += 1
+    if cursor + 1 >= len(account_keys) or account_keys[cursor] != jupiter_route_v2.EVENT or account_keys[cursor + 1] != solana_jupiter.PROGRAM_ID:
+        return refused
+    remaining = list(range(cursor + 2, len(account_keys)))
+    if len(remaining) != 12 or account_keys[remaining[0]] != solana_whirlpool.PROGRAM_ID:
+        return refused
+    source_mint = account_keys[3]
+    dest_mint = account_keys[4]
+    if buying:
+        if source_mint != solana_tx.NATIVE_MINT:
+            return refused
+        want_source_mint = solana_tx.NATIVE_MINT
+        want_dest_mint = dest_mint
+        if dest_mint == solana_tx.NATIVE_MINT or position_ata != solana_tx.associated_token_address(wallet, dest_mint, solana_tx.TOKEN_PROGRAM):
+            return refused
+    else:
+        if dest_mint != solana_tx.NATIVE_MINT:
+            return refused
+        want_source_mint = source_mint
+        want_dest_mint = solana_tx.NATIVE_MINT
+        if source_mint == solana_tx.NATIVE_MINT or position_ata != solana_tx.associated_token_address(wallet, source_mint, solana_tx.TOKEN_PROGRAM):
+            return refused
+    if account_keys[1] != want_source_ata or account_keys[2] != want_dest_ata:
+        return refused
+    created = set()
+    for other in decoded.instructions:
+        try:
+            program = decoded.static_keys[other.program_index]
+            okeys = [decoded.static_keys[item] for item in other.account_indexes]
+        except (IndexError, TypeError):
+            return refused
+        if program == solana_tx.ASSOCIATED_TOKEN and bytes(other.data) == bytes([1]) and len(okeys) == 6 and okeys[0] == wallet:
+            created.add(okeys[1])
+    hop = remaining[1:]
+    needed = {account_keys[hop[index]] for index in (2, 3, 4, 5, 6, 7, 8, 9)}
+    needed.update((account_keys[1], account_keys[2]))
+    observed = {}
+    for address in needed:
+        fallback = None
+        if address == wsol:
+            fallback = (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(solana_tx.NATIVE_MINT, wallet))
+        elif address == position_ata:
+            mint = dest_mint if buying else source_mint
+            fallback = (solana_tx.TOKEN_PROGRAM, solana_whirlpool.reference_token_account(mint, wallet))
+        record = _route_account_bytes(transport, address, decoded.blockhash, fallback if address in {wsol, position_ata} else None)
+        if record is None and address in created and address in {wsol, position_ata}:
+            record = fallback
+        if record is None:
+            return refused
+        observed[address] = record
+    try:
+        solana_whirlpool.check_swap_accounts(
+            account_keys, remaining[1:], wallet, account_keys[1], account_keys[2],
+            source_mint, dest_mint, found["a_to_b"] is True, observed, created,
+        )
+    except solana_whirlpool.WhirlpoolError:
+        return refused
+    hop = remaining[1:]
+    input_account = account_keys[hop[3]] if found["a_to_b"] is True else account_keys[hop[5]]
+    output_account = account_keys[hop[5]] if found["a_to_b"] is True else account_keys[hop[3]]
+    if input_account != account_keys[1] or input_account != want_source_ata:
+        return refused
+    if output_account != want_dest_ata or account_keys[hop[1]] != wallet:
+        return refused
+    if want_source_mint != source_mint or want_dest_mint != dest_mint:
+        return refused
+    if input_account == wsol:
+        return {"ok": True, "route_sol": found["in_amount"], "position": 0}
+    if input_account == position_ata:
+        return {"ok": True, "route_sol": 0, "position": found["in_amount"]}
+    return refused
 
 
 def _signer_capital(message_sha256: str, now, transport) -> dict:
