@@ -16,13 +16,15 @@ DOCUMENTED = {
 class PublicFilterDocTests(unittest.TestCase):
     def test_only_the_holder_chart_is_implemented(self):
         catalog = public_filter_docs.source_catalog()
-        self.assertFalse(catalog["lp_lock_expiry"]["viable"])
-        self.assertFalse(catalog["lp_lock_expiry"]["field_is_expiry"])
-        self.assertFalse(catalog["rug_history"]["implemented"])
+        self.assertTrue(catalog["lp_lock"]["implemented"])
+        self.assertFalse(catalog["lp_lock"]["field_is_expiry"])
+        self.assertEqual(catalog["lp_lock"]["pass_value"], 100)
+        self.assertFalse(catalog["rug_history"]["source_wired"])
+        self.assertTrue(catalog["rug_history"]["implemented"])
         self.assertFalse(catalog["birdeye_holder_chart"]["implemented"])
         self.assertFalse(catalog["helius_creator_assets"]["implemented"])
         self.assertTrue(catalog["holder_growth"]["viable"])
-        self.assertEqual(catalog["holder_growth"]["api_key"], "x-api-key header, required")
+        self.assertIn("SOLANA_TRACKER_API_KEY", catalog["holder_growth"]["api_key"])
 
     def test_two_documented_points_are_a_series_and_not_a_score(self):
         parsed = public_filter_docs.parse_holder_chart(DOCUMENTED, MINT)
@@ -42,6 +44,10 @@ class PublicFilterDocTests(unittest.TestCase):
             "time_not_increasing",
         )
         self.assertFalse(public_filter_docs.parse_holder_chart(DOCUMENTED, "")["ok"])
+        self.assertTrue(public_filter_docs.parse_lp_locked_pct({"lpLockedPct": 100})["ok"])
+        self.assertFalse(public_filter_docs.parse_lp_locked_pct({"lpLockedPct": 99})["ok"])
+        self.assertFalse(public_filter_docs.parse_lp_locked_pct({"lpLockedPct": "100"})["ok"])
+        self.assertFalse(public_filter_docs.parse_lp_locked_pct({})["expiry_checked"])
 
     def test_a_chart_is_not_booked_and_a_bad_chart_stays_unproven(self):
         accepted = desk_loop.collect_holder_count(MINT, {"source": "solana_tracker_holders_chart", "body": DOCUMENTED})

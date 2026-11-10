@@ -186,22 +186,19 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return refuse("mint_authority")
     if onchain.get("freeze_authority_revoked") is not True:
         return refuse("freeze_authority")
-    if onchain.get("lp_burned_or_locked") is not True:
+    import public_filter_docs
+    locked = public_filter_docs.parse_lp_locked_pct(onchain)
+    if locked.get("ok") is not True:
         return refuse("lp")
+    import dev_rug_history
     dev = _num(onchain.get("dev_holding_pct"))
     if dev is None:
         return refuse("dev_holding_missing")
     if dev > DEV_HOLDING_MAX:
         return refuse("dev_holding")
-    rugs = onchain.get("dev_rugs")
-    if not isinstance(rugs, dict) or rugs.get("status") != "checked" or not isinstance(rugs.get("source"), str) or rugs.get("source") == "dexscreener":
-        return refuse("dev_rug_history_unproven")
-    if isinstance(rugs.get("rugs"), bool) or not isinstance(rugs.get("rugs"), int) or isinstance(rugs.get("tokens_seen"), bool) or not isinstance(rugs.get("tokens_seen"), int):
-        return refuse("dev_rug_history_unproven")
-    if rugs["rugs"] < 0 or rugs["tokens_seen"] < 0:
-        return refuse("dev_rug_history_unproven")
-    if rugs["rugs"] > 0:
-        return refuse("dev_rug_history")
+    rugs = dev_rug_history.assess(onchain.get("dev_rugs"), row["mint"])
+    if rugs.get("ok") is not True:
+        return refuse(rugs.get("reason") or "dev_rug_history_unverified")
     bundled = _num(onchain.get("bundled_launch_pct"))
     if bundled is None:
         return refuse("bundle_missing")
@@ -216,8 +213,22 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return refuse("liquidity_ratio")
     if liq / mcap < LIQ_OF_MCAP:
         return refuse("liquidity_below_25pct_mcap")
-    evidence = {"source": onchain.get("source"), "liq_of_mcap": format(liq / mcap, "f"), "market_cap_basis": "market_cap"}
+    evidence = {
+        "source": onchain.get("source"), "liq_of_mcap": format(liq / mcap, "f"),
+        "market_cap_basis": "market_cap", "lpLockedPct": 100, "lp_expiry_checked": False,
+    }
     return _advance(row, "filter_passed", "filter", evidence)
+
+
+def _holder_chart_reason(item: dict, mint: str) -> str | None:
+    """The tracker chart is required only when this component names that source."""
+    if item.get("source") != "solana_tracker_holders_chart" and "chart" not in item:
+        return None
+    import public_filter_docs
+    parsed = public_filter_docs.read_holder_chart(mint, item.get("chart"), allow_network=item.get("chart") is None)
+    if parsed.get("ok") is not True:
+        return "holder_growth_unknown"
+    return None
 
 
 def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
@@ -246,6 +257,10 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         fetched = _num(item.get("fetched_at"))
         if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
             return _fail(row, "analyst", name + "_stale", source=logged)
+        if name == "holder_growth":
+            chart_reason = _holder_chart_reason(item, row["mint"])
+            if chart_reason is not None:
+                return _fail(row, "analyst", chart_reason, source=logged)
         value = _num(item.get("value"))
         if value is None or value < 0 or value > 100:
             return _fail(row, "analyst", name, source=logged)

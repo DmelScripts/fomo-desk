@@ -760,7 +760,7 @@ class DeskLoopTests(unittest.TestCase):
                 "fetched_at": moment,
                 "onchain": {
                     "source": "synthetic_test_adapter", "fetched_at": moment,
-                    "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True,
+                    "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True, "lpLockedPct": 100,
                     "dev_holding_pct": "1",
                     "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
                     "bundled_launch_pct": "1",

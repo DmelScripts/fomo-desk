@@ -154,7 +154,7 @@ class PublicAdapterTests(unittest.TestCase):
         self.assertTrue(opened["ok"])
         onchain = {
             "source": "stalkchain_token_onchain", "fetched_at": NOW,
-            "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True,
+            "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True, "lpLockedPct": 100,
             "dev_holding_pct": "1",
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",
@@ -303,7 +303,7 @@ class PublicAdapterTests(unittest.TestCase):
         }, now=NOW)
         onchain = {
             "source": "stalkchain_token_onchain", "fetched_at": NOW,
-            "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True,
+            "mint_authority_revoked": True, "freeze_authority_revoked": True, "lp_burned_or_locked": True, "lpLockedPct": 100,
             "dev_holding_pct": "1",
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",

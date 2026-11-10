@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+import urllib.request
 from pathlib import Path
 import time
 import unittest
@@ -105,6 +106,7 @@ def _onchain(**over):
         "mint_authority_revoked": True,
         "freeze_authority_revoked": True,
         "lp_burned_or_locked": True,
+        "lpLockedPct": 100,
         "dev_holding_pct": "3",
         "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 2},
         "bundled_launch_pct": "10",
@@ -262,10 +264,14 @@ class MemecoinDeskTests(unittest.TestCase):
     def test_filter_rejects_missing_or_failed_onchain_facts(self):
         self.assertEqual(memecoin_desk.filter_case(self._open(18), _onchain(mint_authority_revoked=False), now=NOW)["reason"], "mint_authority")
         self.assertEqual(memecoin_desk.filter_case(self._open(19), _onchain(freeze_authority_revoked=False), now=NOW)["reason"], "freeze_authority")
-        self.assertEqual(memecoin_desk.filter_case(self._open(20), _onchain(lp_burned_or_locked=False), now=NOW)["reason"], "lp")
+        self.assertEqual(memecoin_desk.filter_case(self._open(20), _onchain(lpLockedPct=99), now=NOW)["reason"], "lp")
+        self.assertEqual(memecoin_desk.filter_case(self._open(40), _onchain(lpLockedPct=True), now=NOW)["reason"], "lp")
+        missing_lp = _onchain()
+        missing_lp.pop("lpLockedPct")
+        self.assertEqual(memecoin_desk.filter_case(self._open(41), missing_lp, now=NOW)["reason"], "lp")
         self.assertEqual(memecoin_desk.filter_case(self._open(21), _onchain(dev_holding_pct="3.01"), now=NOW)["reason"], "dev_holding")
         self.assertTrue(memecoin_desk.filter_case(self._open(22), _onchain(dev_holding_pct="3"), now=NOW)["ok"])
-        self.assertEqual(memecoin_desk.filter_case(self._open(23), _onchain(dev_rugs={"status": "unchecked"}), now=NOW)["reason"], "dev_rug_history_unproven")
+        self.assertEqual(memecoin_desk.filter_case(self._open(23), _onchain(dev_rugs={"status": "unchecked"}), now=NOW)["reason"], "dev_rug_history_unverified")
         rugs = _onchain()
         rugs["dev_rugs"] = {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 1, "tokens_seen": 4}
         self.assertEqual(memecoin_desk.filter_case(self._open(24), rugs, now=NOW)["reason"], "dev_rug_history")
@@ -274,6 +280,65 @@ class MemecoinDeskTests(unittest.TestCase):
         pumped = self._open(27, price_change_h1="80")
         self.assertEqual(memecoin_desk.filter_case(pumped, _onchain(), now=NOW)["reason"], "already_up_1h")
         self.assertTrue(memecoin_desk.filter_case(self._open(28, price_change_h1="79"), _onchain(), now=NOW)["ok"])
+
+    def test_rug_reader_and_holder_chart_fail_closed(self):
+        import dev_rug_history
+        import public_filter_docs
+        self.addCleanup(dev_rug_history.reset_source)
+        dev_rug_history.reset_source()
+        self.assertEqual(
+            memecoin_desk.filter_case(self._open(42), _onchain(dev_rugs=None), now=NOW)["reason"],
+            "dev_rug_history_unverified",
+        )
+
+        def rugged(_mint):
+            return {"verified": True, "rugs": 2, "source": "test_reader"}
+
+        dev_rug_history.set_source(rugged)
+        self.assertEqual(
+            memecoin_desk.filter_case(self._open(43), _onchain(dev_rugs=None), now=NOW)["reason"],
+            "dev_rug_history",
+        )
+
+        def broken(_mint):
+            raise RuntimeError("source down")
+
+        dev_rug_history.set_source(broken)
+        self.assertEqual(
+            memecoin_desk.filter_case(self._open(44), _onchain(dev_rugs=None), now=NOW)["reason"],
+            "dev_rug_history_unverified",
+        )
+        dev_rug_history.reset_source()
+
+        os.environ.pop("SOLANA_TRACKER_API_KEY", None)
+        calls = []
+
+        def refuse_network(*_args, **_kwargs):
+            calls.append("network")
+            raise AssertionError("holder chart must not open a socket")
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = refuse_network
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        unknown = public_filter_docs.read_holder_chart(_mint(45), allow_network=True)
+        self.assertEqual(unknown["reason"], "holder_growth_unknown")
+        self.assertFalse(unknown["fetched"])
+        self.assertEqual(calls, [])
+        case_id = self._filtered(45)
+        missing = _components()
+        missing["holder_growth"] = {"value": "70", "source": "solana_tracker_holders_chart", "fetched_at": NOW}
+        self.assertEqual(memecoin_desk.analyze(case_id, missing, now=NOW)["reason"], "holder_growth_unknown")
+        chart = {"holders": [{"holders": 10, "time": 1}, {"holders": 12, "time": 2}]}
+        bad = self._filtered(46)
+        refused = _components()
+        refused["holder_growth"] = {"value": "70", "source": "solana_tracker_holders_chart", "fetched_at": NOW, "chart": {"holders": []}}
+        self.assertEqual(memecoin_desk.analyze(bad, refused, now=NOW)["reason"], "holder_growth_unknown")
+        good = self._filtered(47)
+        measured = _components()
+        measured["holder_growth"] = {"value": "70", "source": "solana_tracker_holders_chart", "fetched_at": NOW, "chart": chart}
+        scored = memecoin_desk.analyze(good, measured, now=NOW)
+        self.assertTrue(scored["ok"], scored)
+        self.assertEqual(calls, [])
 
     def test_score_boundaries_and_missing_provenance(self):
         low = self._filtered(29)
