@@ -45,7 +45,18 @@ def _ready_reasons() -> list[str]:
     reasons.append("holder_growth_unproven")
     if db_setting("memecoin_entry_halt") == "1":
         reasons.append("entry_halt")
+    if not _process_has_env("HELIUS_API_KEY"):
+        reasons.append("helius_api_key_missing")
+    if not _process_has_env("SOLANA_TRACKER_API_KEY"):
+        reasons.append("solana_tracker_api_key_missing")
     return reasons
+
+
+def _process_has_env(name: str) -> bool:
+    """Whether this process has a non-empty value. The value is not returned."""
+    import os
+    value = os.environ.get(name)
+    return isinstance(value, str) and bool(value.strip())
 
 
 def db_setting(key: str):
@@ -4535,7 +4546,113 @@ def _readiness_blocks(pyth: dict) -> list[str]:
         blocks.append("owner_slippage_unapproved")
     blocks.append(pyth["reason"] or "pyth_sponsored_not_fresh")
     blocks.append("hermes_not_called")
+    if not _process_has_env("HELIUS_API_KEY"):
+        blocks.append("helius_api_key_missing")
+    if not _process_has_env("SOLANA_TRACKER_API_KEY"):
+        blocks.append("solana_tracker_api_key_missing")
     return blocks
+
+
+def remaining_live_gates() -> list[dict]:
+    """What still sits between this branch and a genuine live send. None of these are armed."""
+    return [
+        {
+            "gate": "stalkchain_rest_envelope",
+            "proves": "a live 200 body matches a published response schema, not only the {data, notes?, credits, meta} envelope",
+            "owner": False,
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "lp_lock_live",
+            "proves": "a fetched RugCheck summary has lpLockedPct exactly 100",
+            "owner": False,
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "rug_history_live",
+            "proves": "Helius getAssetsByCreator plus a fetched RugCheck report rugged boolean for every past mint",
+            "owner": True,
+            "owner_action": "set HELIUS_API_KEY",
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "holder_growth_live",
+            "proves": "a fetched Solana Tracker holder chart with two increasing points",
+            "owner": True,
+            "owner_action": "set SOLANA_TRACKER_API_KEY",
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "bundle_unique_buyers_smart_wallets_dev_holding",
+            "proves": "documented fields for bundle percent, unique buyers, smart wallets, and dev holding",
+            "owner": False,
+            "needs_live_read": False,
+            "closed": False,
+        },
+        {
+            "gate": "price_freshness_proven",
+            "proves": "a Pyth SOL/USD observation inside the 30 second window at execution",
+            "owner": False,
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "quote_expiry",
+            "proves": "isBlockhashValid and block height still inside the reserved window",
+            "owner": False,
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "preflight_ready",
+            "proves": "simulateTransaction of the exact reserved message",
+            "owner": False,
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "ticket_limit_proven",
+            "proves": "this reservation, including refundable deposits, is at most $8 and the flag is promoted",
+            "owner": False,
+            "needs_live_read": False,
+            "closed": False,
+        },
+        {
+            "gate": "allocation_proven",
+            "proves": "other holds plus this reservation are at most $100 and the flag is promoted",
+            "owner": False,
+            "needs_live_read": False,
+            "closed": False,
+        },
+        {
+            "gate": "phantom_server_auth",
+            "proves": "phantom login --display-mode text approved for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
+            "owner": True,
+            "owner_action": "open the approval URL, enter the user code, and approve before it expires",
+            "needs_live_read": False,
+            "closed": False,
+        },
+        {
+            "gate": "real_submit",
+            "proves": "a real signature is submitted and confirmed, not the mock sender",
+            "owner": True,
+            "owner_action": "approve the Phantom session before any real signature",
+            "needs_live_read": True,
+            "closed": False,
+        },
+        {
+            "gate": "deploy_env",
+            "proves": "this process has HELIUS_API_KEY and SOLANA_TRACKER_API_KEY",
+            "owner": True,
+            "owner_action": "set both variables on the deploy",
+            "needs_live_read": False,
+            "closed": _process_has_env("HELIUS_API_KEY") and _process_has_env("SOLANA_TRACKER_API_KEY"),
+        },
+    ]
 
 
 def readiness() -> dict:
@@ -4552,6 +4669,9 @@ def readiness() -> dict:
         "sign": False,
         "live_ready": False,
         "stalkchain_env_present": stalkchain_adapter.this_process_has_key(),
+        "helius_env_present": _process_has_env("HELIUS_API_KEY"),
+        "solana_tracker_env_present": _process_has_env("SOLANA_TRACKER_API_KEY"),
+        "remaining_live_gates": remaining_live_gates(),
         "pyth_env_present": usdc_valuation.this_process_has_key(),
         "render_presence": "unknown",
         "hermes_price_requires_key": True,

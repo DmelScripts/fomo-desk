@@ -27,6 +27,39 @@ class PublicFilterDocTests(unittest.TestCase):
         self.assertTrue(catalog["holder_growth"]["viable"])
         self.assertIn("SOLANA_TRACKER_API_KEY", catalog["holder_growth"]["api_key"])
 
+    def test_missing_deploy_keys_block_readiness_and_are_not_echoed(self):
+        import os
+        os.environ.pop("HELIUS_API_KEY", None)
+        os.environ.pop("SOLANA_TRACKER_API_KEY", None)
+        view = desk_loop.readiness()
+        self.assertFalse(view["helius_env_present"])
+        self.assertFalse(view["solana_tracker_env_present"])
+        self.assertIn("helius_api_key_missing", view["blocked_because"])
+        self.assertIn("solana_tracker_api_key_missing", desk_loop.scheduler_status()["ready_because"])
+        self.assertFalse(view["live_ready"])
+        names = {item["gate"] for item in view["remaining_live_gates"]}
+        for gate in (
+            "stalkchain_rest_envelope", "lp_lock_live", "rug_history_live", "holder_growth_live",
+            "price_freshness_proven", "preflight_ready", "ticket_limit_proven", "allocation_proven",
+            "phantom_server_auth", "real_submit", "deploy_env",
+        ):
+            self.assertIn(gate, names)
+        deploy = next(item for item in view["remaining_live_gates"] if item["gate"] == "deploy_env")
+        self.assertFalse(deploy["closed"])
+        self.assertTrue(deploy["owner"])
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+        os.environ["SOLANA_TRACKER_API_KEY"] = "test-tracker-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        self.addCleanup(lambda: os.environ.pop("SOLANA_TRACKER_API_KEY", None))
+        present = desk_loop.readiness()
+        self.assertTrue(present["helius_env_present"])
+        self.assertTrue(present["solana_tracker_env_present"])
+        self.assertNotIn("helius_api_key_missing", present["blocked_because"])
+        self.assertNotIn("solana_tracker_api_key_missing", present["blocked_because"])
+        self.assertFalse(present["live_ready"])
+        self.assertNotIn("test-helius-not-a-secret", __import__("json").dumps(present))
+        self.assertNotIn("test-tracker-not-a-secret", __import__("json").dumps(present))
+
     def test_two_documented_points_are_a_series_and_not_a_score(self):
         parsed = public_filter_docs.parse_holder_chart(DOCUMENTED, MINT)
         self.assertTrue(parsed["ok"], parsed)
