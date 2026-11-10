@@ -2374,8 +2374,67 @@ def _verified_hop(decoded, instruction, transport, wsol: str, position_ata: str 
     return refused
 
 
+# A reserved quote older than this is expired. The blockhash dies at lastValidBlockHeight.
+SIGNER_QUOTE_MAX_AGE_S = 20
+
+
+def _signer_sol_price(transport, now: float) -> dict:
+    """The signer reads the dollar rate itself from a Hermes-shaped body. No network."""
+    import pyth_sponsored
+    if not callable(transport):
+        return {"ok": False, "reason": "price_unknown"}
+    try:
+        response = transport({"method": "hermes_price", "kind": "hermes"})
+    except Exception:
+        return {"ok": False, "reason": "price_unknown"}
+    body = response.get("body") if isinstance(response, dict) else None
+    if not isinstance(body, dict):
+        return {"ok": False, "reason": "price_unknown"}
+    return pyth_sponsored.assess_signer_price(body, now)
+
+
+def _result_field(response, name: str | None = None):
+    body = response.get("body") if isinstance(response, dict) else None
+    result = body.get("result") if isinstance(body, dict) else None
+    if name is None:
+        return result
+    return result.get(name) if isinstance(result, dict) else None
+
+
+def _signer_quote_and_blockhash(proof, transport, now: float) -> dict:
+    """Quote age and the reserved blockhash. The height comes from the injected fixture provider."""
+    created = proof["created_at"]
+    if isinstance(created, bool) or not isinstance(created, (int, float)):
+        return {"ok": False, "reason": "quote_expired"}
+    age = float(now) - float(created)
+    if age < 0 or age > SIGNER_QUOTE_MAX_AGE_S:
+        return {"ok": False, "reason": "quote_expired"}
+    blockhash = proof["blockhash"]
+    last_valid = proof["last_valid_block_height"]
+    if not isinstance(blockhash, str) or blockhash == "":
+        return {"ok": False, "reason": "blockhash_unknown"}
+    if isinstance(last_valid, bool) or not isinstance(last_valid, int) or last_valid <= 0:
+        return {"ok": False, "reason": "blockhash_unknown"}
+    if not callable(transport):
+        return {"ok": False, "reason": "blockhash_unknown"}
+    try:
+        height_response = transport({"method": "getBlockHeight", "commitment": "confirmed"})
+        valid_response = transport({"method": "isBlockhashValid", "blockhash": blockhash, "commitment": "confirmed"})
+    except Exception:
+        return {"ok": False, "reason": "blockhash_unknown"}
+    height = _result_field(height_response)
+    valid = _result_field(valid_response, "value")
+    if valid is None:
+        valid = _result_field(valid_response)
+    if isinstance(height, bool) or not isinstance(height, int) or not isinstance(valid, bool):
+        return {"ok": False, "reason": "blockhash_unknown"}
+    if height >= last_valid or valid is not True:
+        return {"ok": False, "reason": "blockhash_expired"}
+    return {"ok": True}
+
+
 def _signer_capital(message_sha256: str, now, transport) -> dict:
-    """Price the whole-message outflow. A reduce-only parse does not set the flags."""
+    """Price the whole-message outflow. A reduce-only parse does not set the capital flags."""
     import base64
     import db
     import time
@@ -2396,9 +2455,13 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     if outflow.get("ok") is not True:
         return refused | {"reason": outflow.get("reason") or "unparseable_instruction"}
     moment = time.time() if now is None else now
-    sol = pyth_sponsored.sol_leg(moment)
-    if sol.get("fresh") is not True or sol.get("used") is not True:
-        return refused | {"reason": "price_unknown"}
+    priced = _signer_sol_price(transport, moment)
+    if priced.get("ok") is not True:
+        return refused | {"reason": priced.get("reason") or "price_unknown"}
+    expiry = _signer_quote_and_blockhash(proof, transport, moment)
+    if expiry.get("ok") is not True:
+        return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
+    sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
     priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
     fee_usd = pyth_sponsored.lamports_usd(priority + jupiter_route_v2.BASE_FEE_LAMPORTS, sol)
@@ -2406,8 +2469,9 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         return refused | {"reason": "price_unknown"}
     if fee_usd > memecoin_desk.MAX_FEE:
         return refused | {"reason": "fee_cap"}
+    fresh = {"price_freshness_proven": True}
     if outflow["lamports"] == 0:
-        return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True}
+        return {"ok": True, "reason": None, "ticket_limit_proven": False, "allocation_proven": False, "reduce_only": True} | fresh
     usd = pyth_sponsored.lamports_usd(outflow["lamports"], sol)
     if usd is None:
         return refused | {"reason": "price_unknown"}
@@ -2425,13 +2489,16 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd, now=moment))
     if room.get("ok") is not True:
         return refused | {"reason": room.get("reason") or "allocation"}
-    return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "reduce_only": False}
+    return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "price_freshness_proven": True, "reduce_only": False}
 
 
 def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None, transport=None) -> dict:
     """A labeled stand-in. It repeats the ticket and allocation checks and does not call Phantom."""
     import hashlib
-    blank = {"signed": False, "mock": True, "network_called": False, "live": False, "ticket_limit_proven": False, "allocation_proven": False}
+    blank = {
+        "signed": False, "mock": True, "network_called": False, "live": False,
+        "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False,
+    }
     if not isinstance(auth, dict) or auth.get("ok") is not True or auth.get("mock") is not True or auth.get("network_called") is not False:
         return blank | {"reason": "auth_refused"}
     capital = _signer_capital(message_sha256, now, transport)
@@ -2445,6 +2512,7 @@ def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None,
         "reason": None,
         "ticket_limit_proven": capital.get("ticket_limit_proven") is True,
         "allocation_proven": capital.get("allocation_proven") is True,
+        "price_freshness_proven": capital.get("price_freshness_proven") is True,
     }
 
 
@@ -2484,7 +2552,7 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
     if signed.get("signed") is not True:
         return base | {
             "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "reason": signed.get("reason"),
-            "ticket_limit_proven": False, "allocation_proven": False,
+            "ticket_limit_proven": False, "allocation_proven": False, "price_freshness_proven": False,
         }
     sent = mock_phantom_send(signed)
     return base | {
@@ -2492,6 +2560,8 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
         "mock_signed": True, "broadcast": False, "reason": sent.get("reason"),
         "ticket_limit_proven": signed.get("ticket_limit_proven") is True,
         "allocation_proven": signed.get("allocation_proven") is True,
+        "price_freshness_proven": signed.get("price_freshness_proven") is True,
+        "execution_eligible": False, "preflight_ready": False, "gate_complete": False, "live_ready": False,
     }
 
 

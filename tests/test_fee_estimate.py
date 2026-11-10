@@ -87,7 +87,7 @@ class FeeEstimateTests(unittest.TestCase):
     def tearDown(self):
         pyth_sponsored._LAST = None
 
-    def _store(self, encoded, pool, side, case_id="fee-case"):
+    def _store(self, encoded, pool, side, case_id="fee-case", *, created_at=NOW, last_valid=100):
         digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
         mint = solana_tx.b58encode(b"\x73" * 32)
         db.execute(
@@ -99,9 +99,9 @@ class FeeEstimateTests(unittest.TestCase):
             INSERT INTO memecoin_reservations (
                 message_sha256, case_id, side, message_b64, router, blockhash,
                 last_valid_block_height, last_valid_provenance, pool, ledger, ledger_provenance, created_at
-            ) VALUES (?, ?, ?, ?, 'metis', ?, 100, 'test', ?, 'live', 'server', ?)
+            ) VALUES (?, ?, ?, ?, 'metis', ?, ?, 'test', ?, 'live', 'server', ?)
             """,
-            (digest, case_id, side, encoded, solana_tx.b58encode(b"\x44" * 32), pool, NOW),
+            (digest, case_id, side, encoded, solana_tx.b58encode(b"\x44" * 32), last_valid, pool, created_at),
         )
         return digest
 
@@ -114,6 +114,18 @@ class FeeEstimateTests(unittest.TestCase):
                 return {"status": 200, "body": {"result": tip}}
             if request.get("method") == "getMinimumBalanceForRentExemption":
                 return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
+            if request.get("method") == "getBlockHeight":
+                return {"status": 200, "body": {"result": 90}}
+            if request.get("method") == "isBlockhashValid":
+                return {"status": 200, "body": {"result": {"value": True}}}
+            if request.get("method") == "hermes_price":
+                return {"status": 200, "body": {
+                    "parsed": [{
+                        "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+                        "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": now},
+                        "status": "trading",
+                    }],
+                }}
             if request.get("method") == "getMultipleAccounts":
                 if not priced:
                     return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": None}}}
@@ -822,3 +834,112 @@ class FeeEstimateTests(unittest.TestCase):
         refuse(rewrite(hop_input, position), "decoy-hop")
         refuse(rewrite(hop_output, wsol), "wrong-output")
         refuse(rewrite(None, flip_direction=True), "wrong-direction")
+
+    def test_the_signer_requires_a_fresh_pyth_price_and_an_unexpired_quote(self):
+        import copy
+        import json
+        from pathlib import Path
+        case_mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, case_mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        base = self._transport(accounts)
+        template = json.loads((Path(__file__).resolve().parent / "fixtures" / "hermes_sol_usd.json").read_text(encoding="utf-8"))
+
+        def feed(publish_time, *, conf="1", status="trading", present=True):
+            body = copy.deepcopy(template)
+            if not present:
+                body["parsed"] = []
+            else:
+                body["parsed"][0]["status"] = status
+                body["parsed"][0]["price"]["publish_time"] = publish_time
+                body["parsed"][0]["price"]["conf"] = conf
+            return body
+
+        def transport_for(payload, *, height=90, valid=True):
+            def transport(request):
+                if request.get("method") == "hermes_price":
+                    return {"status": 200, "body": payload}
+                if request.get("method") == "getBlockHeight":
+                    if height is None:
+                        return {"status": 200, "body": {"result": None}}
+                    return {"status": 200, "body": {"result": height}}
+                if request.get("method") == "isBlockhashValid":
+                    if valid is None:
+                        return {"status": 200, "body": {"result": {}}}
+                    return {"status": 200, "body": {"result": {"value": valid}}}
+                return base(request)
+            return transport
+
+        def sign(name, payload, *, amount, when=NOW, height=90, valid=True, created_at=NOW, last_valid=100):
+            message = self._message(values, solana_tx.NATIVE_MINT, case_mint, 0, amount=amount)
+            digest = self._store(message, values["pool"], "entry", name, created_at=created_at, last_valid=last_valid)
+            return desk_loop.mock_phantom_sign(digest, auth, when, transport_for(payload, height=height, valid=valid))
+
+        happy = sign("fresh-sign", feed(NOW), amount=4)
+        self.assertTrue(happy["signed"], happy)
+        self.assertTrue(happy["price_freshness_proven"])
+        self.assertTrue(happy["ticket_limit_proven"])
+        self.assertTrue(happy["allocation_proven"])
+        self.assertFalse(happy["live"])
+        boundary = sign("fresh-boundary", feed(NOW - 30), amount=5)
+        self.assertTrue(boundary["signed"], boundary)
+        self.assertTrue(boundary["price_freshness_proven"])
+        stale = sign("fresh-stale", feed(NOW - 31), amount=6)
+        self.assertFalse(stale["signed"], stale)
+        self.assertEqual(stale["reason"], "price_stale")
+        self.assertFalse(stale["price_freshness_proven"])
+        future = sign("fresh-future", feed(NOW + 6), amount=7)
+        self.assertEqual(future["reason"], "price_stale")
+        self.assertFalse(future["price_freshness_proven"])
+        wide = sign("fresh-wide", feed(NOW, conf="2"), amount=8)
+        self.assertEqual(wide["reason"], "price_conf")
+        self.assertFalse(wide["ticket_limit_proven"])
+        missing = sign("fresh-missing", feed(NOW, present=False), amount=9)
+        self.assertEqual(missing["reason"], "price_unknown")
+        halted = sign("fresh-halted", feed(NOW, status="halted"), amount=10)
+        self.assertEqual(halted["reason"], "price_unknown")
+        self.assertFalse(halted["price_freshness_proven"])
+        expired = sign("fresh-quote", feed(NOW), amount=11, created_at=NOW - 21)
+        self.assertEqual(expired["reason"], "quote_expired")
+        self.assertFalse(expired["price_freshness_proven"])
+        at_last = sign("fresh-height", feed(NOW), amount=12, height=100)
+        self.assertEqual(at_last["reason"], "blockhash_expired")
+        self.assertFalse(at_last["allocation_proven"])
+        unknown_head = sign("fresh-head", feed(NOW), amount=13, height=None)
+        self.assertEqual(unknown_head["reason"], "blockhash_unknown")
+        self.assertFalse(unknown_head["price_freshness_proven"])
+        self.assertFalse(unknown_head["ticket_limit_proven"])
+
+        exit_values, exit_accounts = _pool(case_mint, solana_tx.NATIVE_MINT)
+        exit_base = self._transport(exit_accounts)
+
+        def exit_transport(payload, *, height=90):
+            def transport(request):
+                if request.get("method") == "hermes_price":
+                    return {"status": 200, "body": payload}
+                if request.get("method") == "getBlockHeight":
+                    return {"status": 200, "body": {"result": height}}
+                return exit_base(request)
+            return transport
+
+        exit_message = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        exit_digest = self._store(exit_message, exit_values["pool"], "exit", "fresh-exit")
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = 'fresh-exit'",
+            ('{"reserved_usd": "0.00", "remaining_raw": 4}',),
+        )
+        reduced = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, exit_transport(feed(NOW)))
+        self.assertTrue(reduced["signed"], reduced)
+        self.assertTrue(reduced["price_freshness_proven"])
+        self.assertFalse(reduced["ticket_limit_proven"])
+        self.assertFalse(reduced["allocation_proven"])
+        stale_exit = self._message(exit_values, case_mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=5)
+        stale_digest = self._store(stale_exit, exit_values["pool"], "exit", "stale-exit")
+        db.execute(
+            "UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = 'stale-exit'",
+            ('{"reserved_usd": "0.00", "remaining_raw": 5}',),
+        )
+        refused_exit = desk_loop.mock_phantom_sign(stale_digest, auth, NOW, exit_transport(feed(NOW - 31)))
+        self.assertFalse(refused_exit["signed"], refused_exit)
+        self.assertEqual(refused_exit["reason"], "price_stale")
+        self.assertFalse(refused_exit["price_freshness_proven"])

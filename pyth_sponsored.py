@@ -328,14 +328,72 @@ def sol_leg(now: float) -> dict:
     view = status(now)
     last = _LAST if isinstance(_LAST, dict) else {}
     if view.get("fresh") is not True or view.get("usable") is not True:
-        return {"fresh": False, "used": False, "reason": view.get("reason") or "not_read"}
+        return {"fresh": False, "used": False, "reason": view.get("reason") or "not_read", "publish_time": last.get("publish_time")}
     return {
         "fresh": True,
         "used": True,
         "price": last.get("price"),
         "conf": last.get("conf"),
         "expo": last.get("expo"),
+        "publish_time": last.get("publish_time"),
         "reason": None,
+    }
+
+
+# The signer accepts a Pyth price only when publish_time is within 30 seconds
+# and not more than 5 seconds ahead of the check, the status is trading, and
+# confidence is at most 1% of the price. A wider band is not a usable dollar rate.
+SIGNER_PRICE_FRESH_S = 30
+SIGNER_PRICE_FUTURE_SKEW_S = 5
+SIGNER_PRICE_CONF_RATIO = Decimal("0.01")
+
+
+def _signer_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def assess_signer_price(payload, now: float) -> dict:
+    """One Hermes-shaped SOL/USD update. No network. The signer calls this itself."""
+    unknown = {"ok": False, "reason": "price_unknown"}
+    if isinstance(now, bool) or not isinstance(now, (int, float)) or not isinstance(payload, dict):
+        return unknown
+    status_name = payload.get("status")
+    price_obj = payload.get("price") if isinstance(payload.get("price"), dict) else None
+    if "parsed" in payload:
+        parsed = payload.get("parsed")
+        if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
+            return unknown
+        status_name = parsed[0].get("status", status_name)
+        price_obj = parsed[0].get("price")
+    if not isinstance(price_obj, dict) or status_name != "trading":
+        return unknown
+    price = _signer_int(price_obj.get("price"))
+    conf = _signer_int(price_obj.get("conf"))
+    expo = _signer_int(price_obj.get("expo"))
+    published = _signer_int(price_obj.get("publish_time"))
+    if price is None or conf is None or expo is None or published is None:
+        return unknown
+    if price <= 0 or conf < 0 or expo < -12 or expo > 0:
+        return unknown
+    if Decimal(conf) / Decimal(price) > SIGNER_PRICE_CONF_RATIO:
+        return {"ok": False, "reason": "price_conf"}
+    age = float(now) - published
+    if age > SIGNER_PRICE_FRESH_S or age < -SIGNER_PRICE_FUTURE_SKEW_S:
+        return {"ok": False, "reason": "price_stale"}
+    return {
+        "ok": True,
+        "reason": None,
+        "price": price,
+        "conf": conf,
+        "expo": expo,
+        "publish_time": published,
+        "status": "trading",
     }
 
 
