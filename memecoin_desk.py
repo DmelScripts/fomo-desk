@@ -450,11 +450,10 @@ def refresh_entry_intent(case_id: str, sized: dict, now: float) -> dict:
         fresh = sized["lamports"]
         if previous == fresh and snap.get("entry_rent_lamports") == sized["rent_lamports"] and version > 0:
             return {"ok": True, "amount": fresh, "version": version, "rebuilt": False, "case_id": row["id"], "send": False, "live_ready": False}
-        held = _held_conn(conn)
-        old_reserved = _reserved_amount(snap.get("reserved_usd")) or Decimal("0")
         new_reserved = _money(sized["total_usd"]) or TICKET
-        if held - old_reserved + new_reserved > ALLOCATION:
-            return refused | {"reason": "allocation"}
+        room = capital_room(conn, row["id"], new_reserved)
+        if room.get("ok") is not True:
+            return refused | {"reason": room.get("reason") or "allocation"}
         snap["entry_amount_raw"] = fresh
         snap["entry_intent_version"] = version + 1
         snap["entry_amount_previous"] = previous
@@ -578,10 +577,12 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
             conn.execute("UPDATE memecoin_cases SET stage = 'rejected', updated_at = ? WHERE id = ?", (moment, row["id"]))
             _log(conn, row["id"], row["mint"], "executor", "kill", "stop_new_entries", None, {"reason": "stop_new_entries"}, moment)
             return {"ok": False, "reason": "stop_new_entries", "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
-        if _held_conn(conn) + TICKET > ALLOCATION:
+        room = capital_room(conn, row["id"], TICKET)
+        if room.get("ok") is not True:
+            reason = room.get("reason") or "allocation"
             conn.execute("UPDATE memecoin_cases SET stage = 'rejected', updated_at = ? WHERE id = ?", (moment, row["id"]))
-            _log(conn, row["id"], row["mint"], "executor", "kill", "allocation", None, {"reason": "allocation"}, moment)
-            return {"ok": False, "reason": "allocation", "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
+            _log(conn, row["id"], row["mint"], "executor", "kill", reason, None, {"reason": reason}, moment)
+            return {"ok": False, "reason": reason, "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
         conn.execute(
             "UPDATE memecoin_cases SET stage = 'protected', snapshot_json = ?, ledger = ?, ledger_provenance = 'server', updated_at = ? WHERE id = ? AND stage = 'analyst_passed'",
             (json.dumps(snap, sort_keys=True), stored_ledger, moment, row["id"]),
@@ -861,10 +862,13 @@ def reserve_entry(case_id: str, message_b64: str, snapshot, price_transport=None
             return {"ok": False, "reason": "entry_unreconciled", "case_id": row["id"], "holds": True, "resend": False, "send": False, "live_ready": False}
         if _loss_conn(conn) >= MAX_LOSS:
             return {"ok": False, "reason": "stop_new_entries", "case_id": row["id"], "send": False, "live_ready": False}
-        incoming = _money(reservation.get("exposure_usd")) or TICKET
-        fee_part = _money(reservation.get("reserved_fee_usd")) or Decimal("0")
-        if not _room_for(conn, row["id"], incoming + fee_part):
-            return {"ok": False, "reason": "allocation", "case_id": row["id"], "send": False, "live_ready": False}
+        incoming = _money(reservation.get("exposure_usd"))
+        fee_part = _money(reservation.get("reserved_fee_usd"))
+        if incoming is None or fee_part is None:
+            return {"ok": False, "reason": "exposure_unknown", "case_id": row["id"], "send": False, "live_ready": False}
+        room = capital_room(conn, row["id"], incoming + fee_part)
+        if room.get("ok") is not True:
+            return {"ok": False, "reason": room.get("reason") or "allocation", "case_id": row["id"], "send": False, "live_ready": False}
         fresh["entry_inflight"] = reservation
         _store_reservation(conn, case_id=row["id"], side="entry", message_b64=message_b64, digest=digest, chain=chain, pool=pool_key, intent_id=None, ledger=_ledger_of(row), moment=moment)
         conn.execute("UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?", (json.dumps(fresh, sort_keys=True), moment, row["id"]))
@@ -1132,7 +1136,21 @@ def reserve_exit(case_id: str, message_b64: str, qty: int, snapshot, price_trans
         return _note(row, "risk", "usd_source_unbound")
     if fee_usd > MAX_FEE:
         return _note(row, "risk", "fee_cap")
-    if exposure > TICKET:
+    adds_sol = route["source_mint"] == solana_tx.NATIVE_MINT
+    creates = _ata_creates(decoded)
+    if creates is None:
+        return _note(row, "risk", "deposit_unknown")
+    if adds_sol or creates:
+        added_lamports = (route["in_amount"] if adds_sol else 0) + creates * solana_tx.TOKEN_ACCOUNT_RENT
+        added = pyth_sponsored.lamports_usd(added_lamports, sol)
+        if added is None:
+            return _note(row, "risk", "price_unknown")
+        if added > TICKET:
+            return _note(row, "risk", "exposure_cap")
+        room = db.exclusive(lambda conn: capital_room(conn, row["id"], added))
+        if room.get("ok") is not True:
+            return _note(row, "risk", room.get("reason") or "allocation")
+    elif exposure > TICKET:
         return _note(row, "risk", "exposure_cap")
     import owner_slippage
     import solana_jupiter
@@ -2160,7 +2178,59 @@ def _room_for(conn, case_id: str, incoming: Decimal) -> bool:
     return _held_conn(conn, exclude_id=case_id) + incoming <= ALLOCATION
 
 
-def _held_conn(conn, exclude_id=None) -> Decimal:
+def capital_room(conn, case_id: str, incoming: Decimal) -> dict:
+    """Open exposure plus this ticket. An unknown hold or price is not a number."""
+    if not isinstance(incoming, Decimal) or not incoming.is_finite() or incoming < 0:
+        return {"ok": False, "reason": "exposure_unknown"}
+    if incoming > TICKET:
+        return {"ok": False, "reason": "ticket"}
+    held = _held_conn(conn, exclude_id=case_id, unknown_is_none=True)
+    if held is None:
+        return {"ok": False, "reason": "exposure_unknown"}
+    if held + incoming > ALLOCATION:
+        return {"ok": False, "reason": "allocation"}
+    return {"ok": True, "reason": None, "held_usd": format(held, "f"), "incoming_usd": format(incoming, "f")}
+
+
+def claim_open_ticket(case_id: str, mint: str, usd: str, now: float) -> dict:
+    """Book one live ticket in the same transaction as the allocation check."""
+    amount = _money(usd)
+    if amount is None:
+        return {"ok": False, "reason": "exposure_unknown", "case_id": case_id, "send": False, "live_ready": False}
+
+    def work(conn):
+        _ensure_conn(conn)
+        if conn.execute("SELECT id FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone() is not None:
+            return {"ok": False, "reason": "already_open", "case_id": case_id, "send": False, "live_ready": False}
+        room = capital_room(conn, case_id, amount)
+        if room.get("ok") is not True:
+            return room | {"case_id": case_id, "send": False, "live_ready": False}
+        conn.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (case_id, mint, json.dumps({"reserved_usd": format(amount, "f")}, sort_keys=True), now, now),
+        )
+        return {"ok": True, "reason": None, "case_id": case_id, "reserved_usd": format(amount, "f"), "send": False, "live_ready": False}
+
+    return db.exclusive(work)
+
+
+def _ata_creates(decoded) -> int | None:
+    """How many classic ATA creates this message names. A malformed create is unknown."""
+    count = 0
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+        except (IndexError, TypeError):
+            return None
+        if program != solana_tx.ASSOCIATED_TOKEN:
+            continue
+        if bytes(instruction.data) != bytes([1]) or len(instruction.account_indexes) != 6:
+            return None
+        count += 1
+    return count
+
+
+def _held_conn(conn, exclude_id=None, *, unknown_is_none: bool = False):
     """Full ticket stays reserved while tokens or an unrefunded deposit remain."""
     total = Decimal("0")
     for item in conn.execute("SELECT id, stage, snapshot_json, ledger, ledger_provenance FROM memecoin_cases"):
@@ -2178,7 +2248,12 @@ def _held_conn(conn, exclude_id=None) -> Decimal:
         if item["stage"] == "exited" and not unresolved:
             continue
         reserved = _reserved_amount(body.get("reserved_usd"))
-        total += TICKET if reserved is None else reserved
+        if reserved is None:
+            if unknown_is_none:
+                return None
+            total += TICKET
+        else:
+            total += reserved
     return total
 
 

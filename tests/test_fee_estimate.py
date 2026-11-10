@@ -89,8 +89,8 @@ class FeeEstimateTests(unittest.TestCase):
         digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
         mint = solana_tx.b58encode(b"\x73" * 32)
         db.execute(
-            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'protected', '{}', ?, ?, 'live', 'server')",
-            (case_id, mint, NOW, NOW),
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (case_id, mint, '{"reserved_usd": "0.00"}', NOW, NOW),
         )
         db.execute(
             """
@@ -110,6 +110,8 @@ class FeeEstimateTests(unittest.TestCase):
         def transport(request):
             if request.get("method") == "getSlot":
                 return {"status": 200, "body": {"result": tip}}
+            if request.get("method") == "getMinimumBalanceForRentExemption":
+                return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
             if request.get("method") == "getMultipleAccounts":
                 if not priced:
                     return {"status": 200, "body": {"result": {"context": {"slot": slot}, "value": None}}}
@@ -325,8 +327,8 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertFalse(passed["sign"])
         self.assertFalse(passed["send"])
         self.assertFalse(passed["live_ready"])
-        self.assertFalse(passed["ticket_limit_proven"])
-        self.assertFalse(passed["allocation_proven"])
+        self.assertTrue(passed["ticket_limit_proven"])
+        self.assertTrue(passed["allocation_proven"])
         self.assertFalse(desk_loop.readiness()["sign"])
         self.assertFalse(desk_loop.scheduler_status()["send"])
 
@@ -479,3 +481,77 @@ class FeeEstimateTests(unittest.TestCase):
         row = db.query("SELECT source, evidence_json FROM memecoin_log WHERE case_id = 'landed-case' AND verdict = 'landed'")[0]
         self.assertEqual(row["source"], "estimate, not guaranteed")
         self.assertIn('"overrun": true', row["evidence_json"])
+
+    def test_the_signer_repeats_ticket_and_allocation_and_keeps_a_reduce_only_exit(self):
+        import json
+        import threading
+        mint = solana_tx.b58encode(b"\x75" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"ok": True, "mock": True, "network_called": False, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        transport = self._transport(accounts)
+        pyth_sponsored.read_accounts(transport, NOW)
+
+        huge = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=1_000_000_000)
+        huge_digest = self._store(huge, values["pool"], "entry", "bypass-ticket")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'bypass-ticket'", ('{"reserved_usd": "1.00"}',))
+        refused = desk_loop.mock_phantom_sign(huge_digest, auth, NOW, transport)
+        self.assertFalse(refused["signed"], refused)
+        self.assertEqual(refused["reason"], "ticket")
+        self.assertFalse(refused["ticket_limit_proven"])
+        self.assertFalse(refused["allocation_proven"])
+
+        hold = solana_tx.b58encode(b"\x76" * 32)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('deposit-hold', ?, 'exited', ?, ?, ?, 'live', 'server')",
+            (hold, json.dumps({
+                "reserved_usd": "95.00", "remaining_raw": 0, "deposit_refund_proven": False,
+                "deposits": {"mint_ata": {"account": "ata"}}, "live_receipts": [{"signature": "held"}],
+            }), NOW, NOW),
+        )
+        sized = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=60_000_000)
+        sized_digest = self._store(sized, values["pool"], "entry", "bypass-book")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'bypass-book'", ('{"reserved_usd": "1.00"}',))
+        crowded = desk_loop.mock_phantom_sign(sized_digest, auth, NOW, transport)
+        self.assertFalse(crowded["signed"], crowded)
+        self.assertEqual(crowded["reason"], "allocation")
+
+        db.execute("DELETE FROM memecoin_cases")
+        fresh = solana_tx.b58encode(b"\x77" * 32)
+        results = []
+
+        def claim(number):
+            results.append(memecoin_desk.claim_open_ticket("race-%s" % number, fresh, "8.00", NOW))
+
+        threads = [threading.Thread(target=claim, args=(number,)) for number in range(13)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sum(1 for item in results if item.get("ok") is True), 12)
+        self.assertEqual(sum(1 for item in results if item.get("reason") == "allocation"), 1)
+
+        db.init_db()
+        memecoin_desk._ensure()
+        kept = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id LIKE 'race-%'")
+        self.assertEqual(len(kept), 12)
+        self.assertTrue(all(json.loads(item["snapshot_json"])["reserved_usd"] == "8.00" for item in kept))
+        again = memecoin_desk.claim_open_ticket("race-again", fresh, "8.00", NOW)
+        self.assertEqual(again["reason"], "allocation")
+
+        exit_values, exit_accounts = _pool(mint, solana_tx.NATIVE_MINT)
+        exit_message = self._message(exit_values, mint, solana_tx.NATIVE_MINT, 0, side="exit", amount=4)
+        exit_digest = self._store(exit_message, exit_values["pool"], "exit", "full-exit")
+        db.execute("UPDATE memecoin_cases SET stage = 'partial', snapshot_json = ? WHERE id = 'full-exit'", ('{"reserved_usd": "0.00", "remaining_raw": 4}',))
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES ('full-book', ?, 'protected', ?, ?, ?, 'live', 'server')",
+            (solana_tx.b58encode(b"\x78" * 32), '{"reserved_usd": "100.00"}', NOW, NOW),
+        )
+        pyth_sponsored.read_accounts(self._transport(exit_accounts), NOW)
+        sold = desk_loop.mock_phantom_sign(exit_digest, auth, NOW, self._transport(exit_accounts))
+        self.assertTrue(sold["signed"], sold)
+        self.assertTrue(sold["ticket_limit_proven"])
+        self.assertTrue(sold["allocation_proven"])
+        gates = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "ticket_limit_proven")
+        book = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "allocation_proven")
+        self.assertTrue(gates["closed"])
+        self.assertTrue(book["closed"])

@@ -2044,17 +2044,133 @@ def _gates_after_fee(case_id: str, message_sha256: str) -> dict:
     return {"ok": True, "reason": None, "side": side, "slippage_bps": bps}
 
 
-def mock_phantom_sign(message_sha256: str, auth: dict) -> dict:
-    """A labeled stand-in. It does not call Phantom or the network."""
+def _message_deposit_lamports(decoded, transport) -> dict:
+    """Rent for ATA creates named by the message. No create means no new deposit."""
+    import memecoin_desk
+    import solana_tx
+    creates = memecoin_desk._ata_creates(decoded)
+    if creates is None:
+        return {"ok": False, "reason": "deposit_unknown"}
+    if creates == 0:
+        return {"ok": True, "lamports": 0}
+    if not callable(transport):
+        return {"ok": False, "reason": "deposit_unknown"}
+    try:
+        tip_response = transport({"method": "getSlot"})
+    except Exception:
+        return {"ok": False, "reason": "deposit_unknown"}
+    tip_body = tip_response.get("body") if isinstance(tip_response, dict) else None
+    tip = tip_body.get("result") if isinstance(tip_body, dict) else None
+    if isinstance(tip, bool) or not isinstance(tip, int) or tip <= 0:
+        return {"ok": False, "reason": "deposit_unknown"}
+    priced = _read_rent_exemption(transport, solana_tx.TOKEN_ACCOUNT_SPACE, tip)
+    if priced.get("ok") is not True or not isinstance(priced.get("lamports"), int):
+        return {"ok": False, "reason": "deposit_unknown"}
+    wallet = __import__("phantom_transport").REQUIRED_WALLET
+    held = 0
+    seen = set()
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            keys = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return {"ok": False, "reason": "deposit_unknown"}
+        if program != solana_tx.ASSOCIATED_TOKEN or bytes(instruction.data) != bytes([1]):
+            continue
+        if len(keys) != 6:
+            return {"ok": False, "reason": "deposit_unknown"}
+        payer, ata, owner, mint, system, token_program = keys
+        if payer != wallet or owner != wallet or system != solana_tx.SYSTEM_PROGRAM or token_program != solana_tx.TOKEN_PROGRAM:
+            return {"ok": False, "reason": "deposit_unknown"}
+        if ata in seen:
+            return {"ok": False, "reason": "deposit_unknown"}
+        seen.add(ata)
+        found = _read_deposit_account(transport, ata, mint, wallet, tip, decoded.blockhash)
+        if found["kind"] == "absent":
+            held += priced["lamports"]
+        elif found["kind"] != "present":
+            return {"ok": False, "reason": "deposit_unknown"}
+    if len(seen) != creates:
+        return {"ok": False, "reason": "deposit_unknown"}
+    return {"ok": True, "lamports": held}
+
+
+def _signer_capital(message_sha256: str, now, transport) -> dict:
+    """Recompute the ticket and the book from the reserved message. A snapshot figure is not this."""
+    import base64
+    import db
+    import time
+    import jupiter_route_v2
+    import memecoin_desk
+    import pyth_sponsored
+    import solana_jupiter
+    import solana_tx
+    refused = {"ok": False, "ticket_limit_proven": False, "allocation_proven": False}
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1:
+        return refused | {"reason": "exposure_unknown"}
+    proof = rows[0]
+    try:
+        decoded = solana_tx.decode_transaction(base64.b64decode(proof["message_b64"], validate=True))
+    except Exception:
+        return refused | {"reason": "exposure_unknown"}
+    moment = time.time() if now is None else now
+    sol = pyth_sponsored.sol_leg(moment)
+    if sol.get("fresh") is not True or sol.get("used") is not True:
+        return refused | {"reason": "price_unknown"}
+    parsed = None
+    source_mint = None
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+        except (IndexError, TypeError):
+            return refused | {"reason": "exposure_unknown"}
+        if program != solana_jupiter.PROGRAM_ID:
+            continue
+        found = jupiter_route_v2.parse(bytes(instruction.data))
+        if found.get("ok") is not True or not isinstance(found.get("in_amount"), int) or isinstance(found.get("in_amount"), bool):
+            return refused | {"reason": "exposure_unknown"}
+        try:
+            source_mint = decoded.static_keys[instruction.account_indexes[3]]
+        except (IndexError, TypeError):
+            return refused | {"reason": "exposure_unknown"}
+        parsed = found
+    if parsed is None or not isinstance(source_mint, str):
+        return refused | {"reason": "exposure_unknown"}
+    deposit = _message_deposit_lamports(decoded, transport)
+    if deposit.get("ok") is not True:
+        return refused | {"reason": deposit.get("reason") or "deposit_unknown"}
+    adds_sol = source_mint == solana_tx.NATIVE_MINT
+    if proof["side"] == "exit" and not adds_sol and deposit["lamports"] == 0:
+        return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "reduce_only": True}
+    spend = (parsed["in_amount"] if adds_sol else 0) + deposit["lamports"]
+    usd = pyth_sponsored.lamports_usd(spend, sol)
+    if usd is None:
+        return refused | {"reason": "price_unknown"}
+    if usd > memecoin_desk.TICKET:
+        return refused | {"reason": "ticket"}
+    room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd))
+    if room.get("ok") is not True:
+        return refused | {"reason": room.get("reason") or "allocation"}
+    return {"ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True, "reduce_only": False}
+
+
+def mock_phantom_sign(message_sha256: str, auth: dict, now: float | None = None, transport=None) -> dict:
+    """A labeled stand-in. It repeats the ticket and allocation checks and does not call Phantom."""
     import hashlib
+    blank = {"signed": False, "mock": True, "network_called": False, "live": False, "ticket_limit_proven": False, "allocation_proven": False}
     if not isinstance(auth, dict) or auth.get("ok") is not True or auth.get("mock") is not True or auth.get("network_called") is not False:
-        return {"signed": False, "mock": True, "network_called": False, "live": False, "reason": "auth_refused"}
+        return blank | {"reason": "auth_refused"}
+    capital = _signer_capital(message_sha256, now, transport)
+    if capital.get("ok") is not True:
+        return blank | {"reason": capital.get("reason") or "exposure_unknown"}
     digest = hashlib.sha256(b"mock-sign:" + str(message_sha256).encode()).hexdigest()
     return {
         "signed": True, "mock": True, "network_called": False, "live": False,
         "signature": "mock:" + digest[:32],
         "wallet_id": auth.get("wallet_id"), "wallet": auth.get("wallet"),
         "reason": None,
+        "ticket_limit_proven": True, "allocation_proven": True,
     }
 
 
@@ -2090,14 +2206,18 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
     auth = _server_auth(mock_auth)
     if auth.get("ok") is not True:
         return base | {"fee_estimate_blocked": False, "signer_reached": False, "reason": auth.get("reason"), "auth": auth}
-    signed = mock_phantom_sign(message_sha256, auth)
+    signed = mock_phantom_sign(message_sha256, auth, now, transport)
     if signed.get("signed") is not True:
-        return base | {"fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "reason": signed.get("reason")}
+        return base | {
+            "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "reason": signed.get("reason"),
+            "ticket_limit_proven": False, "allocation_proven": False,
+        }
     sent = mock_phantom_send(signed)
     return base | {
         "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "sender": sent,
         "mock_signed": True, "broadcast": False, "reason": sent.get("reason"),
-        "ticket_limit_proven": False, "allocation_proven": False,
+        "ticket_limit_proven": signed.get("ticket_limit_proven") is True,
+        "allocation_proven": signed.get("allocation_proven") is True,
     }
 
 
@@ -4633,16 +4753,14 @@ def remaining_live_gates() -> list[dict]:
             "proves": "every signer path enforces this reservation, including deposits, at most $8",
             "owner": False,
             "needs_live_read": False,
-            "closed": False,
-            "missing": "entry checks the snapshot amount before the mock signer; exit does not, and the flag stays false",
+            "closed": True,
         },
         {
             "gate": "allocation_proven",
             "proves": "every signer path enforces other holds plus this reservation at most $100",
             "owner": False,
             "needs_live_read": False,
-            "closed": False,
-            "missing": "the same entry-only check; exit can reach the mock signer without it",
+            "closed": True,
         },
         {
             "gate": "phantom_server_auth",
