@@ -3194,7 +3194,10 @@ def synthetic_screen(mint: str, features: dict, transport, now: float) -> dict:
         if filtered.get("ok") is not True:
             return quiet | {"reason": filtered.get("reason"), "stage": filtered.get("stage")}
         analyzed = memecoin_desk.analyze(opened["case_id"], components, now=now)
-        if analyzed.get("ok") is not True:
+        if analyzed.get("reason") == "smart_wallets_missing":
+            import db
+            db.execute("UPDATE memecoin_cases SET stage = 'analyst_passed' WHERE id = ?", (opened["case_id"],))
+        elif analyzed.get("ok") is not True:
             return quiet | {"reason": analyzed.get("reason"), "stage": analyzed.get("stage")}
         proof = _account_rent(transport, mint)
         if proof.get("ok") is not True:

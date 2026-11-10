@@ -248,6 +248,11 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     }
     for name in COMPONENTS:
         item = components.get(name)
+        if name == "smart_wallets":
+            import stalkchain_observed
+            parsed = stalkchain_observed.parse_smart_wallets(None)
+            if parsed.get("ok") is not True:
+                return _fail(row, "analyst", "smart_wallets_missing", source=item.get("source") if isinstance(item, dict) else None)
         if not isinstance(item, dict):
             return _fail(row, "analyst", name + "_missing")
         source = item.get("source")

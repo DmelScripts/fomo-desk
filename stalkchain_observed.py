@@ -163,18 +163,36 @@ def parse_dev_holding(data) -> dict:
 
 
 def parse_bundle_percent(data) -> dict:
-    """Launch dev buy plus non-dev held-at-launch. Either missing percent fails closed."""
+    """Sum only when launch.buys, split by deployer, match the two published percents."""
     launch = data.get("launch") if isinstance(data, dict) else None
     bundlers = data.get("bundlers") if isinstance(data, dict) else None
     if not isinstance(launch, dict) or not isinstance(bundlers, dict):
         return _fact(False, "shape_mismatch")
-    if "devBuyPercent" not in launch or "heldAtLaunchPercent" not in bundlers:
+    buys = launch.get("buys")
+    dev = _percent(launch.get("devBuyPercent")) if "devBuyPercent" in launch else None
+    nondev = _percent(bundlers.get("heldAtLaunchPercent")) if "heldAtLaunchPercent" in bundlers else None
+    if dev is None or nondev is None or not isinstance(buys, list) or buys == []:
         return _fact(False, "shape_mismatch")
-    dev = _percent(launch.get("devBuyPercent"))
-    nondev = _percent(bundlers.get("heldAtLaunchPercent"))
-    if dev is None or nondev is None:
-        return _fact(False, "shape_mismatch")
-    return _fact(True, None, dev_launch_percent=format(dev, "f"), nondev_launch_percent=format(nondev, "f"), inclusive_percent=format(dev + nondev, "f"))
+    from_dev = Decimal("0")
+    from_rest = Decimal("0")
+    for buy in buys:
+        if not isinstance(buy, dict) or buy.get("block") != 0 or not isinstance(buy.get("deployer"), bool):
+            return _fact(False, "shape_mismatch")
+        part = _percent(buy.get("supplyPercent"))
+        if part is None:
+            return _fact(False, "shape_mismatch")
+        if buy["deployer"] is True:
+            from_dev += part
+        else:
+            from_rest += part
+    if from_dev != dev or from_rest != nondev:
+        return _fact(False, "bundle_unjoined", dev_launch_percent=format(dev, "f"), nondev_launch_percent=format(nondev, "f"))
+    return _fact(
+        True, None,
+        dev_launch_percent=format(dev, "f"),
+        nondev_launch_percent=format(nondev, "f"),
+        inclusive_percent=format(dev + nondev, "f"),
+    )
 
 
 def parse_unique_buyers(data) -> dict:

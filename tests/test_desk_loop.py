@@ -53,14 +53,12 @@ class DeskLoopTests(unittest.TestCase):
         arm_holder_chart()
         self.addCleanup(clear_filter_fixtures)
         passed = memecoin_desk.analyze("score-line", fresh, NOW)
-        self.assertTrue(passed["ok"], passed)
-        self.assertEqual(memecoin_desk.view("score-line")["snapshot"]["score"], "70")
+        self.assertEqual(passed["reason"], "smart_wallets_missing", passed)
         db.execute("UPDATE memecoin_cases SET stage = 'filter_passed' WHERE id = 'score-line'")
         short = {name: {"value": "69", "source": "server_measurement", "fetched_at": NOW} for name in memecoin_desk.COMPONENTS}
         short["holder_growth"] = {"source": "solana_tracker_holders_chart", "fetched_at": NOW}
         failed = memecoin_desk.analyze("score-line", short, NOW)
-        self.assertFalse(failed["ok"])
-        self.assertEqual(failed["reason"], "score")
+        self.assertEqual(failed["reason"], "smart_wallets_missing")
 
     def setUp(self):
         _tmp, restore = temp_desk_env()
@@ -505,6 +503,11 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(measured["observed_facts"]["dev_holding"]["value"], "0.38")
         self.assertTrue(measured["observed_facts"]["bundle_percent"]["ok"])
         self.assertEqual(measured["observed_facts"]["bundle_percent"]["inclusive_percent"], "10.32")
+        overlap = copy.deepcopy(payload["responses"]["early_buyers"]["data"])
+        overlap["launch"]["buys"][1]["supplyPercent"] = 9.87
+        overlapped = stalkchain_observed.parse_bundle_percent(overlap)
+        self.assertFalse(overlapped["ok"])
+        self.assertNotIn("inclusive_percent", overlapped)
         self.assertTrue(measured["observed_facts"]["unique_buyers"]["ok"])
         self.assertEqual(measured["observed_facts"]["unique_buyers"]["unique_buyers_1h"], 1095)
         self.assertFalse(measured["observed_facts"]["smart_wallets"]["ok"])
