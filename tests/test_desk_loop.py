@@ -7,7 +7,7 @@ import desk_loop
 import memecoin_desk
 import solana_tx
 import usdc_valuation
-from tests.support import arm_clean_creator, arm_holder_chart, clear_filter_fixtures, temp_desk_env
+from tests.support import arm_clean_creator, arm_holder_chart, clear_filter_fixtures, rugcheck_or_pair, temp_desk_env
 
 NOW = 1_800_000_000.0
 MINT = solana_tx.b58encode(b"\x55" * 32)
@@ -73,7 +73,7 @@ class DeskLoopTests(unittest.TestCase):
     def test_a_missing_stalkchain_key_stops_the_handoff(self):
         def transport(request):
             if request["kind"] == "http":
-                return {"status": 200, "body": _pair()}
+                return rugcheck_or_pair(request, _pair())
             raw = bytearray(82)
             raw[44] = 6
             raw[45] = 1
@@ -97,6 +97,31 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(result["usd_live"])
         self.assertEqual(usdc_valuation.keyless_catalog_is_not_a_price()["reason"], "metadata_not_a_price")
         self.assertTrue(memecoin_desk.log_for(result["case_id"]))
+
+    def test_a_fetched_summary_below_100_fails_closed(self):
+        mint = solana_tx.b58encode(b"\x44" * 32)
+        pair = [{
+            "chainId": "solana", "dexId": "raydium",
+            "pairAddress": solana_tx.b58encode(b"\x67" * 32),
+            "baseToken": {"address": mint}, "priceUsd": "1.25",
+            "marketCap": 1_000_000, "fdv": 5_000_000, "liquidity": {"usd": 250_000},
+            "pairCreatedAt": int((NOW - 3600) * 1000), "priceChange": {"h1": 10},
+        }]
+
+        def transport(request):
+            if str(request.get("url", "")).endswith("/report/summary"):
+                return {"status": 200, "body": {"lpLockedPct": 99}}
+            if request.get("kind") == "rpc":
+                raw = bytearray(82)
+                raw[44] = 6
+                raw[45] = 1
+                return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
+            return {"status": 200, "body": pair}
+
+        blocked = desk_loop.run_once(mint, transport, NOW)
+        self.assertEqual(blocked["reason"], "lp", blocked)
+        self.assertTrue(blocked["lp_fetched"])
+        self.assertFalse(blocked["live_ready"])
 
     def test_without_a_transport_nothing_is_fetched(self):
         result = desk_loop.run_once(MINT, None, NOW)
@@ -164,7 +189,7 @@ class DeskLoopTests(unittest.TestCase):
                 raw[44] = 6
                 raw[45] = 1
                 return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
-            return {"status": 200, "body": _pair()}
+            return rugcheck_or_pair(request, _pair())
 
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(found["candidates"], 1)
@@ -208,7 +233,7 @@ class DeskLoopTests(unittest.TestCase):
                 raw[44] = 6
                 raw[45] = 1
                 return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
-            return {"status": 200, "body": _pair()}
+            return rugcheck_or_pair(request, _pair())
 
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(len(calls), 4)
@@ -288,6 +313,8 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps([{"chainId": "solana", "tokenAddress": MINT}]).encode())
             if "/token-pairs/" in url:
                 return _Response(200, json.dumps(_pair()).encode())
+            if url.endswith("/report/summary"):
+                return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
             if "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
@@ -337,6 +364,8 @@ class DeskLoopTests(unittest.TestCase):
                 body = json.loads(json.dumps(global_pair))
                 body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
                 return _Response(200, json.dumps(body).encode())
+            if url.endswith("/report/summary"):
+                return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
             if "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
@@ -470,6 +499,18 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(measured["uniques"]["is_analyst_component"])
         self.assertEqual(measured["price_change_1h"]["value"], "401.13")
         self.assertEqual(measured["price_change_1h"]["numeric_rule_result"], "reject")
+        self.assertEqual(measured["observed_facts"]["label"], "observed MCP shape, unverified REST")
+        self.assertFalse(measured["observed_facts"]["rest_envelope_verified"])
+        self.assertTrue(measured["observed_facts"]["dev_holding"]["ok"])
+        self.assertEqual(measured["observed_facts"]["dev_holding"]["value"], "0.38")
+        self.assertTrue(measured["observed_facts"]["bundle_percent"]["ok"])
+        self.assertEqual(measured["observed_facts"]["bundle_percent"]["inclusive_percent"], "10.32")
+        self.assertTrue(measured["observed_facts"]["unique_buyers"]["ok"])
+        self.assertEqual(measured["observed_facts"]["unique_buyers"]["unique_buyers_1h"], 1095)
+        self.assertFalse(measured["observed_facts"]["smart_wallets"]["ok"])
+        self.assertEqual(measured["observed_facts"]["smart_wallets"]["reason"], "no_observed_source")
+        self.assertFalse(stalkchain_observed.parse_dev_holding({"concentration": {}})["ok"])
+        self.assertFalse(stalkchain_observed.parse_unique_buyers({"windows": {"1h": {}}})["ok"])
         self.assertFalse(measured["holder_quality"]["is_analyst_score"])
         self.assertIsNone(measured["analyst_score"])
         self.assertTrue(measured["analyst_formula"]["owner_approved"])
@@ -505,6 +546,8 @@ class DeskLoopTests(unittest.TestCase):
         self.assertIsNone(stalkchain_observed.map_fixture(doubled, mint)["bundle"]["inclusive_percent"])
 
         def transport(request):
+            if str(request.get("url", "")).endswith("/report/summary"):
+                return {"status": 200, "body": {"lpLockedPct": 100, "score": 1}}
             if request.get("kind") == "observed_mcp":
                 self.assertEqual(request["mint"], mint)
                 return {"status": 200, "body": bundle}
@@ -541,6 +584,8 @@ class DeskLoopTests(unittest.TestCase):
         other = solana_tx.b58encode(b"\x44" * 32)
 
         def transport(request):
+            if str(request.get("url", "")).endswith("/report/summary"):
+                return {"status": 200, "body": {"lpLockedPct": 100, "score": 1}}
             if str(request.get("url", "")).endswith("/token-boosts/latest/v1"):
                 return {"status": 200, "body": [
                     {"chainId": "ethereum", "tokenAddress": "0xabc"},
@@ -665,6 +710,8 @@ class DeskLoopTests(unittest.TestCase):
                     {"chainId": "solana", "tokenAddress": swap_mint},
                     {"chainId": "solana", "tokenAddress": other},
                 ]
+            elif url.endswith("/report/summary"):
+                body = {"lpLockedPct": 100, "score": 1}
             elif "/token-pairs/" in url:
                 mint = url.rsplit("/", 1)[-1]
                 pair = _pair()

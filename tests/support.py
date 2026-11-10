@@ -12,6 +12,14 @@ def load(name: str):
     return json.loads((FIX / name).read_text())
 
 
+def rugcheck_or_pair(request, pair):
+    """Summary fixture for the keyless LP URL. Every other HTTP body stays the pair."""
+    url = request.get("url") if isinstance(request, dict) else ""
+    if isinstance(url, str) and url.endswith("/report/summary"):
+        return {"status": 200, "body": {"lpLockedPct": 100, "score": 1, "score_normalised": 1}}
+    return {"status": 200, "body": pair}
+
+
 def arm_clean_creator(mint: str) -> None:
     """Record one Helius page that contains only this mint. No socket."""
     import dev_rug_history

@@ -14,6 +14,7 @@ from decimal import Decimal
 import memecoin_desk
 
 KIND = "OBSERVED_MCP_FIXTURE_ONLY"
+SHAPE = "observed MCP shape, unverified REST"
 SOURCES = ("onchain", "deployer", "early_buyers", "holder_quality", "snapshot", "stats")
 
 
@@ -137,6 +138,60 @@ def holder_growth_series(points) -> dict:
         "cross_source_is_growth": False,
         "is_analyst_component": False,
     }
+
+
+def _fact(ok: bool, reason: str | None, **extra) -> dict:
+    return {
+        "ok": ok,
+        "reason": reason,
+        "shape": SHAPE,
+        "rest_envelope_verified": False,
+        "live_ready": False,
+        "admitted": False,
+    } | extra
+
+
+def parse_dev_holding(data) -> dict:
+    """$.data.concentration.devPercent. A missing or non-numeric value is not a holding."""
+    concentration = data.get("concentration") if isinstance(data, dict) else None
+    if not isinstance(concentration, dict) or "devPercent" not in concentration:
+        return _fact(False, "shape_mismatch")
+    value = _percent(concentration.get("devPercent"))
+    if value is None:
+        return _fact(False, "shape_mismatch")
+    return _fact(True, None, value=format(value, "f"))
+
+
+def parse_bundle_percent(data) -> dict:
+    """Launch dev buy plus non-dev held-at-launch. Either missing percent fails closed."""
+    launch = data.get("launch") if isinstance(data, dict) else None
+    bundlers = data.get("bundlers") if isinstance(data, dict) else None
+    if not isinstance(launch, dict) or not isinstance(bundlers, dict):
+        return _fact(False, "shape_mismatch")
+    if "devBuyPercent" not in launch or "heldAtLaunchPercent" not in bundlers:
+        return _fact(False, "shape_mismatch")
+    dev = _percent(launch.get("devBuyPercent"))
+    nondev = _percent(bundlers.get("heldAtLaunchPercent"))
+    if dev is None or nondev is None:
+        return _fact(False, "shape_mismatch")
+    return _fact(True, None, dev_launch_percent=format(dev, "f"), nondev_launch_percent=format(nondev, "f"), inclusive_percent=format(dev + nondev, "f"))
+
+
+def parse_unique_buyers(data) -> dict:
+    """$.data.windows.1h.uniqueBuyers. A count from another window is not this fact."""
+    windows = data.get("windows") if isinstance(data, dict) else None
+    hour = windows.get("1h") if isinstance(windows, dict) else None
+    if not isinstance(hour, dict) or "uniqueBuyers" not in hour:
+        return _fact(False, "shape_mismatch")
+    count = _count(hour.get("uniqueBuyers"))
+    if count is None:
+        return _fact(False, "shape_mismatch")
+    return _fact(True, None, unique_buyers_1h=count)
+
+
+def parse_smart_wallets(data) -> dict:
+    """No observed field is a smart-wallet fact. Holder quality is a scored sample, not this."""
+    return _fact(False, "no_observed_source", parsed=False)
 
 
 def map_fixture(bundle, mint: str) -> dict:
@@ -338,4 +393,12 @@ def map_fixture(bundle, mint: str) -> dict:
         "analyst_formula": memecoin_desk.analyst_decision(),
         "admits_filter": False,
         "admits_analyst": False,
+        "observed_facts": {
+            "label": SHAPE,
+            "rest_envelope_verified": False,
+            "dev_holding": parse_dev_holding(parsed["onchain"]),
+            "bundle_percent": parse_bundle_percent(parsed["early_buyers"]),
+            "unique_buyers": parse_unique_buyers(parsed["stats"]),
+            "smart_wallets": parse_smart_wallets(parsed["holder_quality"]),
+        },
     }

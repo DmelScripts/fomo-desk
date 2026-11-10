@@ -155,6 +155,19 @@ def run_discovery(transport, now: float) -> dict:
     }
 
 
+def _fetch_lp_locked_pct(transport, mint: str) -> dict:
+    """Keyless RugCheck summary. A missing or unparsed body is not 100 percent locked."""
+    import public_filter_docs
+    url = "https://api.rugcheck.xyz/v1/tokens/" + mint + "/report/summary"
+    try:
+        response = transport({"kind": "http", "method": "GET", "url": url})
+    except Exception:
+        return {"ok": False, "reason": "lp", "fetched": False}
+    body = response.get("body") if isinstance(response, dict) and response.get("status") == 200 else None
+    parsed = public_filter_docs.parse_lp_locked_pct(body if isinstance(body, dict) else {})
+    return parsed | {"fetched": isinstance(response, dict)}
+
+
 def _read_observed(transport, mint: str) -> dict:
     """An explicit observed-MCP fixture. A REST body is not this channel."""
     import stalkchain_observed
@@ -334,6 +347,15 @@ def run_once(mint: str, transport, now: float) -> dict:
         "envelope", "mint_mismatch", "response_fields_unpublished",
     }
     authorities_clear = account.get("ok") is True and account.get("mint_authority_revoked") is True and account.get("freeze_authority_revoked") is True
+    if authorities_clear:
+        locked = _fetch_lp_locked_pct(transport, mint)
+        if locked.get("ok") is not True:
+            return stopped | {
+                "reason": "lp", "stage": "filter", "case_id": opened["case_id"],
+                "lp_fetched": locked.get("fetched") is True, "lp_source": "rugcheck_summary",
+                "rest_envelope_verified": False, "live_ready": False, "send": False,
+            }
+        onchain["lpLockedPct"] = 100
     if authorities_clear and source_blocks_lp:
         reported = source_reason
         stage = opened.get("stage")
@@ -2075,6 +2097,7 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
     return base | {
         "fee_estimate_blocked": False, "signer_reached": True, "signer": signed, "sender": sent,
         "mock_signed": True, "broadcast": False, "reason": sent.get("reason"),
+        "ticket_limit_proven": False, "allocation_proven": False,
     }
 
 
@@ -4530,7 +4553,8 @@ def public_reader(request: dict) -> dict:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
     else:
-        if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
+        rugcheck_summary = isinstance(url, str) and url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report/summary")
+        if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/") or rugcheck_summary):
             raise RuntimeError("host_refused")
         if url.startswith("https://api.jup.ag/") and ("/execute" in url or "/submit" in url):
             raise RuntimeError("host_refused")
@@ -4616,17 +4640,19 @@ def remaining_live_gates() -> list[dict]:
         },
         {
             "gate": "ticket_limit_proven",
-            "proves": "this reservation, including refundable deposits, is at most $8 and the flag is promoted",
+            "proves": "every signer path enforces this reservation, including deposits, at most $8",
             "owner": False,
             "needs_live_read": False,
             "closed": False,
+            "missing": "entry checks the snapshot amount before the mock signer; exit does not, and the flag stays false",
         },
         {
             "gate": "allocation_proven",
-            "proves": "other holds plus this reservation are at most $100 and the flag is promoted",
+            "proves": "every signer path enforces other holds plus this reservation at most $100",
             "owner": False,
             "needs_live_read": False,
             "closed": False,
+            "missing": "the same entry-only check; exit can reach the mock signer without it",
         },
         {
             "gate": "phantom_server_auth",

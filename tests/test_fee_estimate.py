@@ -325,6 +325,8 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertFalse(passed["sign"])
         self.assertFalse(passed["send"])
         self.assertFalse(passed["live_ready"])
+        self.assertFalse(passed["ticket_limit_proven"])
+        self.assertFalse(passed["allocation_proven"])
         self.assertFalse(desk_loop.readiness()["sign"])
         self.assertFalse(desk_loop.scheduler_status()["send"])
 
