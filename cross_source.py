@@ -172,15 +172,23 @@ def _fetch(kind: str, mint: str, pair_id: str | None = None):
 BUNDLE_SOURCE = "solana_tracker_initial_bundler_share"
 
 
-def _bundle_percentage(value):
-    """A finite share from 0 through 100. NaN, negatives, and anything above 100 are missing."""
-    if isinstance(value, bool) or value is None:
+def _real_number(value):
+    """An int or a float. Bools and strings, including digit strings, are not numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if not number.is_finite() or number < 0 or number > 100:
+    if not number.is_finite():
+        return None
+    return number
+
+
+def _bundle_percentage(value):
+    """A finite share from 0 through 100. Strings, NaN, negatives, and anything above 100 are missing."""
+    number = _real_number(value)
+    if number is None or number < 0 or number > 100:
         return None
     return number
 
@@ -190,8 +198,9 @@ def bundle_check(tracker_body, rugcheck_body) -> dict:
 
     Thành approved this on 2026-11-11 as the substitute for creation-block share.
     risk.bundlers.totalInitialPercentage above 10 fails. A bundlers object with
-    count 0 and no percentage is 0. A missing, non-numeric, NaN, negative, or
-    over-100 figure fails closed. RugCheck is not this measure.
+    count 0 and no percentage is 0. Count and the percentage must be an int or a
+    float. A string, including a digit string, plus a missing, NaN, negative, or
+    over-100 figure, fails closed. RugCheck is not this measure.
     """
     del rugcheck_body
     refused = {"ok": False, "reason": "bundle_unverified", "bundled_launch_pct": None, "source": BUNDLE_SOURCE}
@@ -200,9 +209,11 @@ def bundle_check(tracker_body, rugcheck_body) -> dict:
     bundlers = risk.get("bundlers") if isinstance(risk, dict) else None
     if not isinstance(bundlers, dict):
         return refused
-    count = bundlers.get("count")
+    if "count" in bundlers and _real_number(bundlers.get("count")) is None:
+        return refused
+    count = _real_number(bundlers.get("count")) if "count" in bundlers else None
     if "totalInitialPercentage" not in bundlers:
-        if count == 0 and not isinstance(count, bool):
+        if count is not None and count == 0:
             return {"ok": True, "reason": None, "bundled_launch_pct": "0", "source": BUNDLE_SOURCE}
         return refused
     pct = _bundle_percentage(bundlers.get("totalInitialPercentage"))

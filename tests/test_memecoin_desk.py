@@ -433,12 +433,12 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.filter_case(self._open(24), _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 1, "tokens_seen": 4}), now=NOW)["reason"], "dev_rug_history_unverified")
         arm_clean_creator(_mint(25))
         at_cap = _passing_cross(_mint(25))
-        at_cap["tracker"]["risk"]["bundlers"] = {"count": 4, "totalInitialPercentage": "10.0"}
+        at_cap["tracker"]["risk"]["bundlers"] = {"count": 4, "totalInitialPercentage": 10.0}
         cross_source.note_bundle(_mint(25), at_cap)
         passed_cap = memecoin_desk.filter_case(self._open(25), _onchain(bundled_launch_pct="99"), now=NOW)
         self.assertTrue(passed_cap["ok"], passed_cap)
         over = _passing_cross(_mint(26))
-        over["tracker"]["risk"]["bundlers"] = {"count": 4, "totalInitialPercentage": "10.01"}
+        over["tracker"]["risk"]["bundlers"] = {"count": 4, "totalInitialPercentage": 10.01}
         cross_source.note_bundle(_mint(26), over)
         arm_clean_creator(_mint(26))
         refused_cap = memecoin_desk.filter_case(self._open(26), _onchain(bundled_launch_pct="0"), now=NOW)
@@ -468,6 +468,11 @@ class MemecoinDeskTests(unittest.TestCase):
         zero = memecoin_desk.filter_case(self._open(58), _onchain(bundled_launch_pct="50"), now=NOW)
         self.assertTrue(zero["ok"], zero)
         self.assertEqual(cross_source.bundle_check(counted["tracker"], counted["rugcheck"])["bundled_launch_pct"], "0")
+        for text in ("0", "10.0", "5"):
+            worded = {"risk": {"bundlers": {"count": 4, "totalInitialPercentage": text}}}
+            self.assertEqual(cross_source.bundle_check(worded, None)["reason"], "bundle_unverified", text)
+        string_count = {"risk": {"bundlers": {"count": "0", "totalInitialPercentage": 0}}}
+        self.assertEqual(cross_source.bundle_check(string_count, None)["reason"], "bundle_unverified")
 
     def test_rug_reader_and_holder_chart_fail_closed(self):
         import dev_rug_history
