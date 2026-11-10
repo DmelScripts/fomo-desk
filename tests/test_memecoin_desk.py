@@ -54,11 +54,14 @@ def _pair(mint: str, **over):
         "fetched_at": NOW,
         "pair_created_at": int((NOW - 3600) * 1000),
         "market_cap_usd": "1000000",
+        "market_cap_basis": "marketCap",
         "liquidity_usd": "250000",
         "price_usd": "1",
         "price_change_h1": "10",
     }
     body.update(over)
+    if "confirmed_market_cap_usd" not in body:
+        body["confirmed_market_cap_usd"] = body["market_cap_usd"]
     return body
 
 
@@ -97,6 +100,47 @@ def _bind_exit(case_id: str) -> dict:
         "accounts": {values["pool"]: {"owner": owner, "data": base64.b64encode(raw).decode()}},
     }
     return memecoin_desk.record_exit_receipt(case_id, body, _prices(), WHEN)
+
+
+def _passing_cross(mint: str, quote="300000", dex_cap="1000000", tracker_cap="1000000"):
+    """Quote-side liquidity and two confirmed caps. DexScreener liquidity.usd is noise."""
+    pool = "P" + mint[:20]
+    return {
+        "mint": mint,
+        "pair_id": pool,
+        "dex": {"pairs": [{
+            "pairAddress": pool,
+            "baseToken": {"address": mint},
+            "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "LOOKALIKE"},
+            "marketCap": dex_cap,
+            "liquidity": {"usd": "999999999"},
+        }]},
+        "rugcheck": {
+            "creator": "SameCreator",
+            "creatorBalance": 0,
+            "token": {"supply": 1000},
+            "mintAuthority": None,
+            "freezeAuthority": None,
+            "risks": [],
+            "creatorTokens": [{"mint": mint}],
+            "markets": [{"pubkey": pool, "lp": {"quoteUSD": quote, "lpLockedPct": 100}}],
+        },
+        "tracker": {
+            "holders": 10,
+            "token": {"creation": {"creator": "SameCreator"}},
+            "risk": {"dev": {"percentage": 0}, "risks": []},
+            "pools": [{
+                "poolId": pool,
+                "lpBurn": 100,
+                "security": {"mintAuthority": None, "freezeAuthority": None},
+                "liquidity": {"quote": quote, "usd": 1},
+                "marketCap": {"quote": tracker_cap, "usd": tracker_cap},
+            }],
+        },
+        "chart": {"holders": [{"holders": 2, "time": 1}, {"holders": 4, "time": 2}]},
+        "das": {"result": {"total": 1, "items": [{"id": mint}]}},
+        "deployer": {"total": 1, "data": [{"mint": mint}]},
+    }
 
 
 def _onchain(**over):
@@ -209,7 +253,7 @@ class MemecoinDeskTests(unittest.TestCase):
     def _filtered(self, number: int, **pair):
         case_id = self._open(number, **pair)
         arm_clean_creator(_mint(number))
-        result = memecoin_desk.filter_case(case_id, _onchain(), now=NOW)
+        result = memecoin_desk.filter_case(case_id, _onchain(cross_sources=_passing_cross(_mint(number))), now=NOW)
         self.assertTrue(result["ok"], result)
         return case_id
 
@@ -259,15 +303,22 @@ class MemecoinDeskTests(unittest.TestCase):
             self.assertEqual(memecoin_desk.scout(_pair(_mint(13), liquidity_usd=bad), now=NOW)["reason"], "liquidity")
         stale = memecoin_desk.scout(_pair(_mint(14), fetched_at=NOW - 31), now=NOW)
         self.assertEqual(stale["reason"], "snapshot_stale")
+        unconfirmed = _pair(_mint(47))
+        del unconfirmed["confirmed_market_cap_usd"]
+        self.assertEqual(memecoin_desk.scout(unconfirmed, now=NOW)["reason"], "market_cap_unconfirmed")
+        self.assertEqual(memecoin_desk.scout(_pair(_mint(48), market_cap_basis=None), now=NOW)["reason"], "market_cap_basis")
         self.assertTrue(any(row["reason"] == "market_cap_missing" for row in db.query("SELECT reason FROM memecoin_log")))
 
-    def test_liquidity_ratio_uses_the_scout_snapshot(self):
-        exact = self._open(15, market_cap_usd="1000000", liquidity_usd="250000")
+    def test_liquidity_ratio_uses_quote_side_not_dexscreener(self):
+        exact = self._open(15, market_cap_usd="1000000", liquidity_usd="1")
         arm_clean_creator(_mint(15))
-        self.assertTrue(memecoin_desk.filter_case(exact, _onchain(), now=NOW)["ok"])
-        short = self._open(16, market_cap_usd="1000000", liquidity_usd="249999")
+        self.assertTrue(memecoin_desk.filter_case(exact, _onchain(cross_sources=_passing_cross(_mint(15))), now=NOW)["ok"])
+        missing = self._open(16, market_cap_usd="1000000", liquidity_usd="250000")
         arm_clean_creator(_mint(16))
-        refused = memecoin_desk.filter_case(short, _onchain(liquidity_usd="900000"), now=NOW)
+        self.assertEqual(memecoin_desk.filter_case(missing, _onchain(), now=NOW)["reason"], "liquidity_source_missing")
+        short = self._open(46, market_cap_usd="1000000", liquidity_usd="999999")
+        arm_clean_creator(_mint(46))
+        refused = memecoin_desk.filter_case(short, _onchain(cross_sources=_passing_cross(_mint(46), quote="26", dex_cap="100", tracker_cap="300")), now=NOW)
         self.assertEqual(refused["reason"], "liquidity_below_25pct_mcap")
         self.assertEqual(memecoin_desk.view(short)["stage"], "rejected")
         dexscreener = self._open(17)
@@ -283,19 +334,19 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.filter_case(self._open(41), missing_lp, now=NOW)["reason"], "lp")
         self.assertEqual(memecoin_desk.filter_case(self._open(21), _onchain(dev_holding_pct="3.01"), now=NOW)["reason"], "dev_holding")
         arm_clean_creator(_mint(22))
-        self.assertTrue(memecoin_desk.filter_case(self._open(22), _onchain(dev_holding_pct="3"), now=NOW)["ok"])
+        self.assertTrue(memecoin_desk.filter_case(self._open(22), _onchain(dev_holding_pct="3", cross_sources=_passing_cross(_mint(22))), now=NOW)["ok"])
         supplied = _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 2})
         self.assertEqual(memecoin_desk.filter_case(self._open(23), supplied, now=NOW)["reason"], "dev_rug_history_unverified")
         self.assertEqual(memecoin_desk.filter_case(self._open(24), _onchain(dev_rugs={"status": "checked", "source": "stalkchain_token_deployer", "rugs": 1, "tokens_seen": 4}), now=NOW)["reason"], "dev_rug_history_unverified")
         arm_clean_creator(_mint(25))
         self.assertEqual(memecoin_desk.filter_case(self._open(25), _onchain(bundled_launch_pct="10.01"), now=NOW)["reason"], "bundle")
         arm_clean_creator(_mint(26))
-        self.assertTrue(memecoin_desk.filter_case(self._open(26), _onchain(bundled_launch_pct="10"), now=NOW)["ok"])
+        self.assertTrue(memecoin_desk.filter_case(self._open(26), _onchain(bundled_launch_pct="10", cross_sources=_passing_cross(_mint(26))), now=NOW)["ok"])
         pumped = self._open(27, price_change_h1="80")
         arm_clean_creator(_mint(27))
         self.assertEqual(memecoin_desk.filter_case(pumped, _onchain(), now=NOW)["reason"], "already_up_1h")
         arm_clean_creator(_mint(28))
-        self.assertTrue(memecoin_desk.filter_case(self._open(28, price_change_h1="79"), _onchain(), now=NOW)["ok"])
+        self.assertTrue(memecoin_desk.filter_case(self._open(28, price_change_h1="79"), _onchain(cross_sources=_passing_cross(_mint(28))), now=NOW)["ok"])
 
     def test_rug_reader_and_holder_chart_fail_closed(self):
         import dev_rug_history
@@ -1835,7 +1886,7 @@ class MemecoinDeskTests(unittest.TestCase):
             opened = memecoin_desk.scout(_pair(mint), now=NOW)
             self.assertTrue(opened["ok"], opened)
             arm_clean_creator(mint)
-            self.assertTrue(memecoin_desk.filter_case(opened["case_id"], _onchain(), now=NOW)["ok"])
+            self.assertTrue(memecoin_desk.filter_case(opened["case_id"], _onchain(cross_sources=_passing_cross(mint)), now=NOW)["ok"])
             snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (opened["case_id"],))[0]["snapshot_json"])
             snap["fixture"] = True
             snap["analyst_scored"] = False

@@ -15,6 +15,7 @@ import solana_tx
 import solana_whirlpool
 import token_execution
 from tests.support import arm_clean_creator, arm_holder_chart, clear_filter_fixtures, temp_desk_env
+from tests.test_memecoin_desk import _passing_cross
 
 NOW = 1_800_000_000.0
 MINT = solana_tx.b58encode(b"\x55" * 32)
@@ -35,6 +36,8 @@ def _pair(**over):
         "dexId": "raydium",
         "pairAddress": solana_tx.b58encode(b"\x66" * 32),
         "baseToken": {"address": MINT},
+        "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "NOTSOL"},
+        "confirmedMarketCap": 1_000_000,
         "priceUsd": "1",
         "marketCap": 1_000_000,
         "fdv": 9_000_000,
@@ -150,6 +153,7 @@ class PublicAdapterTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"])
@@ -159,6 +163,7 @@ class PublicAdapterTests(unittest.TestCase):
             "dev_holding_pct": "1",
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",
+            "cross_sources": _passing_cross(MINT),
         }
         arm_clean_creator(MINT)
         arm_holder_chart()
@@ -305,6 +310,7 @@ class PublicAdapterTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": swap_mint, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "10",
         }, now=NOW)
         onchain = {
@@ -313,6 +319,7 @@ class PublicAdapterTests(unittest.TestCase):
             "dev_holding_pct": "1",
             "dev_rugs": {"status": "checked", "source": "stalkchain_token_deployer", "rugs": 0, "tokens_seen": 1},
             "bundled_launch_pct": "1",
+            "cross_sources": _passing_cross(swap_mint),
         }
         arm_clean_creator(swap_mint)
         arm_holder_chart()

@@ -26,7 +26,7 @@ EXPECTED = {
         "quote_sol": "FAIL",
         "mint_freeze_revoked": "PASS",
         "lp_100": "PASS",
-        "liq_ge_25pct": "FAIL",
+        "liq_ge_25pct": "FAIL-CLOSED",
         "dev_le_3pct": "FAIL-CLOSED",
         "no_past_rug": "FAIL-CLOSED",
         "holder_growth": "PASS",
@@ -131,8 +131,33 @@ class LiveReadonlyTests(unittest.TestCase):
 
         x = _bundle("X")
         pair = cross_source.unwrap(x["dex"])["pairs"][0]
-        pair["quoteToken"] = {"address": "stock", "symbol": "TTWO"}
-        self.assertEqual(cross_source.judge(x)["checks"]["quote_sol"]["status"], "FAIL")
+        pair["quoteToken"] = {"address": "stock", "symbol": "SOL"}
+        self.assertEqual(cross_source.judge(x)["checks"]["quote_sol"]["reason"], "quote_not_sol")
+        self.assertEqual(dexscreener_public.parse_pairs([{"chainId": "solana", "baseToken": {"address": TOKENS["X"]}}], TOKENS["X"], NOW)["reason"], "quote_unknown")
+        lookalike = {"chainId": "solana", "baseToken": {"address": TOKENS["X"]}, "quoteToken": {"address": "not-wsol", "symbol": "SOL"}}
+        self.assertEqual(dexscreener_public.parse_pairs([lookalike], TOKENS["X"], NOW)["reason"], "quote_not_sol")
+        self.assertFalse(cross_source.quote_is_sol({"address": "not-wsol", "symbol": "WSOL"}))
+        decoy = _bundle("X")
+        real = cross_source.unwrap(decoy["dex"])["pairs"][0]
+        twin = json.loads(json.dumps(real))
+        twin["pairAddress"] = real["pairAddress"].swapcase()
+        cross_source.unwrap(decoy["dex"])["pairs"] = [twin, real]
+        decoy["pair_id"] = real["pairAddress"]
+        self.assertEqual(cross_source.judge(decoy)["checks"]["liq_ge_25pct"]["status"] != "pool_ambiguous", True)
+        self.assertEqual(cross_source.select_pair({"pairs": [real]}, TOKENS["X"], twin["pairAddress"])[1], "pool_missing")
+        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[0]["pairAddress"], real["pairAddress"])
+        other = json.loads(json.dumps(real))
+        other["pairAddress"] = real["pairAddress"][:-1] + ("A" if real["pairAddress"][-1] != "A" else "B")
+        cross_source.unwrap(decoy["dex"])["pairs"] = [other, real]
+        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[0]["pairAddress"], real["pairAddress"])
+        self.assertEqual(cross_source.select_pair({"pairs": [other, real]}, TOKENS["X"], "")[1], "pool_ambiguous")
+        body = cross_source.unwrap(trump["rugcheck"])
+        body["risks"] = [{"name": "Rug pull history", "description": "serial", "level": "warning"}]
+        again = cross_source.rug_check(trump["rugcheck"], trump["tracker"], trump["das"], trump["deployer"], TOKENS["TRUMP"])
+        self.assertEqual(again["status"], "FAIL")
+        body["risks"] = [{"name": "Creator concentration", "description": "dev wallet", "level": "danger"}]
+        danger = cross_source.rug_check(trump["rugcheck"], trump["tracker"], trump["das"], trump["deployer"], TOKENS["TRUMP"])
+        self.assertEqual(danger["reason"], "creator_rugged_history")
 
     def test_scout_rejects_an_unconfirmed_market_cap_and_the_filter_uses_the_cross_check(self):
         _tmp, restore = temp_desk_env()
@@ -146,6 +171,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000),
             "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap",
             "confirmed_market_cap_usd": "2358",
             "liquidity_usd": "250000",
             "price_usd": "1",
@@ -158,13 +184,26 @@ class LiveReadonlyTests(unittest.TestCase):
             "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000),
             "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap",
+            "liquidity_usd": "250000",
+            "price_usd": "1",
+            "price_change_h1": "10",
+        }, now=NOW)
+        self.assertEqual(opened["reason"], "market_cap_unconfirmed")
+        opened = memecoin_desk.scout({
+            "mint": mint + "x",
+            "source": "dexscreener",
+            "fetched_at": NOW,
+            "pair_created_at": int((NOW - 3600) * 1000),
+            "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap",
+            "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000",
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"], opened)
         bundle = _bundle("TRUMP")
-        bundle["mint"] = mint + "x"
         refused = memecoin_desk.filter_case(opened["case_id"], {
             "source": "solana_mint",
             "fetched_at": NOW,

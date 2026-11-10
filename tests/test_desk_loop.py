@@ -19,6 +19,8 @@ def _pair():
         "dexId": "raydium",
         "pairAddress": solana_tx.b58encode(b"\x66" * 32),
         "baseToken": {"address": MINT},
+        "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "LOOKALIKE"},
+        "confirmedMarketCap": 1_000_000,
         "priceUsd": "1.25",
         "marketCap": 1_000_000,
         "fdv": 5_000_000,
@@ -195,6 +197,7 @@ class DeskLoopTests(unittest.TestCase):
                 "mint_authority_revoked": True, "freeze_authority_revoked": True,
                 "dev_holding_pct": "1", "bundled_launch_pct": "1",
                 "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
+                "cross_sources": __import__("tests.test_memecoin_desk", fromlist=["_passing_cross"])._passing_cross(MINT),
             },
             "components": components,
         }, lambda request: rugcheck_or_pair(request, _pair()), NOW)
@@ -207,8 +210,9 @@ class DeskLoopTests(unittest.TestCase):
         pair = [{
             "chainId": "solana", "dexId": "raydium",
             "pairAddress": solana_tx.b58encode(b"\x67" * 32),
-            "baseToken": {"address": mint}, "priceUsd": "1.25",
-            "marketCap": 1_000_000, "fdv": 5_000_000, "liquidity": {"usd": 250_000},
+            "baseToken": {"address": mint}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
+            "priceUsd": "1.25",
+            "marketCap": 1_000_000, "confirmedMarketCap": 1_000_000, "fdv": 5_000_000, "liquidity": {"usd": 250_000},
             "pairCreatedAt": int((NOW - 3600) * 1000), "priceChange": {"h1": 10},
         }]
 
@@ -924,6 +928,7 @@ class DeskLoopTests(unittest.TestCase):
                     "dev_holding_pct": "1",
                     "dev_rugs": {"status": "checked", "source": "synthetic_test_adapter", "rugs": 0, "tokens_seen": 1},
                     "bundled_launch_pct": "1",
+                    "cross_sources": __import__("tests.test_memecoin_desk", fromlist=["_passing_cross"])._passing_cross(swap_mint),
                 },
                 "components": {
                     **{name: {"value": "70", "source": "synthetic_test_adapter", "fetched_at": moment} for name in memecoin_desk.COMPONENTS},
@@ -1015,6 +1020,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         snap = memecoin_desk.view(opened["case_id"])["snapshot"]
@@ -1087,6 +1093,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         case_id = opened["case_id"]
@@ -1254,6 +1261,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         case_id = opened["case_id"]
@@ -1316,6 +1324,7 @@ class DeskLoopTests(unittest.TestCase):
         live = memecoin_desk.scout({
             "mint": solana_tx.b58encode(b"\x42" * 32), "source": "dexscreener", "fetched_at": NOW,
             "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=NOW)
         db.execute("UPDATE memecoin_cases SET stage = 'protected', ledger = 'live', ledger_provenance = 'server' WHERE id = ?", (live["case_id"],))
@@ -1346,6 +1355,7 @@ class DeskLoopTests(unittest.TestCase):
         opened = memecoin_desk.scout({
             "mint": MINT, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "9", "price_change_h1": "1",
         }, now=WHEN)
         case_id = opened["case_id"]
@@ -1931,6 +1941,7 @@ conn.close()
         opened = memecoin_desk.scout({
             "mint": mint, "source": "dexscreener", "fetched_at": WHEN,
             "pair_created_at": int((WHEN - 3600) * 1000), "market_cap_usd": "1000000",
+            "market_cap_basis": "marketCap", "confirmed_market_cap_usd": "1000000",
             "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
         }, now=WHEN)
         case_id = opened["case_id"]
@@ -1982,7 +1993,8 @@ conn.close()
                 if "/token-pairs/" in url:
                     return {"status": 200, "body": [{
                         "chainId": "solana", "dexId": "whirlpool", "pairAddress": pool,
-                        "baseToken": {"address": mint}, "priceUsd": "1", "marketCap": 1_000_000,
+                        "baseToken": {"address": mint}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
+                        "priceUsd": "1", "marketCap": 1_000_000, "confirmedMarketCap": 1_000_000,
                         "liquidity": {"usd": 250_000}, "pairCreatedAt": int((WHEN - 3600) * 1000),
                         "priceChange": {"h1": 1},
                     }]}

@@ -109,7 +109,7 @@ def scout(pair: dict, now: float | None = None) -> dict:
         return _kill(None, mint if isinstance(mint, str) else None, "scout", "mint", "dexscreener")
     if pair.get("source") != "dexscreener":
         return _kill(None, mint, "scout", "source", pair.get("source") if isinstance(pair.get("source"), str) else None)
-    if pair.get("market_cap_basis") not in (None, "market_cap"):
+    if pair.get("market_cap_basis") != "marketCap":
         return _kill(None, mint, "scout", "market_cap_basis", "dexscreener")
     fetched = _num(pair.get("fetched_at"))
     if fetched is None or abs(Decimal(str(moment)) - fetched) > FRESH_S:
@@ -125,11 +125,10 @@ def scout(pair: dict, now: float | None = None) -> dict:
     mcap = _money(pair.get("market_cap_usd"))
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
         return _kill(None, mint, "scout", "market_cap", "dexscreener")
-    if "confirmed_market_cap_usd" in pair:
-        import cross_source
-        other = _money(pair.get("confirmed_market_cap_usd"))
-        if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
-            return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
+    import cross_source
+    other = _money(pair.get("confirmed_market_cap_usd"))
+    if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
+        return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
     if pair.get("liquidity_usd") is None:
         return _kill(None, mint, "scout", "liquidity_missing", "dexscreener")
     liq = _money(pair.get("liquidity_usd"))
@@ -144,7 +143,8 @@ def scout(pair: dict, now: float | None = None) -> dict:
         "fetched_at": str(fetched),
         "pair_created_at": created_ms,
         "market_cap_usd": format(mcap, "f"),
-        "market_cap_basis": "market_cap",
+        "market_cap_basis": "marketCap",
+        "confirmed_market_cap_usd": format(other, "f"),
         "fdv_used_as_market_cap": False,
         "liquidity_usd": format(liq, "f"),
         "price_usd": format(price, "f"),
@@ -204,7 +204,7 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         import cross_source
         judged = cross_source.judge(cross)
         if judged["checks"]["quote_sol"]["status"] != "PASS":
-            return refuse("quote_not_sol")
+            return refuse(judged["checks"]["quote_sol"].get("reason") or "quote_unknown")
         dev_row = judged["checks"]["dev_le_3pct"]
         if dev_row["status"] != "PASS":
             return refuse("creator_conflict" if dev_row["reason"] == "creator_conflict" else "dev_holding")
@@ -212,10 +212,8 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         if rug_row["status"] != "PASS":
             return refuse("dev_rug_history" if rug_row["status"] == "FAIL" else "dev_rug_history_unverified")
         liq_row = judged["checks"]["liq_ge_25pct"]
-        if liq_row["status"] == "FAIL-CLOSED":
-            return refuse("liquidity_source_conflict")
         if liq_row["status"] != "PASS":
-            return refuse("liquidity_below_25pct_mcap")
+            return refuse(liq_row.get("reason") or "liquidity_source_missing")
         snap = dict(snap)
         snap["liquidity_usd"] = liq_row.get("quote_usd")
         snap["market_cap_usd"] = liq_row.get("market_cap_usd")
@@ -238,6 +236,8 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     change = _num(snap.get("price_change_h1"))
     if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
+    if cross is None:
+        return refuse("liquidity_source_missing")
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:

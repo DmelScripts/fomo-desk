@@ -1258,7 +1258,10 @@ def agents_token_buy(request: Request, body: dict | None = None) -> JSONResponse
     return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
 
 
-_MEMECOIN_SCOUT = {"mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1"}
+_MEMECOIN_SCOUT = {
+    "mint", "source", "fetched_at", "pair_created_at", "market_cap_usd", "market_cap_basis",
+    "confirmed_market_cap_usd", "liquidity_usd", "price_usd", "price_change_h1",
+}
 
 
 def _memecoin_body(body: dict | None, allowed: set[str]) -> dict:

@@ -21,20 +21,23 @@ import public_filter_docs
 import solana_tx
 
 SOL_MINT = solana_tx.NATIVE_MINT
-SOL_SYMBOLS = {"SOL", "wSOL", "WSOL"}
 # Larger / smaller above this is not the same pool figure.
 LIQUIDITY_SOURCE_TOLERANCE = Decimal("3")
 MCAP_SOURCE_TOLERANCE = Decimal("3")
 CREATOR_RUG_RISK = "Creator history of rugged tokens"
 DAS_PAGE_LIMIT = 20
+# A creator or dev risk fails when its name or description contains the stem
+# "rug" (case-insensitive: "rugged", "Rug pull history") or its level is
+# "danger" and the text refers to the creator or the dev.
+RUG_STEMS = ("rug",)
+CREATOR_RISK_WORDS = ("creator", "dev")
 
 
 def quote_is_sol(quote) -> bool:
+    """True only when quoteToken.address is the native wSOL mint. The symbol is ignored."""
     if not isinstance(quote, dict):
         return False
-    if quote.get("address") == SOL_MINT:
-        return True
-    return quote.get("symbol") in SOL_SYMBOLS
+    return quote.get("address") == SOL_MINT
 
 
 def within(left, right, tolerance=LIQUIDITY_SOURCE_TOLERANCE) -> bool:
@@ -58,17 +61,47 @@ def unwrap(payload):
     return payload
 
 
-def _pair(dex_body):
+def _iter_pairs(dex_body):
     body = unwrap(dex_body)
-    if not isinstance(body, dict):
-        return None
-    pairs = body.get("pairs")
-    if isinstance(pairs, list):
-        for pair in pairs:
-            if isinstance(pair, dict):
-                return pair
-    pair = body.get("pair")
-    return pair if isinstance(pair, dict) else None
+    rows = []
+    if isinstance(body, dict):
+        if isinstance(body.get("pairs"), list):
+            rows.extend(body["pairs"])
+        extra = body.get("pair")
+        if isinstance(extra, dict):
+            rows.append(extra)
+    elif isinstance(body, list):
+        rows.extend(body)
+    for pair in rows:
+        if isinstance(pair, dict):
+            yield pair
+
+
+def select_pair(dex_body, mint: str, pair_id: str):
+    """The one pool for this mint, quoted in native wSOL, at this exact pair id.
+
+    Base58 ids are compared with ``==``. A different case is a different id.
+    """
+    if not isinstance(mint, str) or mint == "" or not isinstance(pair_id, str):
+        return None, "pool_missing"
+    matched = []
+    seen = set()
+    for pair in _iter_pairs(dex_body):
+        base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+        address = pair.get("pairAddress")
+        if base.get("address") != mint or not isinstance(address, str) or address in seen:
+            continue
+        if not quote_is_sol(pair.get("quoteToken")):
+            continue
+        if pair_id != "" and address != pair_id:
+            continue
+        seen.add(address)
+        matched.append(pair)
+    if not matched:
+        return None, "pool_missing"
+    if len(matched) > 1:
+        return None, "pool_ambiguous"
+    return matched[0], None
 
 
 def _matched_market(rugcheck_body, pool_id):
@@ -105,11 +138,16 @@ def _quote_side_usd(pool) -> Decimal | None:
     return quote_size * cap_usd / cap_quote
 
 
-def liquidity_check(dex_body, rugcheck_body, tracker_body) -> dict:
-    """Quote-side liquidity over a second-source market cap. DexScreener is not the numerator."""
-    pair = _pair(dex_body)
-    if pair is None or not isinstance(pair.get("pairAddress"), str):
-        return {"status": "FAIL-CLOSED", "reason": "liquidity_source_missing"}
+def liquidity_check(dex_body, rugcheck_body, tracker_body, mint: str = "", pair_id: str = "") -> dict:
+    """Quote-side liquidity over the larger confirmed market cap.
+
+    DexScreener liquidity.usd is not read. The denominator is the larger of the
+    DexScreener marketCap and the Solana Tracker pool marketCap.usd, and only
+    after those two caps agree within MCAP_SOURCE_TOLERANCE.
+    """
+    pair, why = select_pair(dex_body, mint, pair_id)
+    if pair is None:
+        return {"status": "FAIL-CLOSED", "reason": why or "pool_missing"}
     pool_id = pair["pairAddress"]
     market = _matched_market(rugcheck_body, pool_id)
     pool = _matched_pool(tracker_body, pool_id)
@@ -118,38 +156,30 @@ def liquidity_check(dex_body, rugcheck_body, tracker_body) -> dict:
     st_quote = _quote_side_usd(pool)
     st_cap = _money((pool.get("marketCap") or {}).get("usd")) if isinstance(pool, dict) and isinstance(pool.get("marketCap"), dict) else None
     dex_cap = _money(pair.get("marketCap"))
-    dex_liq = _money((pair.get("liquidity") or {}).get("usd")) if isinstance(pair.get("liquidity"), dict) else None
     if rc_quote is None or st_quote is None or st_cap is None or dex_cap is None:
-        return {"status": "FAIL-CLOSED", "reason": "liquidity_source_missing", "quote_is_sol": quote_is_sol(pair.get("quoteToken"))}
-    conflict = (
-        not within(rc_quote, st_quote)
-        or not within(dex_cap, st_cap, MCAP_SOURCE_TOLERANCE)
-        or (dex_liq is not None and not within(dex_liq, min(rc_quote, st_quote)) and not within(dex_liq, max(rc_quote, st_quote)))
-    )
-    if conflict:
+        return {"status": "FAIL-CLOSED", "reason": "liquidity_source_missing"}
+    if not within(rc_quote, st_quote) or not within(dex_cap, st_cap, MCAP_SOURCE_TOLERANCE):
         return {
             "status": "FAIL-CLOSED",
             "reason": "liquidity_source_conflict",
             "quote_usd": format(min(rc_quote, st_quote), "f"),
-            "market_cap_usd": format(st_cap, "f"),
-            "quote_is_sol": quote_is_sol(pair.get("quoteToken")),
+            "market_cap_usd": format(max(dex_cap, st_cap), "f"),
         }
     used = min(rc_quote, st_quote)
-    ratio = used / st_cap if st_cap > 0 else None
+    denominator = max(dex_cap, st_cap)
+    ratio = used / denominator if denominator > 0 else None
     if ratio is None or ratio < memecoin_desk.LIQ_OF_MCAP:
         return {
             "status": "FAIL",
             "reason": "liquidity_below_25pct_mcap",
             "quote_usd": format(used, "f"),
-            "market_cap_usd": format(st_cap, "f"),
-            "quote_is_sol": quote_is_sol(pair.get("quoteToken")),
+            "market_cap_usd": format(denominator, "f"),
         }
     return {
         "status": "PASS",
         "reason": None,
         "quote_usd": format(used, "f"),
-        "market_cap_usd": format(st_cap, "f"),
-        "quote_is_sol": quote_is_sol(pair.get("quoteToken")),
+        "market_cap_usd": format(denominator, "f"),
     }
 
 
@@ -167,17 +197,32 @@ def _creators(rugcheck_body, tracker_body) -> tuple[str | None, str | None]:
     return rc_creator, st_creator
 
 
-def _risk_names(rugcheck_body) -> list[str]:
-    body = unwrap(rugcheck_body)
-    names = []
+def _risk_items(body) -> list:
     if not isinstance(body, dict):
-        return names
+        return []
+    rows = []
     for item in body.get("risks") or []:
-        if isinstance(item, dict) and isinstance(item.get("name"), str):
-            names.append(item["name"])
-        elif isinstance(item, str):
-            names.append(item)
-    return names
+        rows.append(item)
+    risk = body.get("risk") if isinstance(body.get("risk"), dict) else {}
+    for item in risk.get("risks") or []:
+        rows.append(item)
+    return rows
+
+
+def creator_risk(item) -> bool:
+    """True for a rug stem, or a danger-level creator/dev risk. See RUG_STEMS."""
+    if isinstance(item, str):
+        text = item.lower()
+        return any(stem in text for stem in RUG_STEMS)
+    if not isinstance(item, dict):
+        return False
+    text = " ".join(str(item.get(key) or "") for key in ("name", "description")).lower()
+    if any(stem in text for stem in RUG_STEMS):
+        return True
+    level = str(item.get("level") or "").lower()
+    if level == "danger" and any(word in text for word in CREATOR_RISK_WORDS):
+        return True
+    return False
 
 
 def dev_check(rugcheck_body, tracker_body) -> dict:
@@ -235,9 +280,11 @@ def rug_check(rugcheck_body, tracker_body, das_body, deployer_body, mint: str) -
     rc_creator, st_creator = _creators(rugcheck_body, tracker_body)
     if rc_creator is None or st_creator is None or rc_creator != st_creator:
         return {"status": "FAIL-CLOSED", "reason": "creator_conflict"}
-    names = _risk_names(rugcheck_body)
+    flagged = any(creator_risk(item) for item in _risk_items(unwrap(rugcheck_body))) or any(
+        creator_risk(item) for item in _risk_items(unwrap(tracker_body))
+    )
     gap = enumeration_gap(das_body, deployer_body, rugcheck_body, mint)
-    if CREATOR_RUG_RISK in names or any("rugged" in name.lower() for name in names):
+    if flagged:
         return {"status": "FAIL", "reason": "creator_rugged_history", "enumeration_incomplete": gap is not None, "gap": gap}
     if gap is not None:
         return {"status": "FAIL-CLOSED", "reason": gap}
@@ -294,19 +341,41 @@ def lp_check(rugcheck_body, tracker_body, pool_id: str) -> dict:
     return {"status": "PASS", "reason": None}
 
 
+def _quote_status(dex_body, mint: str, pair_id: str) -> dict:
+    base_matches = []
+    for pair in _iter_pairs(dex_body):
+        base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+        if base.get("address") == mint and (pair_id == "" or pair.get("pairAddress") == pair_id):
+            base_matches.append(pair)
+    if not base_matches:
+        return {"status": "FAIL-CLOSED", "reason": "quote_unknown"}
+    quote = base_matches[0].get("quoteToken")
+    if not isinstance(quote, dict) or not isinstance(quote.get("address"), str) or quote.get("address") == "":
+        return {"status": "FAIL-CLOSED", "reason": "quote_unknown"}
+    if quote.get("address") != SOL_MINT:
+        return {"status": "FAIL", "reason": "quote_not_sol"}
+    return {"status": "PASS", "reason": None}
+
+
 def judge(bundle: dict) -> dict:
     """One token. bundle carries the saved bodies. Every check is reported."""
     dex = bundle.get("dex")
     rc = bundle.get("rugcheck")
     st = bundle.get("tracker")
-    pair = _pair(dex) or {}
-    pool_id = pair.get("pairAddress") if isinstance(pair.get("pairAddress"), str) else ""
     mint = bundle.get("mint") if isinstance(bundle.get("mint"), str) else ""
+    pair_id = bundle.get("pair_id") if isinstance(bundle.get("pair_id"), str) else ""
+    if pair_id == "":
+        for pair in _iter_pairs(dex):
+            base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+            if base.get("address") == mint and isinstance(pair.get("pairAddress"), str):
+                pair_id = pair["pairAddress"]
+                break
+    pool_id = pair_id
     checks = {
-        "quote_sol": {"status": "PASS" if quote_is_sol(pair.get("quoteToken")) else "FAIL", "reason": None if quote_is_sol(pair.get("quoteToken")) else "quote_not_sol"},
+        "quote_sol": _quote_status(dex, mint, pair_id),
         "mint_freeze_revoked": authority_check(rc, st, pool_id),
         "lp_100": lp_check(rc, st, pool_id),
-        "liq_ge_25pct": liquidity_check(dex, rc, st),
+        "liq_ge_25pct": liquidity_check(dex, rc, st, mint, pair_id),
         "dev_le_3pct": dev_check(rc, st),
         "no_past_rug": rug_check(rc, st, bundle.get("das"), bundle.get("deployer"), mint),
         "holder_growth": holder_check(bundle.get("chart"), st, rc, mint),
