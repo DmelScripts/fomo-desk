@@ -2,14 +2,16 @@
 
 Scout reads a DexScreener-shaped snapshot and does not treat it as mint, freeze,
 LP, developer, or bundle proof. Filter facts need their own source. The
-20/20/15/15/15/15 weights and the inclusive score of 70 were approved by Thành
-on 2026-11-10. The other approved risk numbers are the 6% stop, the 12% trail
+20/20/15/15/15/15 weights were approved by Thành on 2026-11-10. On 2026-11-11
+he scored unique buyers at 0 and moved the inclusive pass mark to 55. The other
+approved risk numbers are the 6% stop, the 12% trail
 arm, the 12% drop from the peak, and liquidity of at least 25% of market cap.
 
 The trail does not lock a profit. A peak that only just arms, times a 12% drop,
 is 0.9856 of entry. Smart wallets have no source, so that component is fixed at
-0 (label none_scored_zero) and a caller value is ignored. The weights stay
-20/20/15/15/15/15, so the highest score is 85 and the other five must reach 70.
+0 (label none_scored_zero) and a caller value is ignored. Unique buyers use
+the same label. The weights stay 20/20/15/15/15/15, so the highest score is 65
+and a score of 55 passes.
 Entry is not sent. A fixture route is not a live provider.
 DexScreener and the on-chain readers are not called from here. The older
 3-hour exit was not restated for this desk, so it is not applied. The paper
@@ -39,6 +41,7 @@ LIQ_OF_MCAP = Decimal("0.25")
 DEV_HOLDING_MAX = Decimal("3")
 BUNDLE_MAX = Decimal("10")
 ALREADY_UP_1H = Decimal("80")
+SCORE_FLOOR = Decimal("55")
 # Approved by Thành on 2026-11-10 as these engineering-default weights.
 # The stop, trail, fee, ticket, allocation, and loss numbers are separate.
 WEIGHTS = {
@@ -57,9 +60,9 @@ ANALYST_APPROVAL_SOURCE = "owner decision 2026-11-10 06:19 Asia/Saigon"
 
 
 def analyst_decision() -> dict:
-    """The approved formula is these weights, divided by 100, passing at 70."""
+    """The approved formula is these weights, divided by 100, passing at 55."""
     return {
-        "score_floor": 70,
+        "score_floor": 55,
         "score_floor_inclusive": True,
         "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
         "weights_sum": format(sum(WEIGHTS.values(), Decimal("0")), "f"),
@@ -238,13 +241,15 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     if change is None or change >= ALREADY_UP_1H:
         return refuse("already_up_1h")
     bundled = cross_source.bundle_check(bundle.get("tracker"), bundle.get("rugcheck"))
+    bundle_evidence = {
+        "bundle_source": bundled.get("source"),
+        "bundled_launch_pct": bundled.get("bundled_launch_pct"),
+    }
     if bundled.get("ok") is not True:
-        return refuse(bundled.get("reason") or "bundle_unverified")
+        return _fail(row, "filter", bundled.get("reason") or "bundle_unverified", bundle_evidence, source=bundled.get("source"))
     bundled_pct = _num(bundled.get("bundled_launch_pct"))
-    if bundled_pct is None:
-        return refuse("bundle_unverified")
-    if bundled_pct > BUNDLE_MAX:
-        return refuse("bundle")
+    if bundled_pct is None or bundled_pct > BUNDLE_MAX:
+        return _fail(row, "filter", "bundle" if bundled_pct is not None else "bundle_unverified", bundle_evidence, source=bundled.get("source"))
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:
@@ -254,6 +259,8 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     evidence = {
         "source": onchain.get("source"), "liq_of_mcap": format(liq / mcap, "f"),
         "market_cap_basis": "market_cap", "lpLockedPct": 100, "lp_expiry_checked": False,
+        "bundle_source": bundled.get("source"),
+        "bundled_launch_pct": bundled.get("bundled_launch_pct"),
     }
     return _advance(row, "filter_passed", "filter", evidence)
 
@@ -278,12 +285,12 @@ def _clamp_unit(value: Decimal) -> Decimal:
 
 
 def score_from_values(values: dict) -> Decimal | None:
-    """sum(weight * value) / 100. Each value is already on 0..100. Smart wallets stay 0."""
+    """sum(weight * value) / 100. Unique buyers and smart wallets stay 0."""
     if not isinstance(values, dict):
         return None
     weighted = Decimal("0")
     for name, weight in WEIGHTS.items():
-        if name == "smart_wallets":
+        if name in {"smart_wallets", "unique_buyers"}:
             weighted += weight * Decimal("0")
             continue
         value = _num(values.get(name))
@@ -325,15 +332,15 @@ def _fetched_components(mint: str) -> dict:
     if quote is None or cap is None or cap <= 0:
         return {"ok": False, "reason": "component_unverified", "component": "liq_mcap", "values": found}
     found["liq_mcap"] = _clamp_unit(quote * Decimal(100) / cap)
-    found["unique_buyers"] = None
+    found["unique_buyers"] = Decimal("0")
     return {"ok": True, "values": found}
 
 
 def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
-    """Score fetched components. Smart wallets are 0. A caller value is not read.
+    """Score fetched components. Unique buyers and smart wallets are 0.
 
-    Unique buyers have no field in the saved reads, so that component is
-    component_unverified and the score does not pass from the other numbers.
+    A caller value is not read. The inclusive pass mark is 55. With both of
+    those components at 0 the highest score is 65.
     """
     moment = time.time() if now is None else now
     del moment
@@ -359,27 +366,26 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         "approval_source": ANALYST_APPROVAL_SOURCE,
         "smart_wallets_source": "none_scored_zero",
         "smart_wallets": {"value": "0", "source": "none_scored_zero"},
+        "unique_buyers_source": "none_scored_zero",
+        "unique_buyers": {"value": "0", "source": "none_scored_zero"},
         "holder_growth": {"value": str(holder), "source": "solana_tracker_holders_chart"},
+        "score_floor": format(SCORE_FLOOR, "f"),
     }
     if fetched.get("ok") is not True:
         evidence["component"] = fetched.get("component")
         return _fail(row, "analyst", fetched.get("reason") or "component_unverified", evidence)
     values = fetched["values"]
-    if values.get("unique_buyers") is None:
-        evidence["component"] = "unique_buyers"
-        evidence["momentum"] = {"value": str(values["momentum"]), "source": "dex_price_change_h1"}
-        evidence["buy_sell_ratio"] = {"value": str(values["buy_sell_ratio"]), "source": "dex_txns_h1"}
-        evidence["liq_mcap"] = {"value": str(values["liq_mcap"]), "source": "quote_over_confirmed_mcap"}
-        return _fail(row, "analyst", "component_unverified", evidence)
     values["holder_growth"] = holder
+    values["unique_buyers"] = Decimal("0")
     values["smart_wallets"] = Decimal("0")
     score = score_from_values(values)
     if score is None:
         return _fail(row, "analyst", "component_unverified", evidence)
     evidence["score"] = format(score, "f")
-    for name in ("momentum", "buy_sell_ratio", "liq_mcap", "unique_buyers"):
-        evidence[name] = {"value": str(values[name]), "source": "desk_fetch"}
-    if score < 70:
+    evidence["momentum"] = {"value": str(values["momentum"]), "source": "dex_price_change_h1"}
+    evidence["buy_sell_ratio"] = {"value": str(values["buy_sell_ratio"]), "source": "dex_txns_h1"}
+    evidence["liq_mcap"] = {"value": str(values["liq_mcap"]), "source": "quote_over_confirmed_mcap"}
+    if score < SCORE_FLOOR:
         return _fail(row, "analyst", "score", evidence)
     snap = _snapshot(row)
     snap["score"] = format(score, "f")

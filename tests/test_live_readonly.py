@@ -30,6 +30,7 @@ EXPECTED = {
         "dev_le_3pct": "FAIL-CLOSED",
         "no_past_rug": "FAIL-CLOSED",
         "holder_growth": "PASS",
+        "bundle_le_10": "PASS",
     },
     "X": {
         "overall": "FAIL",
@@ -40,6 +41,7 @@ EXPECTED = {
         "dev_le_3pct": "FAIL-CLOSED",
         "no_past_rug": "FAIL-CLOSED",
         "holder_growth": "FAIL-CLOSED",
+        "bundle_le_10": "FAIL",
     },
     "TRUMP": {
         "overall": "FAIL",
@@ -50,6 +52,7 @@ EXPECTED = {
         "dev_le_3pct": "PASS",
         "no_past_rug": "FAIL",
         "holder_growth": "FAIL-CLOSED",
+        "bundle_le_10": "PASS",
     },
     "MYWAY": {
         "overall": "FAIL",
@@ -60,6 +63,7 @@ EXPECTED = {
         "dev_le_3pct": "PASS",
         "no_past_rug": "FAIL-CLOSED",
         "holder_growth": "PASS",
+        "bundle_le_10": "PASS",
     },
     "Nothing": {
         "overall": "FAIL-CLOSED",
@@ -70,7 +74,15 @@ EXPECTED = {
         "dev_le_3pct": "FAIL-CLOSED",
         "no_past_rug": "FAIL-CLOSED",
         "holder_growth": "FAIL-CLOSED",
+        "bundle_le_10": "PASS",
     },
+}
+BUNDLE_SHARE = {
+    "BIG": "0.2864",
+    "X": "11.4546",
+    "TRUMP": "3.8674",
+    "MYWAY": "0",
+    "Nothing": "2.8552",
 }
 
 
@@ -173,9 +185,9 @@ class LiveReadonlyTests(unittest.TestCase):
             growth = verdict["checks"]["holder_growth"]
             if growth["status"] == "PASS":
                 self.assertTrue(growth["holder_count_disagreement"], symbol)
-            measured = cross_source.bundle_check(fetched["tracker"], fetched["rugcheck"])
-            self.assertEqual(measured["reason"], "bundle_unverified", symbol)
-            self.assertIsNone(measured["bundled_launch_pct"], symbol)
+            measured = verdict["checks"]["bundle_le_10"]
+            self.assertEqual(measured["bundled_launch_pct"], BUNDLE_SHARE[symbol], symbol)
+            self.assertEqual(measured["source"], "solana_tracker_initial_bundler_share", symbol)
 
     def test_mutated_fixtures_still_fail_closed(self):
         big = _bundle("BIG")

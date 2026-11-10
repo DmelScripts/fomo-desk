@@ -41,7 +41,7 @@ class DeskLoopTests(unittest.TestCase):
             ["20", "20", "15", "15", "15", "15"],
         )
         decision = memecoin_desk.analyst_decision()
-        self.assertEqual(decision["score_floor"], 70)
+        self.assertEqual(decision["score_floor"], 55)
         self.assertTrue(decision["score_floor_inclusive"])
         self.assertEqual(decision["normalization"], "sum(weight * value) / 100")
         self.assertTrue(decision["owner_approved"])
@@ -72,19 +72,19 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.score_from_values({
             "momentum": "100", "unique_buyers": "100", "buy_sell_ratio": "100",
             "holder_growth": "100", "liq_mcap": "100", "smart_wallets": "100",
-        }), Decimal("85"))
+        }), Decimal("65"))
         self.assertEqual(memecoin_desk.score_from_values({
-            "momentum": "82", "unique_buyers": "82", "buy_sell_ratio": "82",
-            "holder_growth": "82", "liq_mcap": "82", "smart_wallets": "0",
-        }), Decimal("69.7"))
+            "momentum": "100", "unique_buyers": "100", "buy_sell_ratio": "100",
+            "holder_growth": "100", "liq_mcap": format(Decimal(100) / Decimal(3), "f"), "smart_wallets": "0",
+        }), Decimal("55"))
         self.assertEqual(memecoin_desk.score_from_values({
-            "momentum": "70", "unique_buyers": "70", "buy_sell_ratio": "70",
-            "holder_growth": "70", "liq_mcap": "70", "smart_wallets": "0",
-        }), Decimal("59.5"))
+            "momentum": "84.6", "unique_buyers": "84.6", "buy_sell_ratio": "84.6",
+            "holder_growth": "84.6", "liq_mcap": "84.6", "smart_wallets": "84.6",
+        }), Decimal("54.99"))
         arm_holder_chart(100, 200)
         row("score-line")
         passed = memecoin_desk.analyze("score-line", components("100"), NOW)
-        self.assertEqual(passed["reason"], "component_unverified", passed)
+        self.assertEqual(passed["reason"], "score", passed)
         self.assertNotEqual(passed.get("stage"), "analyst_passed")
         body = logged("score-line")
         self.assertEqual(body["smart_wallets_source"], "none_scored_zero")
@@ -197,7 +197,7 @@ class DeskLoopTests(unittest.TestCase):
             },
             "components": components,
         }, lambda request: rugcheck_or_pair(request, _pair()), NOW)
-        self.assertEqual(screened["reason"], "bundle_unverified")
+        self.assertEqual(screened["reason"], "score")
         self.assertEqual(calls["n"], 0)
         self.assertEqual(memecoin_desk.view(MINT)["stage"], "rejected")
 
@@ -953,7 +953,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(desk_loop.scheduler_status()["armed"])
         self.assertFalse(found["live_ready"])
         self.assertFalse(screened["live_capital"], screened)
-        self.assertEqual(screened.get("reason"), "bundle_unverified", screened)
+        self.assertEqual(screened.get("reason"), "score", screened)
         self.assertFalse(screened["sign"])
         self.assertFalse(screened["send"])
         self.assertFalse(screened.get("signer_reached"))

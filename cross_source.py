@@ -14,7 +14,7 @@ response wrapped as {meta, body}).
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import memecoin_desk
 import public_filter_docs
@@ -138,7 +138,10 @@ def arm_test_fetcher() -> None:
             return {
                 "holders": 10,
                 "token": {"creation": {"creator": "SameCreator"}},
-                "risk": {"dev": {"percentage": 0}, "risks": []},
+                "risk": {
+                    "dev": {"percentage": 0}, "risks": [],
+                    "bundlers": {"count": 0, "totalBalance": 0, "totalPercentage": 0, "wallets": []},
+                },
                 "pools": [{
                     "poolId": pid, "lpBurn": 100,
                     "security": {"mintAuthority": None, "freezeAuthority": None},
@@ -166,18 +169,49 @@ def _fetch(kind: str, mint: str, pair_id: str | None = None):
         return None
 
 
-def bundle_check(tracker_body, rugcheck_body) -> dict:
-    """Bundled-launch supply is the share bought in the creation block.
+BUNDLE_SOURCE = "solana_tracker_initial_bundler_share"
 
-    The saved RugCheck and Solana Tracker bodies do not carry that share.
-    risk.bundlers.totalInitialPercentage is the later initial share of wallets
-    Solana Tracker calls bundlers; their bundleTime values are not the creation
-    block. totalPercentage, snipers, and insiders are current holdings.
-    graphInsidersDetected is a count of transfer-linked wallets. None of those
-    is this rule, so the check fails closed instead of borrowing one.
+
+def _bundle_percentage(value):
+    """A finite share from 0 through 100. NaN, negatives, and anything above 100 are missing."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite() or number < 0 or number > 100:
+        return None
+    return number
+
+
+def bundle_check(tracker_body, rugcheck_body) -> dict:
+    """Initial bundler share from the desk's Solana Tracker token read.
+
+    Thành approved this on 2026-11-11 as the substitute for creation-block share.
+    risk.bundlers.totalInitialPercentage above 10 fails. A bundlers object with
+    count 0 and no percentage is 0. A missing, non-numeric, NaN, negative, or
+    over-100 figure fails closed. RugCheck is not this measure.
     """
-    del tracker_body, rugcheck_body
-    return {"ok": False, "reason": "bundle_unverified", "bundled_launch_pct": None}
+    del rugcheck_body
+    refused = {"ok": False, "reason": "bundle_unverified", "bundled_launch_pct": None, "source": BUNDLE_SOURCE}
+    body = unwrap(tracker_body)
+    risk = body.get("risk") if isinstance(body, dict) else None
+    bundlers = risk.get("bundlers") if isinstance(risk, dict) else None
+    if not isinstance(bundlers, dict):
+        return refused
+    count = bundlers.get("count")
+    if "totalInitialPercentage" not in bundlers:
+        if count == 0 and not isinstance(count, bool):
+            return {"ok": True, "reason": None, "bundled_launch_pct": "0", "source": BUNDLE_SOURCE}
+        return refused
+    pct = _bundle_percentage(bundlers.get("totalInitialPercentage"))
+    if pct is None:
+        return refused
+    shown = format(pct, "f")
+    if pct > Decimal("10"):
+        return {"ok": False, "reason": "bundle", "bundled_launch_pct": shown, "source": BUNDLE_SOURCE}
+    return {"ok": True, "reason": None, "bundled_launch_pct": shown, "source": BUNDLE_SOURCE}
 
 
 def fetch_dex(mint: str):
@@ -556,6 +590,21 @@ def _quote_status(dex_body, mint: str, pair_id: str) -> dict:
     return {"status": "PASS", "reason": None}
 
 
+def _bundle_row(tracker_body) -> dict:
+    checked = bundle_check(tracker_body, None)
+    if checked.get("ok") is True:
+        return {
+            "status": "PASS", "reason": None,
+            "bundled_launch_pct": checked.get("bundled_launch_pct"), "source": checked.get("source"),
+        }
+    return {
+        "status": "FAIL" if checked.get("reason") == "bundle" else "FAIL-CLOSED",
+        "reason": checked.get("reason") or "bundle_unverified",
+        "bundled_launch_pct": checked.get("bundled_launch_pct"),
+        "source": checked.get("source"),
+    }
+
+
 def judge(bundle: dict) -> dict:
     """One token. bundle carries the saved bodies. Every check is reported."""
     dex = bundle.get("dex")
@@ -573,6 +622,7 @@ def judge(bundle: dict) -> dict:
         "dev_le_3pct": dev_check(rc, st),
         "no_past_rug": rug_check(rc, st, bundle.get("das"), bundle.get("deployer"), mint),
         "holder_growth": holder_check(bundle.get("chart"), st, rc, mint),
+        "bundle_le_10": _bundle_row(st),
     }
     failing = [item["status"] for item in checks.values() if item["status"] != "PASS"]
     if not failing:
