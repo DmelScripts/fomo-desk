@@ -154,6 +154,26 @@ def policy_stamp() -> dict:
     }
 
 
+def record_loss_policy() -> dict:
+    """Record the owner-approved $20 halt. It does not approve fees or LIVE."""
+    if _aggregate_approved(_read(_AGGREGATE)):
+        return aggregate_view()
+    _write(_AGGREGATE, {
+        "approved": True,
+        "owner_approved": True,
+        "kind": "aggregate_loss_policy",
+        "source": _SOURCE,
+        "max_loss_usd": format(MAX_CUMULATIVE_LOSS_USD, "f"),
+        "includes_fees": True,
+        "daily_reset": False,
+        "refill": False,
+        "guaranteed_loss_limit": False,
+        "stops_new_entries": True,
+        "allocation_usd": format(ALLOCATION_USD, "f"),
+    })
+    return aggregate_view()
+
+
 def persist_owner_approval() -> dict:
     """Record the widget. The numbers are the constants above, not a request body."""
     _drop_live_consent()

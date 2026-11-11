@@ -29,7 +29,8 @@ class SpendPolicyTests(unittest.TestCase):
         self.assertFalse(body["recorded"])
         self.assertFalse(body["approved"])
         self.assertFalse(spend_policy.fee_view()["approved"])
-        self.assertFalse(spend_policy.aggregate_view()["approved"])
+        self.assertTrue(spend_policy.aggregate_view()["approved"])
+        self.assertEqual(spend_policy.aggregate_view()["max_loss_usd"], "20.00")
         self.assertEqual(spend_policy.fee_view()["specified_max_fee_usd"], "0.05")
         self.assertEqual(spend_policy.aggregate_view()["specified_max_loss_usd"], "20.00")
 

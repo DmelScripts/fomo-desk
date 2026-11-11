@@ -5414,11 +5414,11 @@ def remaining_live_gates() -> list[dict]:
         },
         {
             "gate": "phantom_server_auth",
-            "proves": "phantom login --display-mode text approved for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
+            "proves": "a fresh allowlisted identity from /api/phantom/login/check for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
             "owner": True,
             "owner_action": "open the approval URL, enter the user code, and approve before it expires",
             "needs_live_read": False,
-            "closed": False,
+            "closed": _phantom_server_auth_closed(),
         },
         {
             "gate": "real_submit",
@@ -5487,6 +5487,11 @@ def readiness() -> dict:
         "preflight_ready": False,
         "gate_complete": False,
     }
+
+
+def _phantom_server_auth_closed() -> bool:
+    import phantom_auth
+    return phantom_auth.server_auth_closed()
 
 
 def _provider_status() -> dict:

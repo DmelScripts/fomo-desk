@@ -59,7 +59,8 @@ def public_status() -> dict:
         "bankroll_note": "Application control. Not a wallet policy.",
         "size_usd": "8.00",
         "fomo_bump_applies": False,
-        "loss_policy": "not_approved",
+        "loss_policy": "approved" if _loss_policy_recorded() else "not_approved",
+        "live_consent": False,
         "exit_policy": exit_view(),
         "execution_stage": execution_status(),
         "intake": "qualified_signal",
@@ -77,6 +78,12 @@ def public_status() -> dict:
 def _auth_view() -> dict:
     import phantom_auth
     return phantom_auth.account_view()
+
+
+def _loss_policy_recorded() -> bool:
+    import spend_policy
+    view = spend_policy.aggregate_view()
+    return view["approved"] is True and view["max_loss_usd"] == "20.00" and view["stops_new_entries"] is True
 
 
 def halted() -> bool:

@@ -25,6 +25,7 @@ import phantom_transport
 log = logging.getLogger("phantom_auth")
 
 LOGIN_TIMEOUT_S = 600
+AUTH_FRESH_S = 120
 MAX_CAPTURE = 65536
 APPROVAL_ORIGIN = "https://connect.phantom.app"
 APPROVAL_PATH = "/device-connect"
@@ -43,6 +44,8 @@ _FLOW: dict = {
     "observed_wallet": None,
     "process": None,
     "evidence_fresh": False,
+    "evidence_source": None,
+    "observed_at": None,
 }
 
 
@@ -53,6 +56,8 @@ def account_view() -> dict:
         observed_id = _FLOW["observed_wallet_id"]
         observed_wallet = _FLOW["observed_wallet"]
         matches = _matches()
+        observed_at = _FLOW.get("observed_at")
+        evidence_source = _FLOW.get("evidence_source")
     cached = _cached_evidence() if state == "idle" else None
     if state == "idle" and cached:
         auth_flow = "cached_" + cached["state"]
@@ -61,14 +66,21 @@ def account_view() -> dict:
         matches = None
         observed_id = None
         observed_wallet = None
+        observed_at = None
+        evidence_source = None
     elif state == "idle":
         auth_flow = phantom_transport.AUTH
         evidence = "none"
         cached_match = None
+        observed_at = None
+        evidence_source = None
     else:
         auth_flow = state
         evidence = "fresh" if state in _IDENTITY else "process"
         cached_match = None
+        if evidence != "fresh":
+            observed_at = None
+            evidence_source = None
     return {
         "auth_flow": auth_flow,
         "evidence": evidence,
@@ -81,27 +93,27 @@ def account_view() -> dict:
         "observed_wallet_id": observed_id,
         "observed_wallet": observed_wallet,
         "matches_allowlist": matches,
+        "evidence_source": evidence_source,
+        "observed_at": observed_at,
         "required_wallet_id": phantom_transport.REQUIRED_WALLET_ID,
         "required_wallet": phantom_transport.REQUIRED_WALLET,
     }
 
 
 def note_evidence(state: str, source: str) -> None:
-    """Remember a read-only identity result. This does not start a login."""
+    """Remember a balance or quote result. This does not identify the wallet."""
     if state not in {"observed", "mismatch", "auth_error"} or source not in {"balance", "quote"}:
         return
     with _LOCK:
         _FLOW["state"] = state
         _FLOW["evidence_fresh"] = True
+        _FLOW["evidence_source"] = source
         _FLOW["approval_url"] = None
         _FLOW["user_code"] = None
         _FLOW["verify"] = None
-        if state == "observed":
-            _FLOW["observed_wallet_id"] = phantom_transport.REQUIRED_WALLET_ID
-            _FLOW["observed_wallet"] = phantom_transport.REQUIRED_WALLET
-        else:
-            _FLOW["observed_wallet_id"] = None
-            _FLOW["observed_wallet"] = None
+        _FLOW["observed_wallet_id"] = None
+        _FLOW["observed_wallet"] = None
+        _FLOW["observed_at"] = None
     _persist_evidence(state, source)
 
 
@@ -339,6 +351,8 @@ def _apply_classification(result: dict) -> None:
             _FLOW["observed_wallet"] = None
         _FLOW["state"] = result["state"]
         _FLOW["evidence_fresh"] = result["state"] in _IDENTITY
+        _FLOW["evidence_source"] = "addresses" if result["state"] in _IDENTITY else None
+        _FLOW["observed_at"] = time.time() if result["state"] in {"observed", "mismatch"} and result.get("wallet_id") and result.get("address") else None
     if result["state"] in _IDENTITY:
         _persist_evidence(result["state"], "addresses")
     log.info("phantom login %s", result["state"])
@@ -530,6 +544,30 @@ def _cached_evidence() -> dict | None:
     return {"state": body["state"], "source": body["source"], "at": body["at"]}
 
 
+def server_auth_closed(now: float | None = None) -> bool:
+    """The readiness gate. A cached or stale identity check stays open."""
+    try:
+        view = account_view()
+    except Exception:
+        return False
+    if view.get("evidence_source") != "addresses":
+        return False
+    if view["auth_flow"] != "observed" or view["evidence"] != "fresh" or view["matches_allowlist"] is not True:
+        return False
+    if view["cached_match"] is True:
+        return False
+    if view["observed_wallet_id"] != phantom_transport.REQUIRED_WALLET_ID or view["observed_wallet"] != phantom_transport.REQUIRED_WALLET:
+        return False
+    stamp = view.get("observed_at")
+    moment = time.time() if now is None else now
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return False
+    if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+        return False
+    age = moment - stamp
+    return 0 <= age <= AUTH_FRESH_S
+
+
 def _matches():
     if _FLOW["state"] not in {"observed", "mismatch"}:
         return None
@@ -630,5 +668,7 @@ def reset_for_tests() -> None:
             "process": None,
             "verify": None,
             "evidence_fresh": False,
+            "evidence_source": None,
+            "observed_at": None,
         })
     _kill(proc)
