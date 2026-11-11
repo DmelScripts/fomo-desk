@@ -289,6 +289,40 @@ class LiveGateTests(unittest.TestCase):
             finally:
                 setattr(owner, attr, original)
 
+    def test_replacing_each_desk_method_leaves_the_live_gates_open(self):
+        import types
+        live = {
+            "lp_lock_live",
+            "rug_history_live",
+            "holder_growth_live",
+            "bundle_unique_buyers_smart_wallets_dev_holding",
+            "price_freshness_proven",
+            "quote_expiry",
+        }
+
+        def gates_open(label):
+            rows = {item["gate"]: item["closed"] for item in desk_loop.remaining_live_gates(MINT_A)}
+            for name in live:
+                self.assertFalse(rows[name], label + ":" + name)
+            self.assertTrue(rows["ticket_limit_proven"], label)
+
+        classes = (live_gate_proof._DeskHTTPSConnection, live_gate_proof._OwnedTransport)
+        replaced = False
+        for cls in classes:
+            for name, value in tuple(cls.__dict__.items()):
+                if not isinstance(value, types.FunctionType):
+                    continue
+                replaced = True
+                setattr(cls, name, lambda *args, **kwargs: None)
+                try:
+                    self.assertFalse(live_gate_proof.attributes_intact(), cls.__name__ + "." + name)
+                    self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A), name)
+                    gates_open(cls.__name__ + "." + name)
+                finally:
+                    setattr(cls, name, value)
+        self.assertTrue(replaced)
+        self.assertTrue(live_gate_proof.attributes_intact())
+
     def test_a_local_certificate_and_redirected_dns_stay_open(self):
         import socket
         import ssl

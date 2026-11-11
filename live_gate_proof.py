@@ -541,7 +541,7 @@ def _wire():
         return ctx
 
     def seal(url, parsed, mint, history) -> None:
-        if not stack_intact():
+        if not check():
             return
         save(plan(url, parsed, mint, clock(), history, seen()))
 
@@ -576,7 +576,7 @@ def _wire():
                     parsed = None
             if conn.sock is not sock:
                 accepted = False
-            proved = accepted and type(parsed) is dict
+            proved = accepted and type(parsed) is dict and check()
             if proved:
                 seal(request.full_url, parsed, mint, history)
             return status, raw, proved
@@ -615,6 +615,15 @@ def _wire():
             notes.clear()
 
     view = types.MappingProxyType(notes)
+    snapshots = {"classes": (), "functions": (), "methods": ()}
+
+    def mapping_matches(saved, live) -> bool:
+        if set(saved) != set(live):
+            return False
+        for key, value in saved.items():
+            if live[key] is not value:
+                return False
+        return True
 
     def check() -> bool:
         mod = sys.modules[__name__]
@@ -669,6 +678,26 @@ def _wire():
             return False
         if pyth.assess_signer_price is not assess_price:
             return False
+        if not snapshots["classes"] or not snapshots["functions"] or not snapshots["methods"]:
+            return False
+        for cls, saved in snapshots["classes"]:
+            if mapping_matches(saved, cls.__dict__) is not True:
+                return False
+        for fn, saved in snapshots["methods"]:
+            if mapping_matches(saved, fn.__dict__) is not True:
+                return False
+        mod_functions = {
+            fname: fvalue
+            for fname, fvalue in vars(mod).items()
+            if isinstance(fvalue, types.FunctionType)
+        }
+        if set(mod_functions) != {fname for fname, _fn, _saved in snapshots["functions"]}:
+            return False
+        for fname, fvalue, saved in snapshots["functions"]:
+            if mod_functions[fname] is not fvalue:
+                return False
+            if mapping_matches(saved, fvalue.__dict__) is not True:
+                return False
         return stack_intact()
 
     def names():
@@ -766,6 +795,22 @@ def _wire():
     monitored = names
     _OwnedTransport._note = note
     _OwnedTransport.handle_request = handle
+    mod = sys.modules[__name__]
+    snapshots["classes"] = tuple(
+        (cls, dict(cls.__dict__))
+        for cls in (connection_cls, _OwnedTransport)
+    )
+    snapshots["functions"] = tuple(
+        (fname, fvalue, dict(fvalue.__dict__))
+        for fname, fvalue in vars(mod).items()
+        if isinstance(fvalue, types.FunctionType) and fname != "_wire"
+    )
+    snapshots["methods"] = tuple(
+        (fn, dict(fn.__dict__))
+        for _cls, saved in snapshots["classes"]
+        for fn in saved.values()
+        if isinstance(fn, types.FunctionType)
+    )
 
 
 _wire()
