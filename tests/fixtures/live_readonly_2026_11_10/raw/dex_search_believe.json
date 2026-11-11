@@ -1,0 +1,1929 @@
+{
+ "meta": {
+  "name": "dex_search_believe",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/search?q=believe",
+  "status": 200,
+  "latency_ms": 93,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:00:54+0700",
+  "fetched_unix": 1794326454.146562,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xb022c000594900ecfa44c664411c751eb94367f65dce734aba6d49ff13aa9c92",
+    "pairAddress": "0xb022c000594900ecfa44c664411c751eb94367f65dce734aba6d49ff13aa9c92",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x1513f8aFE7Ef4889e961e26dCaE9f644e9591E18",
+     "name": "Believe In Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+     "name": "Apple \u2022 Robinhood Token",
+     "symbol": "AAPL"
+    },
+    "priceNative": "0.00000008781",
+    "priceUsd": "0.00003068",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 2,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 4,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 17.14,
+     "h6": 0.32,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -0.13,
+     "h24": -0.13
+    },
+    "liquidity": {
+     "usd": 32021.52,
+     "base": 881309798,
+     "quote": 14.2551
+    },
+    "fdv": 30682,
+    "marketCap": 30682,
+    "pairCreatedAt": 1788236830000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/shCHXMNY3frOOk73?width=800&height=800&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0x1513f8afe7ef4889e961e26dcae9f644e9591e18?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://qeniscoinsol.lol/",
+       "label": "Website"
+      }
+     ],
+     "socials": []
+    }
+   },
+   {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xec8e6197bfa3e897859d6ad0fc5115a00b70445d",
+    "pairAddress": "0xEC8e6197BFa3e897859d6ad0fC5115a00b70445D",
+    "labels": [
+     "v3"
+    ],
+    "baseToken": {
+     "address": "0xf9Ba053b2C5d94Cee9B13fa86df32A3090e2Cf66",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+     "name": "WETH",
+     "symbol": "WETH"
+    },
+    "priceNative": "0.000000003804",
+    "priceUsd": "0.000007862",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 2
+     },
+     "h24": {
+      "buys": 110,
+      "sells": 173
+     }
+    },
+    "volume": {
+     "h24": 126.89,
+     "h6": 0.81,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -1.53,
+     "h24": -2.05
+    },
+    "liquidity": {
+     "usd": 6675.61,
+     "base": 606802494,
+     "quote": 0.9214
+    },
+    "fdv": 7540,
+    "marketCap": 7540,
+    "pairCreatedAt": 1785836947000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/1gH2Q2Bx7wLYysOc?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/dZpSu_3rRfThn7zr?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0xf9ba053b2c5d94cee9b13fa86df32a3090e2cf66?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.believeprotocol.net/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/believeprotocol",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xbbf8de87041c7bb2f7f24a7332caca2b57bebbf1fad71df26c35f534b6bc12b8",
+    "pairAddress": "0xbbf8de87041c7bb2f7f24a7332caca2b57bebbf1fad71df26c35f534b6bc12b8",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x84C23015379837deDBc566118E163372A1210586",
+     "name": "Believe in Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+     "name": "WETH",
+     "symbol": "WETH"
+    },
+    "priceNative": "0.00000000001747",
+    "priceUsd": "0.00000003719",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 14.13,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -0.36
+    },
+    "liquidity": {
+     "usd": 3714.91,
+     "base": 90143499138,
+     "quote": 0.1699
+    },
+    "fdv": 3715,
+    "marketCap": 3715,
+    "pairCreatedAt": 1792247387000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/oCRuVMH0sa2ZYWyg?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/S3dExYpe7V2nJvWS?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/robinhood/0x84c23015379837dedbc566118e163372a1210586?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://flywheelbelieve.com/",
+       "label": "Website"
+      },
+      {
+       "url": "https://x.com/i/communities/2033294903145267466",
+       "label": "Community"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/flywheelBelieve",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/bjssymiflkwuq8r3kmsifh6t5jbllbd1vjdgzd7qynxf",
+    "pairAddress": "BJsSymifLkwUq8r3KMSiFH6t5JbLLBd1VJDgzD7qYNxF",
+    "labels": [
+     "DYN2"
+    ],
+    "baseToken": {
+     "address": "BLVxek8YMXUQhcKmMvrFTrzh5FXg8ec88Crp6otEaCMf",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00001813",
+    "priceUsd": "0.001493",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 2
+     },
+     "h1": {
+      "buys": 45,
+      "sells": 31
+     },
+     "h6": {
+      "buys": 176,
+      "sells": 155
+     },
+     "h24": {
+      "buys": 1332,
+      "sells": 1119
+     }
+    },
+    "volume": {
+     "h24": 158094.42,
+     "h6": 19978.81,
+     "h1": 4383.01,
+     "m5": 70.83
+    },
+    "priceChange": {
+     "m5": -0.21,
+     "h1": -0.75,
+     "h6": -8.93,
+     "h24": -15.96
+    },
+    "liquidity": {
+     "usd": 109869.95,
+     "base": 36794110,
+     "quote": 666.833
+    },
+    "fdv": 1911579,
+    "marketCap": 1911579,
+    "pairCreatedAt": 1760549745000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/9d0df5a39462efc096728fc8ca8117090900fe5581b121b17e7c3399d2d58c05?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/612b0ff4f5f7fa3987f007f5e6c1ea0ea66bc5317a2f0eb1c74865a43747a791?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/BLVxek8YMXUQhcKmMvrFTrzh5FXg8ec88Crp6otEaCMf?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://believe.app",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/believeapp",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/ebbgbx2l4uyanypmz1xtsly84ewcbdmccrzsvv6kj4a3",
+    "pairAddress": "EBBGBx2L4UyANypmZ1xTsLY84EWcbDMCcRzSvV6Kj4A3",
+    "baseToken": {
+     "address": "HeC2xWqGT9gPfdvaMuqxPo2bUQ1XgY5wRtnrwTEHpump",
+     "name": "something to believe in",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.000003134",
+    "priceUsd": "0.0002637",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 4,
+      "sells": 3
+     }
+    },
+    "volume": {
+     "h24": 709.65,
+     "h6": 52.74,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -4.06,
+     "h24": -0.59
+    },
+    "liquidity": {
+     "usd": 67606.7,
+     "base": 127574422,
+     "quote": 403.6613
+    },
+    "fdv": 218489,
+    "marketCap": 218489,
+    "pairCreatedAt": 1775005265000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/AHYy-pcGJu0c2ivp?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/6yvGqW7Vo-ZZAs7l?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/HeC2xWqGT9gPfdvaMuqxPo2bUQ1XgY5wRtnrwTEHpump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://believecto.com/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/Believe_CTO_",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/BelievePortal",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/c371gyu6emzf4kckrzpdwosdqy1tgeqyuqeejnpyu5kq",
+    "pairAddress": "C371GYu6eMZf4KCkrzPdwoSDQy1tGeQYUqeeJnpyu5KQ",
+    "labels": [
+     "CPMM"
+    ],
+    "baseToken": {
+     "address": "8VJ9ksmzQbVnz8dzT9ggzo3WuXtxnurBqLAvLGFGSTNK",
+     "name": "Believe In Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr",
+     "name": "SPX6900 (Wormhole)",
+     "symbol": "SPX"
+    },
+    "priceNative": "0.00002096",
+    "priceUsd": "0.000007613",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 5,
+      "sells": 3
+     }
+    },
+    "volume": {
+     "h24": 189.25,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": 9.18
+    },
+    "liquidity": {
+     "usd": 6655.67,
+     "base": 437107248,
+     "quote": 9162.07538
+    },
+    "fdv": 7613,
+    "marketCap": 7613,
+    "pairCreatedAt": 1789408396000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/ULeaF9ifoO1Eb_4A?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/9zZwmMzAtVH-4-LO?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/8VJ9ksmzQbVnz8dzT9ggzo3WuXtxnurBqLAvLGFGSTNK?timestamp=1794326400000",
+     "websites": [],
+     "socials": [
+      {
+       "url": "https://x.com/youwatchedme/status/2099556572737249684",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/9rhhkcnr34mff6exnmf4nphau3hfw5ynjg5sqyblgrr9",
+    "pairAddress": "9RHHKcNR34mFf6eXNMF4NPHAU3HfW5ynjg5sqYBLgrR9",
+    "baseToken": {
+     "address": "Fum18VwshM78gQAhJWxr822PBGFdkJaEGivwr59Z1FiL",
+     "name": "In Yourself",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002080",
+    "priceUsd": "0.000001744",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 0.52,
+     "h6": 0.52,
+     "h1": 0.52,
+     "m5": 0
+    },
+    "priceChange": {},
+    "liquidity": {
+     "usd": 1795.17,
+     "base": 931167291,
+     "quote": 2.03076
+    },
+    "fdv": 1674,
+    "marketCap": 1674,
+    "pairCreatedAt": 1790705613000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/RVAxHAUH8MnL9B-e?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/zhZ044u1XQAp7WBO?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/Fum18VwshM78gQAhJWxr822PBGFdkJaEGivwr59Z1FiL?timestamp=1794326400000",
+     "websites": [],
+     "socials": [
+      {
+       "url": "https://x.com/chillmigratoor/status/2104996856904245429",
+       "type": "twitter"
+      },
+      {
+       "url": "https://www.instagram.com/p/Dd0N3-8uzKP/",
+       "type": "instagram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "elysium",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/elysium/0xc607ec0b416b96721c91403bb092495b9f2a710c6deb723f1c5db35c24c02284",
+    "pairAddress": "0xc607ec0b416b96721c91403bb092495b9f2a710c6deb723f1c5db35c24c02284",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x8469ee48f89FC5b5370cD30f378E60e2eb0d32B3",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0x0000000000000000000000000000000000000000",
+     "name": "Hyperliquid",
+     "symbol": "HYPE"
+    },
+    "priceNative": "0.00000004227",
+    "priceUsd": "0.000003119",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 19,
+      "sells": 27
+     }
+    },
+    "volume": {
+     "h24": 1728.43,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": 0.07
+    },
+    "liquidity": {
+     "usd": 3119.21,
+     "base": 999999998,
+     "quote": 7.257e-08
+    },
+    "fdv": 3119,
+    "marketCap": 3119,
+    "pairCreatedAt": 1794282972000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/7zdwpbsicvpbqxr5ycs6seci2v9zwazemvvwczzbyscj",
+    "pairAddress": "7ZdWPbsicVPBqXR5Ycs6SeCi2v9zwAZemVVWCzzbYScJ",
+    "labels": [
+     "CLMM"
+    ],
+    "baseToken": {
+     "address": "4c4o9err2Ey1ByhSKbsavSHac9DQV3CKXMK1NYLX17zb",
+     "name": "Believe In Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp",
+     "name": "Apple xStock",
+     "symbol": "AAPLx"
+    },
+    "priceNative": "0.00000001624",
+    "priceUsd": "0.000005720",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 48.29,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -0.88
+    },
+    "liquidity": {
+     "usd": 5746.46,
+     "base": 991704306,
+     "quote": 0.2082
+    },
+    "fdv": 5721,
+    "marketCap": 5721,
+    "pairCreatedAt": 1788237006000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/4neotcr4vwtp5xxphq2tvmkqpvltutcnbksap2ltxezm",
+    "pairAddress": "4neoTCr4vWTp5xxPHQ2tVmKQpvLTUTcNbKsaP2LTxEzM",
+    "labels": [
+     "CLMM"
+    ],
+    "baseToken": {
+     "address": "73hUvZX9FJbR8rTsXddmFL3AYg6WzaBZeetnD5vCYtCw",
+     "name": "Believe In Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp",
+     "name": "Apple xStock",
+     "symbol": "AAPLx"
+    },
+    "priceNative": "0.00000001601",
+    "priceUsd": "0.000005639",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 3
+     }
+    },
+    "volume": {
+     "h24": 394.5,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -6.67
+    },
+    "liquidity": {
+     "usd": 5583.96,
+     "base": 988602764,
+     "quote": 0.02446
+    },
+    "fdv": 5640,
+    "marketCap": 5640,
+    "pairCreatedAt": 1788237050000
+   },
+   {
+    "chainId": "ethereum",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/ethereum/0xaa226ec05255e589cac25578d4f98766ee53fddd81ada83f130f2b68c56cd6ae",
+    "pairAddress": "0xaa226ec05255e589cac25578d4f98766ee53fddd81ada83f130f2b68c56cd6ae",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0xFEEb06bDE85B3757d306A39e5489059A9AE984c8",
+     "name": "Believe in Something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0xE0f63A424a4439cBE457D80E4f4b51aD25b2c56C",
+     "name": "SPX6900",
+     "symbol": "SPX"
+    },
+    "priceNative": "0.00001717",
+    "priceUsd": "0.000006207",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 4.17,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "liquidity": {
+     "usd": 6201.8,
+     "base": 969383880,
+     "quote": 510.139
+    },
+    "fdv": 6108,
+    "marketCap": 6108,
+    "pairCreatedAt": 1790269223000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/9ssbhfhgq4bqcyjlexr6rnnl6bfoyb5cqkve2zmy2upz",
+    "pairAddress": "9SsbHfHgQ4BqcYjLexR6RnnL6BfoYB5CqkVE2ZMY2UPZ",
+    "baseToken": {
+     "address": "9f49oY3ErcQwv3MvNkuPG187vUThFrjs7RMtZKWNpump",
+     "name": "Believe",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002021",
+    "priceUsd": "0.000001707",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 4.32,
+     "h6": 0.55,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -2.57,
+     "h24": -4.54
+    },
+    "liquidity": {
+     "usd": 1707.04,
+     "base": 928898339,
+     "quote": 1.4295
+    },
+    "fdv": 1595,
+    "marketCap": 1595,
+    "pairCreatedAt": 1793898537000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/adruaeptzvhfsdebsk671dfrrfjvqmebwe9dbclledhw",
+    "pairAddress": "AdRUaEptzVHfsDeBSk671DfrRFjVqMEbwE9DbCLLEDhW",
+    "baseToken": {
+     "address": "DZcoWmNAYRCsQcFR3YFKvS3n8UFf59GLwJkEpsn9pump",
+     "name": "Believe In Something",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000003007",
+    "priceUsd": "0.000002585",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 10
+     }
+    },
+    "volume": {
+     "h24": 72.42,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -4.06
+    },
+    "fdv": 2585.72,
+    "marketCap": 2585.72,
+    "pairCreatedAt": 1794160815000
+   },
+   {
+    "chainId": "elysium",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/elysium/0x3c6796eced60bbb5b034599aad0454be7d30aa294444712d803756c1383e0afc",
+    "pairAddress": "0x3c6796eced60bbb5b034599aad0454be7d30aa294444712d803756c1383e0afc",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0xE6308Fd0232EFE9DF5DDe8C1dDa3AED297CB1E37",
+     "name": "BelievePad",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "0x0000000000000000000000000000000000000000",
+     "name": "Hyperliquid",
+     "symbol": "HYPE"
+    },
+    "priceNative": "0.00000004227",
+    "priceUsd": "0.000003177",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 2,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 151.86,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -0.04
+    },
+    "fdv": 3178,
+    "marketCap": 3178,
+    "pairCreatedAt": 1794245458000
+   },
+   {
+    "chainId": "base",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/base/0x1776745c9aef681c71461cc218c069f9c48ab10ea074bc0165f404d8026d8c87",
+    "pairAddress": "0x1776745c9aef681c71461cc218c069f9c48ab10ea074bc0165f404d8026d8c87",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x426471839D343Aa1eF87adF8dE2E559f6E71C7C6",
+     "name": "Believe",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "0x0000000000000000000000000000000000000000",
+     "name": "Ether",
+     "symbol": "ETH"
+    },
+    "priceNative": "0.000000001022",
+    "priceUsd": "0.000002177",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 5,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 1145.29,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": 96.43
+    },
+    "liquidity": {
+     "usd": 3138.18,
+     "base": 893623753,
+     "quote": 0.5595
+    },
+    "fdv": 2178,
+    "marketCap": 2178,
+    "pairCreatedAt": 1794258120000
+   },
+   {
+    "chainId": "base",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/base/0x6290c1c982aa29568cda5c734b45f41c458894b25501cb4984f56c5863997676",
+    "pairAddress": "0x6290c1c982aa29568cda5c734b45f41c458894b25501cb4984f56c5863997676",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0xfD8846613b1dBc8C729D85c8C808352AFb28ED61",
+     "name": "Believe",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "0x0000000000000000000000000000000000000000",
+     "name": "Ether",
+     "symbol": "ETH"
+    },
+    "priceNative": "0.000000001008",
+    "priceUsd": "0.000002110",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 4,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 4,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 1114.33,
+     "h6": 1114.33,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": 93.94,
+     "h24": 93.94
+    },
+    "liquidity": {
+     "usd": 2971.11,
+     "base": 704011646,
+     "quote": 0.7102
+    },
+    "fdv": 2110,
+    "marketCap": 2110,
+    "pairCreatedAt": 1794312724000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/cnyywfgm7jofdmgfgv7wphfwnmbf6u72pvmcgdc7v6ee",
+    "pairAddress": "CnYYWFGm7joFdMGfgv7wPHfWnmbF6u72PvMcgDC7V6ee",
+    "baseToken": {
+     "address": "2JLzDqMN9cgU5ixjJkM2wAxh6BoChimrRBQWBtxnyXTr",
+     "name": "Believe Coin",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000000003155",
+    "priceUsd": "0.000000002578",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 1,
+      "sells": 1
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 0,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 136036,
+     "h6": 136036,
+     "h24": 136036
+    },
+    "liquidity": {
+     "usd": 2.28,
+     "base": 73102,
+     "quote": 0.02792
+    },
+    "fdv": 3,
+    "marketCap": 3,
+    "pairCreatedAt": 1745775129000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/esuyectus8czubkwkhxehsgzax52v8ffxq1aruuaphfw",
+    "pairAddress": "EsuYEcTus8cZuBKWkHXEhsgzAX52V8fFXq1aRuUaphfW",
+    "baseToken": {
+     "address": "9pgLnTahqWTnadSPu9V5gb6y8qS3ihjwcteVGPUbpump",
+     "name": "BelievePad",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+     "name": "Pump",
+     "symbol": "PUMP"
+    },
+    "priceNative": "0.0008420",
+    "priceUsd": "0.000003044",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 30,
+      "sells": 3
+     }
+    },
+    "volume": {
+     "h24": 52.94,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -2.27
+    },
+    "fdv": 3044.86,
+    "marketCap": 3044.86,
+    "pairCreatedAt": 1794266114000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/3vvafydywuoepkqkuxxhvbxrak5b3jaynh5wpkz9dtqt",
+    "pairAddress": "3vVafYdYWuoePkqKUxxhVBxRaK5B3jAyNh5wpKZ9dTQt",
+    "baseToken": {
+     "address": "5UsCea4RTTgUN6bjNGzHY4cpR3ihu4PEfkkc79Qkpump",
+     "name": "Believe in something",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002796",
+    "priceUsd": "0.000002418",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 0.01,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "fdv": 2418.32,
+    "marketCap": 2418.32,
+    "pairCreatedAt": 1784567773000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/b5npbje23mfpfsdcpzdjjzfhj7oyz35ahxbx3xvtkfcn",
+    "pairAddress": "B5nPBje23mfPFSdCPzDJjzFhJ7oyZ35AhxbX3xVTkFCn",
+    "baseToken": {
+     "address": "GvM1n4Xv86qSUgJfKocC94MP7qoZbZ74psswZTmLpump",
+     "name": "Dog Who Believed",
+     "symbol": "BELIEVE"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002795",
+    "priceUsd": "0.000002362",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 2,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 19.66,
+     "h6": 1.16,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -1.2,
+     "h24": -3.02
+    },
+    "fdv": 2362.81,
+    "marketCap": 2362.81,
+    "pairCreatedAt": 1794273835000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/3bmmdas5ukn7hzxnwy8uqns6w5zpjqnqhewrmu5xtd6t",
+    "pairAddress": "3bmMDaS5UkN7HzXNwy8Uqns6W5zPjQnqheWrMu5xtd6t",
+    "baseToken": {
+     "address": "A84GgfYQBT63Wzce8NHtPu4VNMVJeP34pJZQtYCepump",
+     "name": "Believe Again",
+     "symbol": "Believe"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002796",
+    "priceUsd": "0.000002403",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 1.03,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "fdv": 2403.86,
+    "marketCap": 2403.86,
+    "pairCreatedAt": 1784555157000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/agbkl6qf2feecwdcybikh8kabejrjpttui4znxnwaqbt",
+    "pairAddress": "AgBKL6Qf2FeECWdCYbikh8kabEJrjptTUi4ZnXnwAqBt",
+    "labels": [
+     "DYN2"
+    ],
+    "baseToken": {
+     "address": "2GPJhV9jNrj7TaLYMRgWkcy6sTKLcwntv7nZ7qDyMRGM",
+     "name": "Believe In Something",
+     "symbol": "bis"
+    },
+    "quoteToken": {
+     "address": "BLVxek8YMXUQhcKmMvrFTrzh5FXg8ec88Crp6otEaCMf",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "priceNative": "0.04741",
+    "priceUsd": "0.00007089",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 7,
+      "sells": 10
+     },
+     "h6": {
+      "buys": 33,
+      "sells": 24
+     },
+     "h24": {
+      "buys": 211,
+      "sells": 206
+     }
+    },
+    "volume": {
+     "h24": 200.12,
+     "h6": 24.68,
+     "h1": 6.38,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": -3.44,
+     "h6": -4.44,
+     "h24": -5.5
+    },
+    "liquidity": {
+     "usd": 266.44,
+     "base": 1880884,
+     "quote": 89013
+    },
+    "fdv": 70875,
+    "marketCap": 70875,
+    "pairCreatedAt": 1760762627000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/d1c45ab645cc7e3b3a3d170feec07cfc3e47101026aa12ac27f834bc4fd5d78b?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/9e118e849e40da66d129c8e6ffb6185267fcbd7b2cfb22ef43198ca2a68fbd3d?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/2GPJhV9jNrj7TaLYMRgWkcy6sTKLcwntv7nZ7qDyMRGM?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://linktr.ee/believeinsmth",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/i/communities/1842371407633879081",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/BelieveInSmth",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/7dfny5rz9hz74ukn2nssq8hyqlnkh3pi6j4pfyrcc3tb",
+    "pairAddress": "7dFNY5RZ9hZ74uKn2Nssq8HyQLnKH3pi6j4pFYrcC3tb",
+    "labels": [
+     "DYN2"
+    ],
+    "baseToken": {
+     "address": "B1fULjbpF5YLDQv47Cvu4VpU5akjauR9R52u1Rpxk6UL",
+     "name": "SOL MINE",
+     "symbol": "SOLm"
+    },
+    "quoteToken": {
+     "address": "BLVxek8YMXUQhcKmMvrFTrzh5FXg8ec88Crp6otEaCMf",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "priceNative": "0.003160",
+    "priceUsd": "0.000004521",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 2,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 12,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 88,
+      "sells": 66
+     }
+    },
+    "volume": {
+     "h24": 30.63,
+     "h6": 2.99,
+     "h1": 0.41,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 0.01,
+     "h6": -0.06,
+     "h24": -2.99
+    },
+    "liquidity": {
+     "usd": 126.39,
+     "base": 13959259,
+     "quote": 44241
+    },
+    "fdv": 4520,
+    "marketCap": 4520,
+    "pairCreatedAt": 1767081284000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/Sq3Y0qM3iLj_t6ti?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/FDZlSw5rUk3f0z2V?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/B1fULjbpF5YLDQv47Cvu4VpU5akjauR9R52u1Rpxk6UL?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://sol-mine.com/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/SOLMINE666",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/solmine666",
+       "type": "telegram"
+      },
+      {
+       "url": "https://www.tiktok.com/@solmine666/video/7596827770127158550",
+       "type": "tiktok"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/5pkse1cthud2twrbhsyi9y6ya9jk27arkmzazmmrsqst",
+    "pairAddress": "5PkSE1cThUD2twRBHSYi9y6YA9jK27ArKMzAZMMRsQst",
+    "labels": [
+     "DYN2"
+    ],
+    "baseToken": {
+     "address": "9xzmB67zWX8PJiGpQFbWuNBXTqyPpu2qV3mxQfhqUREV",
+     "name": "Celestial SOL Router",
+     "symbol": "CSR"
+    },
+    "quoteToken": {
+     "address": "BLVxek8YMXUQhcKmMvrFTrzh5FXg8ec88Crp6otEaCMf",
+     "name": "Believe",
+     "symbol": "BELIEVE"
+    },
+    "priceNative": "0.01862",
+    "priceUsd": "0.00002760",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 1,
+      "sells": 2
+     },
+     "h6": {
+      "buys": 10,
+      "sells": 7
+     },
+     "h24": {
+      "buys": 67,
+      "sells": 68
+     }
+    },
+    "volume": {
+     "h24": 7.16,
+     "h6": 0.88,
+     "h1": 0.18,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 2.91,
+     "h6": -6.26,
+     "h24": 1.8
+    },
+    "liquidity": {
+     "usd": 13.3,
+     "base": 241960,
+     "quote": 4471.1994
+    },
+    "fdv": 27588,
+    "marketCap": 27588,
+    "pairCreatedAt": 1784430683000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/cbee91v79qdxn2zqst2325ngkdvsd1q7jrns7pdnlyjw",
+    "pairAddress": "CbEE91V79QDXN2zQsT2325NgkDvsd1q7JRns7pdnLYJw",
+    "baseToken": {
+     "address": "EmhVWGUa2Q9PN4QjzFjvuVyzFKg4s3ERwjKR9dQDpump",
+     "name": "Believe In Something",
+     "symbol": "DTF"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.000001039",
+    "priceUsd": "0.00008746",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 0.42,
+     "h6": 0.19,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -3.02,
+     "h24": -3.51
+    },
+    "liquidity": {
+     "usd": 44930.19,
+     "base": 256537085,
+     "quote": 267.4568
+    },
+    "fdv": 87342,
+    "marketCap": 87342,
+    "pairCreatedAt": 1731380494000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/22e87270091576693b8bb50ec87e5244eed7953cbed7016bce8f98f1d2dbb78f?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/b3e132741a25ccd7088fbb4cd6c29b981688f9b214031967e93de1434d1bbd91?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/EmhVWGUa2Q9PN4QjzFjvuVyzFKg4s3ERwjKR9dQDpump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.dtf.fun",
+       "label": "Website"
+      },
+      {
+       "url": "https://docs.dtf.fun/",
+       "label": "Docs"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/MemeIndexer",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/dtfsxyz",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "ethereum",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/ethereum/0xce1bec6c2fab43d52c12802e13f481f8326ed2f3",
+    "pairAddress": "0xCe1BeC6C2fAB43D52c12802E13F481f8326ED2F3",
+    "labels": [
+     "v2"
+    ],
+    "baseToken": {
+     "address": "0x7C9F94a79b6B859dfB1d3312fc2311b39F89c677",
+     "name": "believe in somETHing",
+     "symbol": "somETHing"
+    },
+    "quoteToken": {
+     "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "name": "Wrapped Ether",
+     "symbol": "WETH"
+    },
+    "priceNative": "0.0000000001037",
+    "priceUsd": "0.0000002149",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 1,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 5,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 1957.33,
+     "h6": 623.69,
+     "h1": 623.69,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 5.13,
+     "h6": 5.13,
+     "h24": -4.33
+    },
+    "liquidity": {
+     "usd": 34453,
+     "base": 80124304046,
+     "quote": 8.3132
+    },
+    "fdv": 90383,
+    "marketCap": 90383,
+    "pairCreatedAt": 1753810919000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/DEOfWAQ25fU19LvR?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/UP1-c8B7XyCA8Ug3?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/ethereum/0x7c9f94a79b6b859dfb1d3312fc2311b39f89c677?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://webelieveinsomething.xyz/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/somethingtoken?s=21",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/believeinsomeETHing",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/cf1uefqbt2wv4qujnkhgsr6c8y6invukoqbpczawazeb",
+    "pairAddress": "CF1uefqBT2Wv4QUJNKHGSr6c8y6invuKoQbPczAWAZEb",
+    "baseToken": {
+     "address": "2GPJhV9jNrj7TaLYMRgWkcy6sTKLcwntv7nZ7qDyMRGM",
+     "name": "Believe In Something",
+     "symbol": "bis"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.0000008550",
+    "priceUsd": "0.00007109",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 6,
+      "sells": 5
+     },
+     "h6": {
+      "buys": 19,
+      "sells": 30
+     },
+     "h24": {
+      "buys": 195,
+      "sells": 154
+     }
+    },
+    "volume": {
+     "h24": 188.54,
+     "h6": 26.51,
+     "h1": 5.49,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": -1.25,
+     "h6": -3.21,
+     "h24": -4.97
+    },
+    "liquidity": {
+     "usd": 33531.9,
+     "base": 235537153,
+     "quote": 201.8835
+    },
+    "fdv": 71072,
+    "marketCap": 71072,
+    "pairCreatedAt": 1710220871000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/d1c45ab645cc7e3b3a3d170feec07cfc3e47101026aa12ac27f834bc4fd5d78b?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/9e118e849e40da66d129c8e6ffb6185267fcbd7b2cfb22ef43198ca2a68fbd3d?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/2GPJhV9jNrj7TaLYMRgWkcy6sTKLcwntv7nZ7qDyMRGM?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://linktr.ee/believeinsmth",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/i/communities/1842371407633879081",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/BelieveInSmth",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/yrrustgpugdp8bbfosqdefssen6sa75zs1qjvgnhtmy",
+    "pairAddress": "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY",
+    "labels": [
+     "CLMM"
+    ],
+    "baseToken": {
+     "address": "Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk",
+     "name": "Launch Coin on Believe",
+     "symbol": "LAUNCHCOIN"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.0000004131",
+    "priceUsd": "0.00003472",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 3,
+      "sells": 12
+     },
+     "h24": {
+      "buys": 88,
+      "sells": 116
+     }
+    },
+    "volume": {
+     "h24": 6091.84,
+     "h6": 308.11,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": 6.65,
+     "h24": 0.79
+    },
+    "liquidity": {
+     "usd": 19434.3,
+     "base": 204886638,
+     "quote": 146.5801
+    },
+    "fdv": 34721,
+    "marketCap": 34723,
+    "pairCreatedAt": 1737689992000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/7fe8e62ad842201ede0cc2f5e6ef37bffdcd014f715a2f922c1339b1e8d2f1dd?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/71cfe950edb1c99668a304fc8c8504bb36a9242594eef3506d70f13c5feba9f8?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://launchcoincto.com",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/LaunchcoinCTO",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/4vp154irguc7hwdlezqn5n5r2gzbnscqddc3fdnpio1s",
+    "pairAddress": "4vp154iRgUC7hwDLEZQN5n5R2gZBNScqDdC3FdNpio1s",
+    "baseToken": {
+     "address": "QJqjAhLA4mJ8Ziba1Vxpd4dFQyEscCTDT658j1Lpump",
+     "name": "Get Paid To Believe",
+     "symbol": "GETPAID"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000003182",
+    "priceUsd": "0.000002689",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 1,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 12
+     },
+     "h24": {
+      "buys": 173,
+      "sells": 276
+     }
+    },
+    "volume": {
+     "h24": 18008.58,
+     "h6": 804.41,
+     "h1": 0.41,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 1.12,
+     "h6": -41.68,
+     "h24": -82.32
+    },
+    "fdv": 2689.33,
+    "marketCap": 2689.33,
+    "pairCreatedAt": 1794193404000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/f0EbWSJly0WojBBR?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/GG0qVbbHdBYzM6CX?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/QJqjAhLA4mJ8Ziba1Vxpd4dFQyEscCTDT658j1Lpump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.getpaidtobelieve.com/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/getpaid2believe",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/cuar9cygcsr4hvvbyctb1qhzkc8uugrt8rqrc4nbyaoa",
+    "pairAddress": "CuAr9cYgcSr4HVvByctB1qHzKC8UuGRt8rQRC4nByaoa",
+    "labels": [
+     "CPMM"
+    ],
+    "baseToken": {
+     "address": "B4aJyVCibxP1J95RccZ57DPJWEfkkzUDbm9DuFD9bonk",
+     "name": "no one believes in this",
+     "symbol": "underdog"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.0000001595",
+    "priceUsd": "0.00001320",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 2,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 13,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 19,
+      "sells": 0
+     }
+    },
+    "volume": {
+     "h24": 0.53,
+     "h6": 0.4,
+     "h1": 0.19,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": -1.98,
+     "h6": -3.08,
+     "h24": -4.02
+    },
+    "liquidity": {
+     "usd": 11458.5,
+     "base": 433710763,
+     "quote": 69.2022
+    },
+    "fdv": 13210,
+    "marketCap": 13210,
+    "pairCreatedAt": 1752428977000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/299b07272ee4ca1d1c0cd248d9a15d75dfcf7caa4951b3dec5f80c711a3c1bf4?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/9b3e91a7623cf994bf3ada9b1be14d73c7e5df8b452c8c8d9b1d5137e7283ee9?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/B4aJyVCibxP1J95RccZ57DPJWEfkkzUDbm9DuFD9bonk?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.underdogsol.com/",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/i/communities/1948254437086269800",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/sol_underdog",
+       "type": "telegram"
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

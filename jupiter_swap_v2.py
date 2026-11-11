@@ -40,11 +40,18 @@ def order_url(input_mint: str, output_mint: str, amount: str) -> str:
     return f"{ORDER_URL}?inputMint={input_mint}&outputMint={output_mint}&amount={amount}"
 
 
-def build_url(input_mint: str, output_mint: str, amount: str) -> str:
-    """Documented instruction build. The taker is the server wallet. Nothing is signed."""
+def build_url(input_mint: str, output_mint: str, amount: str, slippage_bps: int) -> str:
+    """Documented instruction build. The taker is the server wallet. Nothing is signed.
+
+    slippage_bps is required. There is no default of 50. The service passes the
+    bps selected from the measured pool and the stored owner record. 51 and 100
+    are outside that ceiling. This function does not perform the request.
+    """
+    if isinstance(slippage_bps, bool) or not isinstance(slippage_bps, int) or not 0 <= slippage_bps <= 50:
+        raise ValueError("slippage request is outside the owner ceiling")
     return (
         f"{BUILD_URL}?inputMint={input_mint}&outputMint={output_mint}"
-        f"&amount={amount}&taker={phantom_transport.REQUIRED_WALLET}&slippageBps=50"
+        f"&amount={amount}&taker={phantom_transport.REQUIRED_WALLET}&slippageBps={slippage_bps}"
     )
 
 
@@ -52,12 +59,22 @@ def assess_order(body: dict) -> dict:
     base = _refused("order")
     if not isinstance(body, dict):
         return base | {"reason": "order_shape"}
+    height = _published_height(body.get("lastValidBlockHeight"))
+    expire_at = _published_time(body.get("expireAt"))
+    transaction_present = isinstance(body.get("transaction"), str) and body.get("transaction") != ""
+    transaction = body.get("transaction") if transaction_present else None
     base.update({
         "router": body.get("router") if isinstance(body.get("router"), str) else None,
+        "request_id": body.get("requestId") if isinstance(body.get("requestId"), str) else None,
+        "transaction_b64": transaction,
+        "last_valid_block_height": height,
+        "expire_at": expire_at,
+        "provider_expiry_field": "expireAt" if expire_at is not None else ("lastValidBlockHeight" if height is not None else None),
+        "provider_expiry_malformed": _expiry_malformed(body),
         "in_amount": body.get("inAmount") if isinstance(body.get("inAmount"), str) else None,
         "out_amount": body.get("outAmount") if isinstance(body.get("outAmount"), str) else None,
         "fee_bps": body.get("feeBps") if isinstance(body.get("feeBps"), int) and not isinstance(body.get("feeBps"), bool) else None,
-        "transaction_present": bool(body.get("transaction")),
+        "transaction_present": transaction_present,
         "reason": "transaction_not_decodable" if body.get("transaction") else "quote_is_not_an_instruction",
     })
     return base
@@ -86,9 +103,11 @@ def assess_build(body: dict) -> dict:
             raw = b""
     discriminator = raw[:8].hex() if len(raw) >= 8 else None
     matches_route_v2 = raw[:8] == solana_jupiter.ROUTE_V2 if len(raw) >= 8 else False
-    quoted = None
-    if matches_route_v2 and len(raw) >= 24:
-        quoted = str(int.from_bytes(raw[16:24], "little"))
+    import jupiter_route_v2
+    parsed = jupiter_route_v2.parse(raw) if raw else {"min_out_proven": False}
+    quoted = str(parsed["quoted_out_amount"]) if parsed.get("quoted_out_amount") is not None else None
+    base["min_out_proven"] = parsed.get("min_out_proven") is True
+    base["instruction_min_out"] = None if parsed.get("min_out") is None else str(parsed["min_out"])
     base.update({
         "program_id": program,
         "program_is_jup6": program == solana_jupiter.PROGRAM_ID,
@@ -98,13 +117,43 @@ def assess_build(body: dict) -> dict:
         "matches_route_v2": matches_route_v2,
         "json_other_amount_threshold": threshold if isinstance(threshold, str) else None,
         "instruction_quoted_out": quoted,
-        "json_threshold_equals_instruction_quoted": quoted is not None and quoted == threshold,
+        "json_threshold_equals_instruction_min": parsed.get("min_out") is not None and str(parsed["min_out"]) == threshold,
         "route_labels": [step.get("swapInfo", {}).get("label") for step in plan if isinstance(step, dict) and isinstance(step.get("swapInfo"), dict)],
         "deprecated_fee_fields_present": fee_fields,
         "compute_unit_limit_published": False,
-        "reason": "route_v2_min_out_not_bound_to_hop",
+        "reason": parsed.get("reason") or ("hop_accounts_unpublished" if parsed.get("min_out_proven") else "route_v2_bytes"),
     })
     return base
+
+
+def _published_height(value):
+    """Jupiter publishes lastValidBlockHeight as a string. A slot is not this number."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _published_time(value):
+    """RFQ expireAt. Absent means the provider did not publish a quote timestamp."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _expiry_malformed(body: dict) -> bool:
+    if "lastValidBlockHeight" in body and body.get("lastValidBlockHeight") not in (None, "") and _published_height(body.get("lastValidBlockHeight")) is None:
+        return True
+    if "expireAt" in body and body.get("expireAt") not in (None, "") and _published_time(body.get("expireAt")) is None:
+        return True
+    return False
 
 
 def _refused(kind: str) -> dict:

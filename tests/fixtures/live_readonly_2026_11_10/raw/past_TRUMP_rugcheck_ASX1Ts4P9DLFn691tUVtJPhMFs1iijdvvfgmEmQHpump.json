@@ -1,0 +1,254 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump/report",
+  "status": 200,
+  "latency_ms": 3308,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:05:21+0700",
+  "fetched_unix": 1794326718.675371,
+  "request_body": null
+ },
+ "body": {
+  "mint": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 1000000000000000,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "ELON MUSK COIN",
+   "symbol": "ELONCOIN",
+   "uri": "https://ipfs.io/ipfs/bafkreibhibkcr2lxg464wnzzhiepboggplbw3zzosnbmq5q3kndskwqf2u",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "37XRBYGTB2CD7rCaigSRWyYm7t4FV7SGzuFHmAWPw6BQ",
+    "amount": 999633677019504,
+    "decimals": 6,
+    "pct": 99.9633677019504,
+    "uiAmount": 999633677.019504,
+    "uiAmountString": "999633677.019504",
+    "owner": "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5",
+    "insider": false
+   },
+   {
+    "address": "CDgYqjFqSR5bpz83tx7H7v5Z3NRxEJMhMC85XJ3FoeWn",
+    "amount": 366322980496,
+    "decimals": 6,
+    "pct": 0.0366322980496,
+    "uiAmount": 366322.980496,
+    "uiAmountString": "366322.980496",
+    "owner": "3yDW79fepG2FMVxTqDrBp4NLqy4RX8QFQo7QKYN7Cikj",
+    "insider": false
+   },
+   {
+    "address": "2MZWqyCpJBcPpriLJR9BGth5eeirAwY4auMTWZHSUkXx",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "AKk2UVhbfyhGttmsArNehT7xtTp8p7G6eo5Ck8m2Q3dC",
+    "insider": false
+   },
+   {
+    "address": "2jqexZGs2aozmhXfvnmR73VcMMk6e2HgVwZf9xPFnpv4",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn",
+    "insider": false
+   },
+   {
+    "address": "3BckBxZZ22zxaXz7jqa4N1k5ci3a7DthSUovB6wdSPtX",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "2Wa23JesGFFfuH3Ch2mAtx34Vz7FcsUWh3fKwHu2Vfz8",
+    "insider": false
+   },
+   {
+    "address": "4CF8hTYSvb1pHMGR4RujQQigzyDZgZuMFvLn6A1RSjwJ",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "9bE14bDmL524nEFW43cJgASYWxBxNoBzsJSwrhHJE95F",
+    "insider": false
+   },
+   {
+    "address": "9iFLS7mSzUaZ7Bt9GXZrzidBw7i4JHHcvQx4tWKzojsf",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "3PjJoMyTCn9BH3yfRYkj4as2vC6fLpciUz5t18cxPAvH",
+    "insider": false
+   },
+   {
+    "address": "ELke8B6yNaomUqy6gzkgSw33Z3bm23TtDtJApcqrUF8m",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "5cvaCTh6An2KWGADsjT4bYoyKTgWLNwATQpMVFJPoQY6",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "ELON MUSK COIN",
+   "symbol": "ELONCOIN",
+   "image": ""
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5",
+    "marketType": "pump_fun",
+    "mintA": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "37XRBYGTB2CD7rCaigSRWyYm7t4FV7SGzuFHmAWPw6BQ",
+    "liquidityB": "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 1000000000000000,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+     "owner": "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5",
+     "amount": 792733677019504,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5",
+     "amount": 10245628,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.05717539814111,
+     "basePrice": 2.663695782441605e-06,
+     "base": 792733677.019504,
+     "quote": 0.010245628,
+     "reserveSupply": 10245628,
+     "currentSupply": 0,
+     "quoteUSD": 0.8407272938601057,
+     "baseUSD": 2111.601352076278,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 10245628,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2112.4420793701383,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 10245628
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2112.4420793701383,
+  "totalStableLiquidity": 0.8407272938601057,
+  "totalLPProviders": 0,
+  "totalHolders": 8,
+  "price": 2.663695782441605e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "37XRBYGTB2CD7rCaigSRWyYm7t4FV7SGzuFHmAWPw6BQ": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "9TqjHxHQNYkVxDR5Q1mGfe9AzyuJ1zc4Z6KNc6MKmBiy": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "DM74V4ZwEkkDMQnbpQFqSaztueann4cxNDX6PiYYzME5": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-08-23T07:43:37.071956869Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

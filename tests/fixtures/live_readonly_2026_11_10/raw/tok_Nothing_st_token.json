@@ -1,0 +1,789 @@
+{
+ "meta": {
+  "name": "tok_Nothing_st_token",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/tokens/6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+  "status": 200,
+  "latency_ms": 154,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:34+0700",
+  "fetched_unix": 1794326554.3072164,
+  "request_body": null
+ },
+ "body": {
+  "token": {
+   "name": "Nothing Coin",
+   "symbol": "Nothing",
+   "mint": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+   "decimals": 6,
+   "uri": "https://meta.uxento.io/data/d9268db0-dfc2-4035-9018-e01923bb7c5d",
+   "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs-forward.solanatracker.io%2Fipfs%2FQme17f8ch6pC8aLDgxzuYKQZGgtVMLtNhPCsYjzpa7CVgr",
+   "description": "Lets do this!",
+   "createdOn": "https://pump.fun",
+   "website": "https://www.govinfo.gov/content/pkg/CREC-2026-05-15/pdf/CREC-2026-05-15.pdf?utm_source=chatgpt.com",
+   "twitter": "https://x.com/early404/status/2119848220394168797",
+   "hasFileMetaData": true,
+   "strictSocials": {
+    "twitter": "https://x.com/early404/status/2119848220394168797",
+    "website": "https://www.govinfo.gov/content/pkg/CREC-2026-05-15/pdf/CREC-2026-05-15.pdf?utm_source=chatgpt.com"
+   },
+   "creation": {
+    "creator": "CAsJeUjgQohPYC4t5UWCELhfSjvMVrKo4itZ7DA74rTQ",
+    "created_tx": "3F2a6TPLJizQszyhCTYbjb3UQhrBofJVtphwAFuqW9prMFL5ryEdQXQ63j9gXN8cN3HHewq1rXLjJqj3ojE7ngsr",
+    "created_time": 1794246176
+   }
+  },
+  "pools": [
+   {
+    "poolId": "7Uj81bsdR8DyzcvAJajs537gqpBWVwkXcjxStxW22qpB",
+    "liquidity": {
+     "quote": 22.680913506,
+     "usd": 3732.357159644979
+    },
+    "price": {
+     "quote": 2.7997524829983975e-08,
+     "usd": 2.3036277225757514e-06
+    },
+    "tokenSupply": 971568972.979904,
+    "lpBurn": 100,
+    "tokenAddress": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+    "marketCap": {
+     "quote": 27.201526445046895,
+     "usd": 2238.1332205509584
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "market": "pumpfun-amm",
+    "pumpfun-amm": {
+     "isMayhemMode": false,
+     "isCashbackCoin": false,
+     "isHolderReward": true,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "virtualQuoteReserves": "17582545581",
+     "effectiveQuoteTokenAmount": "22680913506",
+     "effectiveQuoteTokenUiAmount": "22.680913506"
+    },
+    "deployer": "24xhAZNnWVPxbSY7VktAEYcC6vgW9FmQSvBME62C6yKY",
+    "lastUpdated": 1794326545063,
+    "createdAt": 1794247215544,
+    "txns": {
+     "buys": 8583,
+     "sells": 4216,
+     "total": 12799,
+     "volume": 315954,
+     "volume24h": 315954.9347498834
+    }
+   },
+   {
+    "poolId": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+    "liquidity": {
+     "quote": 0,
+     "usd": 0
+    },
+    "price": {
+     "quote": 0,
+     "usd": 0
+    },
+    "tokenSupply": 1000000000,
+    "lpBurn": 100,
+    "tokenAddress": "6GMjV5PHfeNMaXykCktvbdmXAx54TdKfRxSRaD5Spump",
+    "marketCap": {
+     "quote": 0,
+     "usd": 0
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "market": "pumpfun",
+    "deployer": "CAsJeUjgQohPYC4t5UWCELhfSjvMVrKo4itZ7DA74rTQ",
+    "pumpfun": {
+     "complete": true,
+     "isMayhemMode": false,
+     "isHolderReward": true,
+     "isCashbackCoin": false,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "quoteDepth": 0
+    },
+    "curvePercentage": 100,
+    "curve": "DUVdKm9qYiYsKWxtqEXkStYp3aAHTG5EnwrKEAuUuNPU",
+    "lastUpdated": 1794268259502,
+    "createdAt": 1794246176576,
+    "txns": {
+     "buys": 1232,
+     "sells": 848,
+     "total": 2080,
+     "volume": 92148,
+     "volume24h": 92148.67901239418
+    }
+   }
+  ],
+  "events": {
+   "1m": {
+    "priceChangePercentage": -0.271697048582889
+   },
+   "5m": {
+    "priceChangePercentage": -1.4807305143225131
+   },
+   "15m": {
+    "priceChangePercentage": -1.3899292847765639
+   },
+   "30m": {
+    "priceChangePercentage": -3.1200080064299707
+   },
+   "1h": {
+    "priceChangePercentage": -4.816312075934386
+   },
+   "2h": {
+    "priceChangePercentage": -4.400042898527665
+   },
+   "3h": {
+    "priceChangePercentage": -2.413303929798765
+   },
+   "4h": {
+    "priceChangePercentage": -7.55143571879735
+   },
+   "5h": {
+    "priceChangePercentage": -10.625603719184863
+   },
+   "6h": {
+    "priceChangePercentage": -11.53635385862766
+   },
+   "12h": {
+    "priceChangePercentage": -12.052991903477876
+   },
+   "24h": {
+    "priceChangePercentage": -12.052991903477876
+   }
+  },
+  "risk": {
+   "snipers": {
+    "count": 51,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": [
+     {
+      "wallet": "FAXQEhqya7kEpLg3XmbDSejmXAZt9RvsJqiCJdRY3ve2",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "3qvuM3U5UZPVagL1spxmgVgUvzT3h49gyJZyagxRtqKr",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "3qvjvoe3VaxuU4BNpQAqqdJyt6CA8mZeJZHxCYzLfWfm",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "55mX9tbeNC6UDo6KLknzgBq7kNVpH4SWKxsAcw6c3emR",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "DPwH9aWrYGSBqMiPNLMW4Hti1k1xgq64t781eycfLCp5",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "ARARAw1AL4kKnuwFyU534yoGv5ytexxeVpbcuEvpqi89",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "BPUhUcAtPp4bA2dAEJTJrzhbficSAch6Zc6tHWdXkrTc",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "9FQnf1QFTg8TZ6AJEffsfa7CNQJGALecmPtkYoTYUPFj",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "3QsTEfUx5p5duEdcmirKrk5gF7TGvQ16jG1MQYR6dneg",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "haqq6qnVBCZt97amh9VUFZRFCkD6NJxoYifacCuqqqq",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "DaZ8AZxaE7oswJxkL96rduLmyEBwJZ6HN1Dcu4vyPsHX",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "8uJ9f48dsQGrr8Kokh6bZdr9mHXUiPbxqPYbf4pHpsPx",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "AAAAAiUxPMfuCUqDJQfWFEwvpX3C7DjqgYttNQNgMK5X",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246177000
+     },
+     {
+      "wallet": "C7y4i7Pcir9xmotVyUb3S9Mz1cnjmpxGKyGDj7vWnoza",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246178000
+     },
+     {
+      "wallet": "FoaRtDvnBaTSimW4ft6a8EkbG1K9JkgFVU3HzMSCCUBV",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246178000
+     },
+     {
+      "wallet": "sagiiWi9RADqXxHtEwTjFxQNA7CeFyDtgu9iWj3zAPH",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "HQoHgRdpvWLHGMY7bX24s5cziX7D3Dezu99uR3PcqKaX",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "D1P9dPB1VLnPBMXe52hpJXgScaKjexZ3jx3KctwqHfAS",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "E2x1ewwXUwxABtFcssgxQLY6PrcRQuhLJRWPCR3WyeJb",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "5UipEgoiVht6jydSVbtBhDHgCWbtZMYPiif8LvwJZnvH",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "kurtzsJgumEfUpyNTdKNHUknsR5WbNzPCvFzzB2jb6i",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "8PczPWnMGusMKsBAETVc5vG1uVa91vn5SSq7iv7U13aW",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "A75rmp59VumYWPp3MPdBtVpiBFomkFZqjZyjUppNWgaz",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "9dVSVwrUJfnFqRZ8ChaGExowQbxWBSRgQbtgEQecCkis",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "3vKC1m1CgNL3AU27NTYZ93zfpPeFV9JSAV9k9oMuD4HW",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "GBiW5YDgZGjErY7tXWqrnHmTa1TN6KRVaDfqb8YDxLdU",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "DKsKrFHW39c7KotTPzBWZ7t2CrvPNWG2JoVW8XvAoBbQ",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "2NUMEzNh4mFjZpzMwBqyyzoQLimbPZvpo3ksrJLM2rk3",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "13bEQbWhZsrTmiY9Gg6jbasoyXNq1LxCoysraVcrKK6",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "EY63TQdAY6LqPGUe21q93BH7o9rQxwhALfPCxJEWF9n4",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "3ce1BLrXwNLkVnvZHZTJo9NfnFQxHdBNWgJuTgfGZEh3",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "EjywYBfNFjMC4RMZMLvYhZ6PvjnQNYaJPB6oTA6LUPEm",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "4Yy3xBZnJfhkmFAcV6hgdjWgkkc9oCoWEtcUiXNq5AeY",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "8PgC4ngpx6zUG3KFQAQHqSeePDFA7kGyEaA2yMoZ4HUk",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "HYFhXZ3Gugdcag7PEbzgcx3vAs84wRpVP3B1Et2Gffna",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246179000
+     },
+     {
+      "wallet": "6DskyYLmmA9j1Ht5gAKFBtf2dn8uPZgbVJ2zcmyTZfgp",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246180000
+     },
+     {
+      "wallet": "q2iQvvxJ58Z27Kr3iuzQWqJS8HVZRdgzEVER5SyxUT5",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246180000
+     },
+     {
+      "wallet": "q2jJy82z7ogMeeq1ZNv2VDiCG7awi8U3tmppfaWG5T3",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246180000
+     },
+     {
+      "wallet": "nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246181000
+     },
+     {
+      "wallet": "3dtCb9Gfb2BtzXAzCNAu4TQBHQwtgRwZea4sr4APLbPW",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246181000
+     },
+     {
+      "wallet": "CkvVCWbx6VHfifU5QwTGk9JBqoE7QhGYKk8yTHkWr1KV",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246181000
+     },
+     {
+      "wallet": "Bpv3GFKY93Q5c5b2q6X2zCKayRYi3aKpqZteWonxnixD",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246181000
+     },
+     {
+      "wallet": "5sX9Takaia6ph1GAnsh5bdRjtNtKeuga7KriQce3kTom",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "2QWzbCnrra6pvyRhKdHL4UxGYu87jmdpoiAkS6hQcbmH",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "7vYTofeWUzF2Cxent3RFp5tQedWkiCARz2o67wUxsqi9",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "TuRkPe8DxkegArs8sCh7fN6wdDz1n5R2d6zCtKMSrEq",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "H3o6asZc9b59Kv3ykBegDLRD6TALogo9QKUr4zX4mwFZ",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "B4nN6YyF1E9kyqKYn81nAnNhvdwdfs57dCahLDevn2WH",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "BXwUzgDRPXABnWfEpMsS6BAe1tMZ6bah6kwhN6JNtdos",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "4EZyPzhEPpz7N2Vv9wftqyTn2eXsWgwDov3kbQ8Hf3VQ",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     },
+     {
+      "wallet": "6Wgw9m8b2Eg1WyWUBFkYcSyfHU7KHeLZKzqddewjbzxM",
+      "balance": 0,
+      "percentage": 0,
+      "buyTime": 1794246182000
+     }
+    ]
+   },
+   "insiders": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "bundlers": {
+    "count": 63,
+    "totalBalance": 0.37647,
+    "totalPercentage": 0,
+    "totalInitialBalance": 28550159.296202,
+    "totalInitialPercentage": 2.8552,
+    "wallets": [
+     {
+      "wallet": "3qvjvoe3VaxuU4BNpQAqqdJyt6CA8mZeJZHxCYzLfWfm",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246177927
+     },
+     {
+      "wallet": "dKMjeGJ4Mk9S3hxdfTThvZ7exks2xMwWqSM5NvN2CTK",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246179061
+     },
+     {
+      "wallet": "EjywYBfNFjMC4RMZMLvYhZ6PvjnQNYaJPB6oTA6LUPEm",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246179639
+     },
+     {
+      "wallet": "DKsKrFHW39c7KotTPzBWZ7t2CrvPNWG2JoVW8XvAoBbQ",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246180992
+     },
+     {
+      "wallet": "8PgC4ngpx6zUG3KFQAQHqSeePDFA7kGyEaA2yMoZ4HUk",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246183717
+     },
+     {
+      "wallet": "AgngDHiRMSC7MUTxhU2z3PYAnnozco2iA13d1KPbd8NN",
+      "initialBalance": 489309.764359,
+      "initialPercentage": 0.0489,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246387293
+     },
+     {
+      "wallet": "3vKC1m1CgNL3AU27NTYZ93zfpPeFV9JSAV9k9oMuD4HW",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246502485
+     },
+     {
+      "wallet": "2LPAvBZcxcMGoFDMvJUUFrPFcirPnN7A1eTrw5U52Lrj",
+      "initialBalance": 1386032.764475,
+      "initialPercentage": 0.1386,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246513255
+     },
+     {
+      "wallet": "9irWkeig1GMsPWRooqtSkLkyZhgsvHyFJQG8EuuadAb8",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246535167
+     },
+     {
+      "wallet": "2ke4vRh79c6JavJwFiYbzQsVhJsLAXuaYeVcyUfpft5V",
+      "initialBalance": 1124044.660763,
+      "initialPercentage": 0.1124,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246554822
+     },
+     {
+      "wallet": "3qvuM3U5UZPVagL1spxmgVgUvzT3h49gyJZyagxRtqKr",
+      "initialBalance": 561568.734834,
+      "initialPercentage": 0.0562,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794246663533
+     },
+     {
+      "wallet": "9ggg7igF3qLU968Q7NLDyhZ4agGf4NrQArGTAECaVRcT",
+      "initialBalance": 329226.75029999996,
+      "initialPercentage": 0.0329,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247105808
+     },
+     {
+      "wallet": "FNWsSqY23BPDBXo5Xtf64DgPfzXXMEEZvCeEM1eqvwYt",
+      "initialBalance": 71667.241694,
+      "initialPercentage": 0.0072,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247139096
+     },
+     {
+      "wallet": "6cZUHLVu9pcer5BtFwLEcZwNqu6o8kqMJZuSvwVH5Cxg",
+      "initialBalance": 363709.278881,
+      "initialPercentage": 0.0364,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247169854
+     },
+     {
+      "wallet": "EPGA3X19aZ6HQ4HXf7PvuEAzoH1Mf7dTBRHgD757RjCj",
+      "initialBalance": 991699.500851,
+      "initialPercentage": 0.0992,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247190383
+     },
+     {
+      "wallet": "AzqKTg2xpLxmqqRaEFrqNTfr4RM97Z8zmdJN5DdE2uBb",
+      "initialBalance": 1024934.403868,
+      "initialPercentage": 0.1025,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247216073
+     },
+     {
+      "wallet": "hP1UGEHMCEhvNHyAd7BbeFW9yQwtH6oimEaxKr92AKR",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247216493
+     },
+     {
+      "wallet": "haqq6qnVBCZt97amh9VUFZRFCkD6NJxoYifacCuqqqq",
+      "initialBalance": 1303533.57913,
+      "initialPercentage": 0.1304,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247217008
+     },
+     {
+      "wallet": "bummy2yjrb69HLXZB1cbqLLvvd7YE9qk314kufx3UzK",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247221248
+     },
+     {
+      "wallet": "DefYnFe5WfyzNTNmrJyz4qUrPV73bvBrEBvxTb7rLAe1",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247221276
+     },
+     {
+      "wallet": "q2jJy82z7ogMeeq1ZNv2VDiCG7awi8U3tmppfaWG5T3",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247221251
+     },
+     {
+      "wallet": "q2825YHCXy68nHaKRyb8s7HNqoaJBnBdijt2KrotgT7",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247221433
+     },
+     {
+      "wallet": "8zMuLt43vkGgjkBvAxCo4zX1Ze87Y6ARsAagK75Fwnf7",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247231851
+     },
+     {
+      "wallet": "6ou4YPcDJioR6J8jH6WpSgnDzUNUe9AkTX2wWZoxEXgn",
+      "initialBalance": 432868.4280179999,
+      "initialPercentage": 0.0433,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247233185
+     },
+     {
+      "wallet": "4LBYPDoHs5qsKMVkeWhyXWRCmAwFmZyvEXHGzCNDjNJA",
+      "initialBalance": 607899.403206,
+      "initialPercentage": 0.0608,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247234108
+     },
+     {
+      "wallet": "2gq2d5f8XVmKwX2pRia6p3jg8tjQjxbfmW2H1JVcZCfy",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247236438
+     },
+     {
+      "wallet": "F74UhSbXUW9Ae7RqefhdbPYYdLhmomCN6JrCD99Q5kKj",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247240199
+     },
+     {
+      "wallet": "HkUarWAnv3w2FMUNdQhn6FCMm45mwk9bd5pMYEXCQZqj",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247240147
+     },
+     {
+      "wallet": "H3rUiKEFPnTM6CHCmJqKt4Nd1xeFATK9aUmU4sbD5za7",
+      "initialBalance": 0,
+      "initialPercentage": 0,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247240280
+     },
+     {
+      "wallet": "8bR8AjeJWcJ9QM2VXcb6FgfKCsAz5xuvGzTmEzrgnLvv",
+      "initialBalance": 9118.394724000002,
+      "initialPercentage": 0.0009,
+      "balance": 0,
+      "percentage": 0,
+      "bundleTime": 1794247240313
+     }
+    ]
+   },
+   "top10": 11.1126,
+   "dev": {
+    "percentage": 0,
+    "amount": 0
+   },
+   "fees": {
+    "jito": 0.914596648,
+    "network": 1.500415923,
+    "nozomi": 0.168650262,
+    "helius-sender": 3.76538086,
+    "axiom": 7.873853821,
+    "gmgn": 1.4399534354761003,
+    "astralane": 0.153601057,
+    "nextblock": 0.002180333,
+    "0slot": 0.0324485,
+    "padre": 3.9836514325108796,
+    "pumpfun-app": 4.467363630460282,
+    "fomo": 2.2761669153822854,
+    "trojan": 0.117669913,
+    "maestro": 0.034677576,
+    "node1": 0.036,
+    "bloom": 0.106715787,
+    "blockrazor": 0.001,
+    "bonkbot": 0.00731458,
+    "photon": 0.029664424,
+    "bloxroute": 0.0001,
+    "totalTrading": 20.337031514829544,
+    "totalTips": 6.574373583000001,
+    "total": 26.911405097829547
+   },
+   "rugged": false,
+   "risks": [
+    {
+     "name": "Top 10 Holders",
+     "description": "Top 10 holders own more than 11.11% of the total supply.",
+     "value": "11.11%",
+     "level": "danger",
+     "score": 5000
+    },
+    {
+     "name": "Bundlers Detected",
+     "description": "63 bundled wallets detected.",
+     "value": "63",
+     "level": "warning",
+     "score": 2000
+    }
+   ],
+   "score": 5
+  },
+  "buys": 8583,
+  "sells": 4216,
+  "txns": 12799,
+  "holders": 176
+ }
+}

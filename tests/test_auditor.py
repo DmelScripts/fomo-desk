@@ -47,6 +47,11 @@ def _bundle():
 
 
 class TestAuditor(unittest.TestCase):
+    def setUp(self):
+        _tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+
     def test_sample_is_green_on_all_eight_layers(self):
         bundle = _bundle()
         result = judge(bundle, now=bundle.pop("now"))

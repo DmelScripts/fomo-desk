@@ -1,0 +1,224 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump/report",
+  "status": 200,
+  "latency_ms": 3737,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:05:06+0700",
+  "fetched_unix": 1794326703.0948727,
+  "request_body": null
+ },
+ "body": {
+  "mint": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 999937713233380,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "Artificial Pok\u00e9mon Intelligence",
+   "symbol": "API",
+   "uri": "https://ipfs.io/ipfs/bafkreihrnarhxbbz3cqg6ankx3zjgsaiyukztg3sstggl4x6ls67ix6h4u",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "7P2oefP9W9dYiJho9C2qLXFDCfiGBkFobNzR8rCrQWG",
+    "amount": 999937713233380,
+    "decimals": 6,
+    "pct": 100,
+    "uiAmount": 999937713.23338,
+    "uiAmountString": "999937713.23338",
+    "owner": "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo",
+    "insider": false
+   },
+   {
+    "address": "2FQz11p79infZd9y7E2hrdC7atQj5724RdhGM1XRDGYs",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "C4eJKTuj4bVXudqmUbdFLs94BgiKJA4RqvrLTwdWuMs5",
+    "insider": false
+   },
+   {
+    "address": "B7ibug7RaD5f4QzPRTTj9Vw6amsoSJhngJWA5BYuZLG4",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "9h2v58V44XtGVLqw9uyyZnc7cMiTGGungqAU8QkgDfky",
+    "insider": false
+   },
+   {
+    "address": "CTVHbeXGnjY1JkENqAYe2n3Nv4EeetVNVoKZRmT2xuNf",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn",
+    "insider": false
+   },
+   {
+    "address": "Ce1Q2tf7P4AbyzbJcuSBiwiHfKv7V1JdvuEhXBAJJUTe",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "D3MuDmrs2dm6U9CiZur651CnPjLwUWjs9p1a3PoDs76H",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "Artificial Pok\u00e9mon Intelligence",
+   "symbol": "API",
+   "image": ""
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo",
+    "marketType": "pump_fun",
+    "mintA": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "7P2oefP9W9dYiJho9C2qLXFDCfiGBkFobNzR8rCrQWG",
+    "liquidityB": "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 999937713233380,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+     "owner": "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo",
+     "amount": 793037713233380,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo",
+     "amount": 1741663,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.09273599308041,
+     "basePrice": 2.981304058057486e-06,
+     "base": 793037713.23338,
+     "quote": 0.001741663,
+     "reserveSupply": 1741663,
+     "currentSupply": 0,
+     "quoteUSD": 0.1429778808479164,
+     "baseUSD": 2364.2865526553046,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 1741663,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2364.4295305361525,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 1741663
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2364.4295305361525,
+  "totalStableLiquidity": 0.1429778808479164,
+  "totalLPProviders": 0,
+  "totalHolders": 5,
+  "price": 2.981304058057486e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "4Sz5LDMSV2zhuUuu6YtFnxLbJvWQcUL1wUqVbR8WkDzo": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "7P2oefP9W9dYiJho9C2qLXFDCfiGBkFobNzR8rCrQWG": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "EZGC2nMKhp91DYk784HBGrX7nRrZ31wbcs8a4qPZWGrW": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-10-20T08:25:49.883060025Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

@@ -87,6 +87,8 @@ async def lifespan(_app: FastAPI):
     ensure_data_dir()
     init_db()
     install_secret_redaction()
+    import desk_providers
+    desk_providers.install()
     agent_task = None
     price_stop = asyncio.Event()
     price_task = None
@@ -98,12 +100,20 @@ async def lifespan(_app: FastAPI):
     # DESK_PRICE_LOOP=0 is for a local screenshot process only. Render does not set it.
     if os.environ.get("DESK_PRICE_LOOP") != "0":
         price_task = asyncio.create_task(price_loop(price_stop, fetch=_fetch_prices))
+    import desk_loop
+    gate = desk_loop.scheduler_status()
+    desk_stop = asyncio.Event()
+    desk_task = None
+    if gate["armed"]:
+        desk_task = asyncio.create_task(_memecoin_screen(desk_stop))
     if agents_enabled():
         from main import run_desk
         agent_task = asyncio.create_task(run_desk())
     try:
         yield
     finally:
+        import desk_providers
+        desk_providers.shutdown()
         price_stop.set()
         if price_task is not None:
             price_task.cancel()
@@ -117,6 +127,26 @@ async def lifespan(_app: FastAPI):
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await agent_task
+        desk_stop.set()
+        if desk_task is not None:
+            desk_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await desk_task
+
+
+async def _memecoin_screen(stop: asyncio.Event) -> None:
+    """One discovery pass at a time. Lifespan starts this only when the gate is armed."""
+    import time
+    import desk_loop
+    while not stop.is_set():
+        try:
+            desk_loop.run_discovery(desk_loop.public_reader, time.time())
+        except Exception:
+            desk_loop._runtime["faults"] += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+        except TimeoutError:
+            continue
 
 
 app = FastAPI(title="desk", lifespan=lifespan)

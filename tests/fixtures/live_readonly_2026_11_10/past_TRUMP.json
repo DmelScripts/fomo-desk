@@ -1,0 +1,168 @@
+[
+ {
+  "mint": "Gph8VWCpbsGL3khi4YpAsa6K9KyppGpW5UNg9nZ7pump",
+  "status": 200,
+  "lat": 3282,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "Ga8RotR6NrgaSFuG2LN3EvXsUfTNDxsQEhWXikTcpump",
+  "status": 200,
+  "lat": 1984,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "GYeANUF4dsw7VgiKYJceTuS2FMbwGKtw9PjMM8rdpump",
+  "status": 200,
+  "lat": 2252,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+  "status": 200,
+  "lat": 3328,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "GMnMLBmet424A6FtVoLfhc8HN7Ziv8F2VPdRqxABpump",
+  "status": 200,
+  "lat": 2974,
+  "rugged": false,
+  "score": 32,
+  "risks": [
+   "Low Liquidity"
+  ]
+ },
+ {
+  "mint": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+  "status": 200,
+  "lat": 2380,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "FeHmiycVvdwfrXVukUBJLsistPXnA1susHLST3GFpump",
+  "status": 200,
+  "lat": 3568,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "EyBRjWGazXu4MBt77DDYNfFRrcqvEXnR2SmraY8Kpump",
+  "status": 200,
+  "lat": 4279,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "DeqLGcuehWSBLAJ6edTiy26wgX9nfGShsmkttTropump",
+  "status": 200,
+  "lat": 2074,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "DGTbXxyWEoDaZH8iz4HyJ9QtE5VTPnQYVsqUTWixpump",
+  "status": 200,
+  "lat": 4833,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "Cq1ZiEddxiqZ2AYkannkMLsZLtDcu9D3V3HXYFeypump",
+  "status": 200,
+  "lat": 2402,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "ChgwT7je6pAKCXSdgirREvh2AAfN3LccJsUgiHZvpump",
+  "status": 200,
+  "lat": 2430,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "CawbW5waWPgpNRjSJsM314twKJY2ZJraoQ9p5Uo2pump",
+  "status": 200,
+  "lat": 3861,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "CJZaHX5RQbvKrRyMoUU9D3jyvXj8Yy7QLLmcKvoopump",
+  "status": 200,
+  "lat": 3681,
+  "rugged": false,
+  "score": 26,
+  "risks": [
+   "Low Liquidity"
+  ]
+ },
+ {
+  "mint": "BvhkudS6hT67rnCHCEneWto36KExuSbdTaZViLqvpump",
+  "status": 200,
+  "lat": 3083,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "AxvpvdVGamMbNqiCVtof9tLcK5rhHGqjKjVJazr5pump",
+  "status": 200,
+  "lat": 3737,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+  "status": 200,
+  "lat": 3437,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "ASX1Ts4P9DLFn691tUVtJPhMFs1iijdvvfgmEmQHpump",
+  "status": 200,
+  "lat": 3308,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "ARbcPWqtmyzEGow7KQC2Z2SxjuqPRHHBHnEkrN1tpump",
+  "status": 200,
+  "lat": 1593,
+  "rugged": false,
+  "score": 1,
+  "risks": []
+ },
+ {
+  "mint": "A4fTXrpVpk4Asd4NTuHZwfy4N6GyPiUVoSVahLBgpump",
+  "status": 200,
+  "lat": 3329,
+  "rugged": false,
+  "score": 32,
+  "risks": [
+   "Low Liquidity"
+  ]
+ }
+]

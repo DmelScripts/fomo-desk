@@ -22,6 +22,11 @@ TICK_ARRAY_SIZE = 88
 MAX_TICK_INDEX = 443636
 MIN_TICK_INDEX = -443636
 _DISC = hashlib.sha256(b"account:Whirlpool").digest()[:8]
+_ORACLE_DISC = hashlib.sha256(b"account:Oracle").digest()[:8]
+# programs/whirlpool/src/state/oracle.rs Oracle::LEN at the published layout.
+# 8 discriminator + whirlpool pubkey + trade_enable_timestamp + adaptive-fee constants
+# and variables + 128 reserved bytes. This account is not a Pyth price.
+ORACLE_LEN = 8 + 32 + 8 + 34 + 44 + 128
 _TICK_DISC = hashlib.sha256(b"account:TickArray").digest()[:8]
 _TICK_LEN = 113
 _MINT_A = 8 + 93
@@ -126,6 +131,59 @@ def pool_fields(data: bytes) -> tuple[str, str, str, str] | None:
     )
 
 
+def oracle_account(pool: str) -> bytes:
+    """Published Oracle account bound to this pool. It does not contain a SOL/USD price."""
+    raw = bytearray(ORACLE_LEN)
+    raw[:8] = _ORACLE_DISC
+    raw[8:40] = solana_tx.b58decode(pool)
+    return bytes(raw)
+
+
+def oracle_matches(pool: str, data: bytes) -> bool:
+    """Discriminator, length, and the whirlpool field. No price is read."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) != ORACLE_LEN or bytes(data[:8]) != _ORACLE_DISC:
+        return False
+    return solana_tx.b58encode(data[8:40]) == pool
+
+
+def pool_pda_matches(pool: str, data: bytes) -> bool:
+    """seeds() in state/whirlpool.rs: whirlpool, config, mint A, mint B, fee-tier seed, bump.
+
+    The token-vault authority is this same pool account. It is not the config
+    and it is not a second PDA.
+    """
+    if pool_fields(data) is None or len(data) < 45:
+        return False
+    config = data[8:40]
+    bump = data[40]
+    seed = data[_TICK_SPACING + 2:_TICK_SPACING + 4]
+    mint_a = data[_MINT_A:_MINT_A + 32]
+    mint_b = data[_MINT_B:_MINT_B + 32]
+    try:
+        derived, found = solana_tx.find_program_address(
+            [b"whirlpool", config, mint_a, mint_b, seed],
+            solana_tx.b58decode(PROGRAM_ID),
+        )
+    except ValueError:
+        return False
+    return found == bump and solana_tx.b58encode(derived) == pool
+
+
+def vault_authority_is_pool(data: bytes, mint: str, pool: str) -> bool:
+    """SPL token account authority written by initialize_vault and signed in transfer_from_vault_to_owner.
+
+    That signer is the whirlpool account. State 1 is Initialized. Frozen and
+    uninitialized accounts are not vaults. The config pubkey is not this field.
+    """
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 165:
+        return False
+    if solana_tx.b58encode(data[0:32]) != mint:
+        return False
+    if solana_tx.b58encode(data[32:64]) != pool:
+        return False
+    return data[108] == 1
+
+
 def oracle_address(pool: str) -> str:
     derived, _bump = solana_tx.find_program_address(
         [b"oracle", solana_tx.b58decode(pool)],
@@ -153,10 +211,12 @@ def start_tick_index(tick: int, spacing: int) -> int:
 
 
 def check_swap_accounts(keys: list[str], remaining: list[int], user_authority: str, user_source: str, user_dest: str, source_mint: str, dest_mint: str, a_to_b: bool, accounts: dict[str, tuple[str, bytes]], created: set[str] | None = None) -> None:
-    """Check one Orca swap account list. route_v2's signer is the user."""
-    # Orca's swap struct is 11 accounts. A live Jupiter route_v2 had 12 remaining
-    # accounts. No published Jupiter layout says the extra one is a program-id
-    # prefix, so a longer tail is rejected rather than stripped.
+    """Check one Orca swap account list. route_v2's signer is the user.
+
+    This is the 11-account swap. Jupiter's route_v2 hop puts the Whirlpool
+    program id in front of these 11. That prefix is checked by the route
+    decoder before this function sees the list.
+    """
     if len(remaining) != 11:
         raise WhirlpoolError("whirlpool swap account count is not the published swap layout", "whirlpool_accounts_unbound")
     if keys[remaining[0]] != solana_tx.TOKEN_PROGRAM:

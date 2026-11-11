@@ -1,0 +1,32 @@
+[
+ {
+  "i": 0,
+  "status": 401,
+  "lat": 162,
+  "body": "unauthorized"
+ },
+ {
+  "i": 1,
+  "status": 401,
+  "lat": 164,
+  "body": "unauthorized"
+ },
+ {
+  "i": 2,
+  "status": 401,
+  "lat": 163,
+  "body": "unauthorized"
+ },
+ {
+  "i": 3,
+  "status": 401,
+  "lat": 160,
+  "body": "unauthorized"
+ },
+ {
+  "i": 4,
+  "status": 401,
+  "lat": 165,
+  "body": "unauthorized"
+ }
+]

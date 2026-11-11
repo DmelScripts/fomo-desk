@@ -1,0 +1,278 @@
+{
+ "meta": {
+  "name": "tok_MYWAY_st_deployer",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/deployer/GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+  "status": 200,
+  "latency_ms": 275,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:30+0700",
+  "fetched_unix": 1794326549.9080331,
+  "request_body": null
+ },
+ "body": {
+  "status": "success",
+  "total": 3,
+  "pages": 1,
+  "page": 1,
+  "data": [
+   {
+    "id": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump_4PWfgFPzSexok1aL2d7M9BbPh8B1RuCNPqNvHB54RVaJ",
+    "name": "I said this way",
+    "symbol": "MYWAY",
+    "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs.io%2Fipfs%2FQmNMb9N4WgFfLk5uEJfof4z9eTrrC1y6egfcTGQ4fYusGA",
+    "decimals": 6,
+    "hasSocials": true,
+    "hasCoinCommunity": false,
+    "communityMessages": 0,
+    "poolAddress": "4PWfgFPzSexok1aL2d7M9BbPh8B1RuCNPqNvHB54RVaJ",
+    "liquidityUsd": 0,
+    "marketCapUsd": 0,
+    "priceUsd": 0,
+    "lpBurn": 0,
+    "market": "meteora-dyn-v2",
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "freezeAuthority": null,
+    "mintAuthority": null,
+    "deployer": "5yeWDDsdSzqepSawsDKfxMqPfPLJwU9xrHBqbRAfc86d",
+    "status": "default",
+    "createdAt": 1794150195932,
+    "lastUpdated": 1794313099187,
+    "holders": 6444,
+    "buys": 1,
+    "sells": 0,
+    "totalTransactions": 1,
+    "volume": 0.120534,
+    "volume_5m": 0,
+    "volume_15m": 0,
+    "volume_30m": 0,
+    "volume_1h": 0,
+    "volume_6h": 0.120534,
+    "volume_12h": 0.120534,
+    "volume_24h": 0.120534,
+    "top10": 2.6703,
+    "dev": 0,
+    "insiders": 0,
+    "snipers": 0,
+    "bundlers": {
+     "count": 0,
+     "balance": 0,
+     "percentage": 0
+    },
+    "riskScore": 10,
+    "socials": {
+     "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540"
+    },
+    "fees": {
+     "total": 0.724622,
+     "totalTrading": 0.598902,
+     "totalTips": 0.12572
+    },
+    "tokenDetails": {
+     "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+     "tx": "31iM1sUVnjwrqZJzD8ynAENH97QFn7o76nD2VoQ8LSJyyfRTPbZYP2V8jjd2rjZhfzXSR2t8RZUa1jryxbHZHpNp",
+     "time": 1794149036
+    },
+    "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J"
+   },
+   {
+    "id": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump_CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+    "name": "I said this way",
+    "symbol": "MYWAY",
+    "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs.io%2Fipfs%2FQmNMb9N4WgFfLk5uEJfof4z9eTrrC1y6egfcTGQ4fYusGA",
+    "decimals": 6,
+    "hasSocials": true,
+    "hasCoinCommunity": false,
+    "communityMessages": 0,
+    "poolAddress": "CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+    "liquidityUsd": 64760.1958547693,
+    "marketCapUsd": 627401.6184721276,
+    "priceUsd": 0.000635652753373499,
+    "lpBurn": 100,
+    "market": "pumpfun-amm",
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "freezeAuthority": null,
+    "mintAuthority": null,
+    "deployer": "7dfC8WCGpeSjd78ZuRddnQhNpbRYmEubjGHBeBbjCoH9",
+    "status": "graduated",
+    "createdAt": 1794149036742,
+    "lastUpdated": 1794326541159,
+    "holders": 6444,
+    "launchpad": {
+     "curvePercentage": 0
+    },
+    "buys": 16217,
+    "sells": 13688,
+    "totalTransactions": 29905,
+    "volume": 2091260.3213564586,
+    "volume_5m": 957.9386911726278,
+    "volume_15m": 1632.6209626509194,
+    "volume_30m": 1939.646217153116,
+    "volume_1h": 7237.075041495301,
+    "volume_6h": 448894.657494808,
+    "volume_12h": 578325.6990265413,
+    "volume_24h": 821290.992722673,
+    "top10": 2.6703,
+    "dev": 0,
+    "insiders": 0,
+    "snipers": 0,
+    "bundlers": {
+     "count": 0,
+     "balance": 0,
+     "percentage": 0
+    },
+    "riskScore": 0,
+    "socials": {
+     "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540"
+    },
+    "fees": {
+     "total": 0.724622,
+     "totalTrading": 0.598902,
+     "totalTips": 0.12572
+    },
+    "tokenDetails": {
+     "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+     "tx": "31iM1sUVnjwrqZJzD8ynAENH97QFn7o76nD2VoQ8LSJyyfRTPbZYP2V8jjd2rjZhfzXSR2t8RZUa1jryxbHZHpNp",
+     "time": 1794149036
+    },
+    "graduatedAt": 1794149036700,
+    "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J"
+   },
+   {
+    "id": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump_tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "name": "I said this way",
+    "symbol": "MYWAY",
+    "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs.io%2Fipfs%2FQmNMb9N4WgFfLk5uEJfof4z9eTrrC1y6egfcTGQ4fYusGA",
+    "decimals": 6,
+    "hasSocials": true,
+    "hasCoinCommunity": false,
+    "communityMessages": 0,
+    "poolAddress": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "liquidityUsd": 0,
+    "marketCapUsd": 0,
+    "priceUsd": 0,
+    "lpBurn": 100,
+    "market": "pumpfun",
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "freezeAuthority": null,
+    "mintAuthority": null,
+    "deployer": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "status": "graduating",
+    "createdAt": 1794149036685,
+    "lastUpdated": 1794313942711,
+    "holders": 6444,
+    "launchpad": {
+     "curvePercentage": 100
+    },
+    "buys": 13,
+    "sells": 0,
+    "totalTransactions": 13,
+    "volume": 4915.488348948671,
+    "volume_5m": 0,
+    "volume_15m": 0,
+    "volume_30m": 0,
+    "volume_1h": 0,
+    "volume_6h": 0,
+    "volume_12h": 0,
+    "volume_24h": 0,
+    "top10": 2.6703,
+    "dev": 0,
+    "insiders": 0,
+    "snipers": 0,
+    "bundlers": {
+     "count": 0,
+     "balance": 0,
+     "percentage": 0
+    },
+    "riskScore": 10,
+    "socials": {
+     "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540"
+    },
+    "fees": {
+     "total": 0.724622,
+     "totalTrading": 0.598902,
+     "totalTips": 0.12572
+    },
+    "tokenDetails": {
+     "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+     "tx": "31iM1sUVnjwrqZJzD8ynAENH97QFn7o76nD2VoQ8LSJyyfRTPbZYP2V8jjd2rjZhfzXSR2t8RZUa1jryxbHZHpNp",
+     "time": 1794149036
+    },
+    "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J"
+   }
+  ],
+  "graduated": {
+   "total": 1,
+   "totalUniqueTokens": 1,
+   "data": [
+    {
+     "id": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump_CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+     "name": "I said this way",
+     "symbol": "MYWAY",
+     "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+     "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs.io%2Fipfs%2FQmNMb9N4WgFfLk5uEJfof4z9eTrrC1y6egfcTGQ4fYusGA",
+     "decimals": 6,
+     "hasSocials": true,
+     "hasCoinCommunity": false,
+     "communityMessages": 0,
+     "poolAddress": "CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+     "liquidityUsd": 64760.1958547693,
+     "marketCapUsd": 627401.6184721276,
+     "priceUsd": 0.000635652753373499,
+     "lpBurn": 100,
+     "market": "pumpfun-amm",
+     "quoteToken": "So11111111111111111111111111111111111111112",
+     "freezeAuthority": null,
+     "mintAuthority": null,
+     "deployer": "7dfC8WCGpeSjd78ZuRddnQhNpbRYmEubjGHBeBbjCoH9",
+     "status": "graduated",
+     "createdAt": 1794149036742,
+     "lastUpdated": 1794326541159,
+     "holders": 6444,
+     "launchpad": {
+      "curvePercentage": 0
+     },
+     "buys": 16217,
+     "sells": 13688,
+     "totalTransactions": 29905,
+     "volume": 2091260.3213564586,
+     "volume_5m": 957.9386911726278,
+     "volume_15m": 1632.6209626509194,
+     "volume_30m": 1939.646217153116,
+     "volume_1h": 7237.075041495301,
+     "volume_6h": 448894.657494808,
+     "volume_12h": 578325.6990265413,
+     "volume_24h": 821290.992722673,
+     "top10": 2.6703,
+     "dev": 0,
+     "insiders": 0,
+     "snipers": 0,
+     "bundlers": {
+      "count": 0,
+      "balance": 0,
+      "percentage": 0
+     },
+     "riskScore": 0,
+     "socials": {
+      "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540"
+     },
+     "fees": {
+      "total": 0.724622,
+      "totalTrading": 0.598902,
+      "totalTips": 0.12572
+     },
+     "tokenDetails": {
+      "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+      "tx": "31iM1sUVnjwrqZJzD8ynAENH97QFn7o76nD2VoQ8LSJyyfRTPbZYP2V8jjd2rjZhfzXSR2t8RZUa1jryxbHZHpNp",
+      "time": 1794149036
+     },
+     "graduatedAt": 1794149036700,
+     "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J"
+    }
+   ]
+  }
+ }
+}

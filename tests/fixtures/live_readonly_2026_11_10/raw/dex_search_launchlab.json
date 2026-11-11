@@ -1,0 +1,69 @@
+{
+ "meta": {
+  "name": "dex_search_launchlab",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/search?q=launchlab",
+  "status": 200,
+  "latency_ms": 107,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:00:52+0700",
+  "fetched_unix": 1794326451.9411771,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/an9pfce6m8qzxontqqbzycfv28jmn54pdvepmtnwbq4k",
+    "pairAddress": "An9PFCe6M8QZxonTqqBzYcFv28JMN54PdvEpmtnWBQ4K",
+    "baseToken": {
+     "address": "6596PvLrJfN6bPUKU85KdSDuU4nAL2QoSarDZF5Yzo9j",
+     "name": "Official Launchlab Token (real)",
+     "symbol": "gaydium"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000004224",
+    "priceUsd": "0.000003634",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 3.13,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "liquidity": {
+     "usd": 6289.83,
+     "base": 864565549,
+     "quote": 36.5793
+    },
+    "fdv": 3635,
+    "marketCap": 3635,
+    "pairCreatedAt": 1744813185000
+   }
+  ]
+ }
+}

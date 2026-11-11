@@ -26,6 +26,12 @@ SECRET_KEYS = (
     "APP_TOKEN",
     "TG_TOKEN",
 )
+# Names the log filter reads. The provider keys are not written to the secrets file.
+REDACT_ENV_KEYS = SECRET_KEYS + (
+    "PYTH_API_KEY",
+    "HELIUS_API_KEY",
+    "SOLANA_TRACKER_API_KEY",
+)
 
 # STEP 10 names and defaults, plus agents_enabled (kept at '0' so a deploy
 # does not start the agents). fomo_handle is filled from settings.seed.json.
@@ -323,27 +329,31 @@ def _file_secrets() -> dict[str, str]:
 def install_secret_redaction() -> None:
     """Drop a logging filter that redacts secret env values if they ever appear."""
     import logging
+    import re
+
+    query_secret = re.compile(r"(api-key=)[^&\s\"']+", re.IGNORECASE)
 
     class _Redact(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             secrets = []
-            for key in ("TYPESAFE_API_KEY", "APP_TOKEN", "VAPID_PRIVATE_KEY", "TG_TOKEN"):
+            for key in REDACT_ENV_KEYS:
                 value = os.environ.get(key)
                 if value:
                     secrets.append(value)
-            if not secrets:
-                return True
 
             def scrub(text: str) -> str:
                 for secret in secrets:
                     if secret in text:
                         text = text.replace(secret, "[REDACTED]")
-                return text
+                return query_secret.sub(r"\1[REDACTED]", text)
 
             record.msg = scrub(record.getMessage())
             record.args = ()
+            if record.exc_info and not record.exc_text:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
             if record.exc_text:
                 record.exc_text = scrub(record.exc_text)
+            record.exc_info = None
             return True
 
     # A filter on the root logger does not run for a child logger that has

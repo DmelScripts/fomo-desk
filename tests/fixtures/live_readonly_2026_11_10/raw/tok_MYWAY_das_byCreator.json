@@ -1,0 +1,34 @@
+{
+ "meta": {
+  "name": "tok_MYWAY_das_byCreator",
+  "method": "POST",
+  "url": "https://mainnet.helius-rpc.com/?api-key=REDACTED",
+  "status": 200,
+  "latency_ms": 119,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:29+0700",
+  "fetched_unix": 1794326549.6230814,
+  "request_body": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "getAssetsByCreator",
+   "params": {
+    "creatorAddress": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "onlyVerified": false,
+    "page": 1,
+    "limit": 20
+   }
+  }
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "result": {
+   "last_indexed_slot": 467780557,
+   "total": 0,
+   "limit": 20,
+   "page": 1,
+   "items": []
+  },
+  "id": 1
+ }
+}

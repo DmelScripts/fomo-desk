@@ -1,0 +1,234 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump/report",
+  "status": 200,
+  "latency_ms": 3437,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:05:14+0700",
+  "fetched_unix": 1794326711.035374,
+  "request_body": null
+ },
+ "body": {
+  "mint": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 1000000000000000,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "GAETHJE WINS",
+   "symbol": "GAETHJE",
+   "uri": "https://ipfs.io/ipfs/bafkreibflnn5x6la6z2ovpbi4iy4chwwue4arsnwabax3gfr5tn6tpqveu",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "7g73sFYyMoh4ABvi1PUc5U6W3c5jyGg6u7BPjCrU8a4w",
+    "amount": 1000000000000000,
+    "decimals": 6,
+    "pct": 100,
+    "uiAmount": 1000000000,
+    "uiAmountString": "1000000000",
+    "owner": "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2",
+    "insider": false
+   },
+   {
+    "address": "5QfwXN1fECWo9gNHAoXo5KqVjYGpybs6ayqNNCZgnhj9",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "BWAkfkBMmNZGcKNgVrcZEZP8zrfSnqSHUeLj2ubQWStP",
+    "insider": false
+   },
+   {
+    "address": "5Yq6Yz4AvWU3RkFAFYKiBmDuGSqf6AqgF8WkyARVny9v",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "9ZAmvwPUUPDsdajmZBRe5uLUk9ugy8TBQ7F3Bcc3vMfy",
+    "insider": false
+   },
+   {
+    "address": "AcirbtSUHsHgkMQjmJR8JehhFDoYq2aEgrZdAfFQvry8",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "6gZBrfnXRHwEa11JpzQJ6oD112j4WWFGQQ77y61Lnm7E",
+    "insider": false
+   },
+   {
+    "address": "H5mruRCzqZLnRSAGaopUcxCVmkbUXWEEksbW3ftw2LSr",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "Fx7ttNxenboXSquhtEZYzcGFwUVDfYCyAs1zUiZr6pZ",
+    "insider": false
+   },
+   {
+    "address": "HyJEeiBLHBcSuaKvPTpBzMpLiYPTDnTywvq64x54uCt1",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "5ZkFmQmrZEsYG6LphB8f92TeULd2A6hmmwqTtmwVrFZn",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "GAETHJE WINS",
+   "symbol": "GAETHJE",
+   "image": ""
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2",
+    "marketType": "pump_fun",
+    "mintA": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "7g73sFYyMoh4ABvi1PUc5U6W3c5jyGg6u7BPjCrU8a4w",
+    "liquidityB": "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 1000000000000000,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+     "owner": "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2",
+     "amount": 793100000000000,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2",
+     "amount": 108,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "Amzqb5MZYpBc8K663Ksxpr1BuiB8rbSVKN6yi5Vapump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.06004457396455,
+     "basePrice": 2.9134717822545186e-06,
+     "base": 793100000,
+     "quote": 1.08e-07,
+     "reserveSupply": 108,
+     "currentSupply": 0,
+     "quoteUSD": 8.86248481398817e-06,
+     "baseUSD": 2310.6744705060587,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 108,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2310.6744793685434,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 108
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2310.6744793685434,
+  "totalStableLiquidity": 8.86248481398817e-06,
+  "totalLPProviders": 0,
+  "totalHolders": 6,
+  "price": 2.9134717822545186e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "4EQouucUPpY3wqjaDikRTN1aayCUg1TJ1AbdSSLV3wa2": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "7g73sFYyMoh4ABvi1PUc5U6W3c5jyGg6u7BPjCrU8a4w": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "8gqsmKxLZKa3d7jGEScJC2SEMpc59hvR7HbAgRgifSHV": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-10-13T14:36:38.133359273Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

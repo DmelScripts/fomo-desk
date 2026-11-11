@@ -1,0 +1,214 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump/report",
+  "status": 200,
+  "latency_ms": 3328,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "13"
+  },
+  "fetched_local": "2026-11-10T23:03:37+0700",
+  "fetched_unix": 1794326613.7705493,
+  "request_body": null
+ },
+ "body": {
+  "mint": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 1000000000000000,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "OpenManus",
+   "symbol": "OPENMANUS",
+   "uri": "https://ipfs.io/ipfs/bafkreiaerogttgekszeydycd5amko77b43fqjmjqa27we5tea2f5ji7g2u",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "j53TZNksEPdPjcUGAugMcaAoBe419xndkhvHYdNXrRB",
+    "amount": 1000000000000000,
+    "decimals": 6,
+    "pct": 100,
+    "uiAmount": 1000000000,
+    "uiAmountString": "1000000000",
+    "owner": "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk",
+    "insider": false
+   },
+   {
+    "address": "87jAZ29Jpc1BQJGq5UWsqqxidWLfM31oYiJbzNvDM2Am",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn",
+    "insider": false
+   },
+   {
+    "address": "D2vCLBEqARvYdMsMWsZqitSsNXU4kzeRXb2cs5k7gZy5",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "Bod7RSxp668buzmWeVYAxeoLwPUE3aySX4pGT19NFf8d",
+    "insider": false
+   },
+   {
+    "address": "EqJUiyjHHPpeGpM9AtHqrJuxRqYLW2CREPg9DKsVFJrf",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "D8Kn2PuG2DmUQrbVYxRbfTvaka52ddYZsLsR5ZfrttWu",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "OpenManus",
+   "symbol": "OPENMANUS",
+   "image": ""
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk",
+    "marketType": "pump_fun",
+    "mintA": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "j53TZNksEPdPjcUGAugMcaAoBe419xndkhvHYdNXrRB",
+    "liquidityB": "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 1000000000000000,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+     "owner": "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk",
+     "amount": 793100000000000,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk",
+     "amount": 193,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "GPoUv7kVkAVtx8KosQmFwVkkr5Nhu2ZotKePgaTdpump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.21860432493816,
+     "basePrice": 2.7132451002109208e-06,
+     "base": 793100000,
+     "quote": 1.93e-07,
+     "reserveSupply": 193,
+     "currentSupply": 0,
+     "quoteUSD": 1.5868190634713064e-05,
+     "baseUSD": 2151.874688977281,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 193,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 2151.8747048454716,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 193
+    }
+   }
+  ],
+  "totalMarketLiquidity": 2151.8747048454716,
+  "totalStableLiquidity": 1.5868190634713064e-05,
+  "totalLPProviders": 0,
+  "totalHolders": 6,
+  "price": 2.7132451002109208e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "4Tx79hFof6r4KXt1ZguhDFtd9aG89Ufv3jNLyJQjWJdi": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "GNk8xfq4QpyaRvcuLtxW7KosT5HjQmgDXMn2zEuiXHVk": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   },
+   "j53TZNksEPdPjcUGAugMcaAoBe419xndkhvHYdNXrRB": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-10-30T10:53:25.875096166Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

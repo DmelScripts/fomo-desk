@@ -1,0 +1,214 @@
+{
+ "meta": {
+  "name": "past_TRUMP_rugcheck_GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+  "method": "GET",
+  "url": "https://api.rugcheck.xyz/v1/tokens/GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump/report",
+  "status": 200,
+  "latency_ms": 2380,
+  "rate_headers": {
+   "X-Rate-Limit-Limit": "15",
+   "X-Rate-Limit-Remaining": "14"
+  },
+  "fetched_local": "2026-11-10T23:03:50+0700",
+  "fetched_unix": 1794326628.4793303,
+  "request_body": null
+ },
+ "body": {
+  "mint": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "creator": "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY",
+  "creatorBalance": 0,
+  "token": {
+   "mintAuthority": null,
+   "supply": 999998861455748,
+   "decimals": 6,
+   "isInitialized": true,
+   "freezeAuthority": null
+  },
+  "token_extensions": null,
+  "tokenMeta": {
+   "name": "Shiro",
+   "symbol": "\u30b7\u30ed",
+   "uri": "https://ipfs.io/ipfs/bafkreiglxio2rakcfx7unis2f7ewlizzdrdpohi4wzhiqsnraxnpfobo4u",
+   "mutable": false,
+   "updateAuthority": "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM"
+  },
+  "topHolders": [
+   {
+    "address": "Gu5wrUufPaGBVGVVuGn263XMvuBA7Aan4piCJHwRAzvL",
+    "amount": 999998861455747,
+    "decimals": 6,
+    "pct": 99.9999999999999,
+    "uiAmount": 999998861.455747,
+    "uiAmountString": "999998861.455747",
+    "owner": "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr",
+    "insider": false
+   },
+   {
+    "address": "5irZoecC1ZbcsJ2APJoUdxeqkYqBF1bQn6fkHfUqP1oo",
+    "amount": 1,
+    "decimals": 6,
+    "pct": 1.0000011385455482e-13,
+    "uiAmount": 1e-06,
+    "uiAmountString": "0.000001",
+    "owner": "wkqNiyuE1iQyqYAeGTsci7itKykjY17EUSGbYmLhWvF",
+    "insider": false
+   },
+   {
+    "address": "6qU7DxnCMdpxgjpDpbEkbKzS6giYiDnvxbwg8bFFWR1R",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "F9m96UFk2p6BpeyxfhiiQKkZZCByoNRQcydnXW8XTnjN",
+    "insider": false
+   },
+   {
+    "address": "9V5QdHkjNQwzvEWP8GDJxhrtiMvxcxEZE7LAnSNfMQZs",
+    "amount": 0,
+    "decimals": 6,
+    "pct": 0,
+    "uiAmount": 0,
+    "uiAmountString": "0",
+    "owner": "AniTBNNfWgzCVAokP2NZBXTW9VgSEeQRgWS8iw6y6oPi",
+    "insider": false
+   }
+  ],
+  "freezeAuthority": null,
+  "mintAuthority": null,
+  "risks": [],
+  "score": 1,
+  "score_normalised": 1,
+  "fileMeta": {
+   "description": "",
+   "name": "Shiro",
+   "symbol": "\u30b7\u30ed",
+   "image": "https://ipfs.io/ipfs/bafkreihrkmc2w5o72tgpnhpk462ziqnm77zrjpbvyhmrdpulnyzx5diafu"
+  },
+  "lockerOwners": {},
+  "lockers": {},
+  "lockerScanStatus": "none",
+  "markets": [
+   {
+    "pubkey": "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr",
+    "marketType": "pump_fun",
+    "mintA": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+    "mintB": "So11111111111111111111111111111111111111112",
+    "mintLP": "11111111111111111111111111111111",
+    "liquidityA": "Gu5wrUufPaGBVGVVuGn263XMvuBA7Aan4piCJHwRAzvL",
+    "liquidityB": "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr",
+    "mintAAccount": {
+     "mintAuthority": null,
+     "supply": 999998861455748,
+     "decimals": 6,
+     "isInitialized": true,
+     "freezeAuthority": null
+    },
+    "mintBAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 9,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "mintLPAccount": {
+     "mintAuthority": null,
+     "supply": 0,
+     "decimals": 0,
+     "isInitialized": false,
+     "freezeAuthority": null
+    },
+    "liquidityAAccount": {
+     "mint": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+     "owner": "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr",
+     "amount": 793098861455747,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "liquidityBAccount": {
+     "mint": "So11111111111111111111111111111111111111112",
+     "owner": "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr",
+     "amount": 31885,
+     "delegate": null,
+     "state": 0,
+     "delegatedAmount": 0,
+     "closeAuthority": null
+    },
+    "lp": {
+     "baseMint": "GBKVa2pPeuVkFVjEZmk4shRUKiRvf444ysdjDHe2pump",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "lpMint": "11111111111111111111111111111111",
+     "quotePrice": 82.20694034556344,
+     "basePrice": 2.1118058234649426e-06,
+     "base": 793098861.455747,
+     "quote": 3.1885e-05,
+     "reserveSupply": 31885,
+     "currentSupply": 0,
+     "quoteUSD": 0.00262116829291829,
+     "baseUSD": 1674.8707942056622,
+     "pctReserve": 0,
+     "pctSupply": 0,
+     "holders": null,
+     "totalTokensUnlocked": 0,
+     "tokenSupply": 0,
+     "lpLocked": 31885,
+     "lpUnlocked": 0,
+     "lpLockedPct": 100,
+     "lpLockedUSD": 1674.8734153739551,
+     "lpMaxSupply": 0,
+     "lpCurrentSupply": 0,
+     "lpTotalSupply": 31885
+    }
+   }
+  ],
+  "totalMarketLiquidity": 1674.8734153739551,
+  "totalStableLiquidity": 0.00262116829291829,
+  "totalLPProviders": 0,
+  "totalHolders": 4,
+  "price": 2.1118058234649426e-06,
+  "rugged": false,
+  "tokenType": "",
+  "transferFee": {
+   "pct": 0,
+   "maxAmount": 0,
+   "authority": "11111111111111111111111111111111"
+  },
+  "knownAccounts": {
+   "3gjJnvQYYEhjBiZP38Wiz6mbs2SW4FBRRSnHAjfwpifr": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "5YHyNN18c4P78orZNPkGqT8bScUh21MsX3watv76iWJJ": {
+    "name": "Printr Stake Pool",
+    "type": "LOCKER"
+   },
+   "Gu5wrUufPaGBVGVVuGn263XMvuBA7Aan4piCJHwRAzvL": {
+    "name": "Pump Fun",
+    "type": "AMM"
+   },
+   "HCBQjnixpBcqBz8jr3kJqgWPJA517w5gz6XxA53H13DY": {
+    "name": "Creator",
+    "type": "CREATOR"
+   }
+  },
+  "events": [],
+  "verification": null,
+  "validation": {
+   "validated": false
+  },
+  "graphInsidersDetected": 0,
+  "insiderNetworks": null,
+  "detectedAt": "2026-08-17T09:29:24.442765534Z",
+  "creatorTokens": null,
+  "launchpad": {
+   "name": "Pump.Fun",
+   "logo": "https://api.rugcheck.xyz/public/logos/pump_fun.png",
+   "url": "https://x.com/pumpfun",
+   "platform": "pump_fun"
+  },
+  "deployPlatform": "unknown"
+ }
+}

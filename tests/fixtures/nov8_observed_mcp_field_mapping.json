@@ -1,0 +1,619 @@
+{
+  "dataset_kind": "OBSERVED_MCP_FIXTURE_ONLY",
+  "mint": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+  "requests": {
+    "onchain": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
+    },
+    "deployer": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
+    },
+    "early_buyers": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "limit": 5
+    },
+    "holder_quality": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana",
+      "limit": 2
+    },
+    "snapshot": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana",
+      "holdersLimit": 3
+    },
+    "stats": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana"
+    }
+  },
+  "sources": {
+    "onchain": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/bd676f96d6f7b80a4a9b02e081df57a04b95f2f8e8ee415d18dfa02736f59ae2.txt",
+      "sha256": "bd676f96d6f7b80a4a9b02e081df57a04b95f2f8e8ee415d18dfa02736f59ae2",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "deployer": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/9d0b83d265491a3a1f50d28c9e5c062d922ca0a5de4dbcac4e89c23847f7c94d.txt",
+      "sha256": "9d0b83d265491a3a1f50d28c9e5c062d922ca0a5de4dbcac4e89c23847f7c94d",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "early_buyers": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/64600908f9582664247259895a4d5dad36c873150ee7a150ce54e36d20337af2.txt",
+      "sha256": "64600908f9582664247259895a4d5dad36c873150ee7a150ce54e36d20337af2",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "holder_quality": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/f3a3d7fdd93397ed936f9fda900d97d11854b41996b16e656db7d5b655085209.txt",
+      "sha256": "f3a3d7fdd93397ed936f9fda900d97d11854b41996b16e656db7d5b655085209",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "snapshot": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/7e94efca4f718d7f5cf086b533af8cc5430073616f04b182c0d25328c015c83d.txt",
+      "sha256": "7e94efca4f718d7f5cf086b533af8cc5430073616f04b182c0d25328c015c83d",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": "2026-11-08T13:56:01.771+07:00",
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "stats": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/e66dc41eb1fad355d9f9075422dc708dc845b398fcf0e1123daab03342e43e42.txt",
+      "sha256": "e66dc41eb1fad355d9f9075422dc708dc845b398fcf0e1123daab03342e43e42",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    }
+  },
+  "fields": [
+    {
+      "source": "onchain",
+      "path": "$.data.mint",
+      "observed_type": "string",
+      "observed_value": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "unit": "Solana mint",
+      "meaning": "Exact response mint binding",
+      "limitation": ""
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.mintAuthorityActive",
+      "observed_type": "boolean",
+      "observed_value": false,
+      "unit": "boolean active/not active",
+      "meaning": "Provider reports authority inactive when false",
+      "limitation": "Not independent account-byte/slot verification; never default missing to false"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.freezeAuthorityActive",
+      "observed_type": "boolean",
+      "observed_value": false,
+      "unit": "boolean active/not active",
+      "meaning": "Provider reports authority inactive when false",
+      "limitation": "Not independent account-byte/slot verification; never default missing to false"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.lpBurnedPercent",
+      "observed_type": "integer",
+      "observed_value": 91,
+      "unit": "percent supply of LP as provider defines",
+      "meaning": "Observed LP burn aggregate91",
+      "limitation": "Not100%; no lock accounts/unlock time/burn signatures or per-pool coverage"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.concentration.devPercent",
+      "observed_type": "number",
+      "observed_value": 0.38,
+      "unit": "percent of supply",
+      "meaning": "Current provider dev holding0.38",
+      "limitation": "Single identified deployer not all linked insiders"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.concentration.top10Percent",
+      "observed_type": "number",
+      "observed_value": 13.43,
+      "unit": "percent of supply",
+      "meaning": "Top10 concentration",
+      "limitation": ""
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.deployer",
+      "observed_type": "string",
+      "observed_value": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+      "unit": "Solana address",
+      "meaning": "Resolved deployer identity",
+      "limitation": ""
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.createdAt",
+      "observed_type": "string",
+      "observed_value": "2026-11-08T06:11:39.000Z",
+      "unit": "ISO8601 UTC timestamp",
+      "meaning": "Token creation13:11:39Vietnam",
+      "limitation": "Not LP/pair creation or observation time"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.holdersTotal",
+      "observed_type": "integer",
+      "observed_value": 1588,
+      "unit": "count",
+      "meaning": "Observed holdersTotal",
+      "limitation": "Snapshot sources differ; do not construct growth from heterogeneous counts"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.marketCapUsd",
+      "observed_type": "integer",
+      "observed_value": 320700,
+      "unit": "USD",
+      "meaning": "Observed marketCapUsd",
+      "limitation": "Snapshot sources differ; do not construct growth from heterogeneous counts"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.liquidityUsd",
+      "observed_type": "number",
+      "observed_value": 93917.08,
+      "unit": "USD",
+      "meaning": "Observed liquidityUsd",
+      "limitation": "Snapshot sources differ; do not construct growth from heterogeneous counts"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.marketCapBasis",
+      "observed_type": "string",
+      "observed_value": "fully diluted",
+      "unit": "enum/string",
+      "meaning": "fully diluted",
+      "limitation": "Not confirmed circulating market cap"
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.priceChangePercent.1h",
+      "observed_type": "number",
+      "observed_value": 401.13,
+      "unit": "percent change",
+      "meaning": "1h return401.13 rejects <80 requirement",
+      "limitation": ""
+    },
+    {
+      "source": "onchain",
+      "path": "$.data.risk.rugged",
+      "observed_type": "boolean",
+      "observed_value": false,
+      "unit": "boolean provider flag",
+      "meaning": "Provider rugged flag false",
+      "limitation": "Not clean past-rug-history certificate"
+    },
+    {
+      "source": "deployer",
+      "path": "$.data.deployer",
+      "observed_type": "string",
+      "observed_value": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+      "unit": "Solana address",
+      "meaning": "Join to onchain deployer",
+      "limitation": ""
+    },
+    {
+      "source": "deployer",
+      "path": "$.data.tokensLaunched",
+      "observed_type": "integer",
+      "observed_value": 1,
+      "unit": "count",
+      "meaning": "Provider enumerated history sample",
+      "limitation": "No complete lookback/range/index coverage; no cross-wallet identity linkage"
+    },
+    {
+      "source": "deployer",
+      "path": "$.data.graduated",
+      "observed_type": "integer",
+      "observed_value": 1,
+      "unit": "count",
+      "meaning": "Provider enumerated history sample",
+      "limitation": "No complete lookback/range/index coverage; no cross-wallet identity linkage"
+    },
+    {
+      "source": "deployer",
+      "path": "$.data.stillLiquid",
+      "observed_type": "integer",
+      "observed_value": 1,
+      "unit": "count",
+      "meaning": "Provider enumerated history sample",
+      "limitation": "No complete lookback/range/index coverage; no cross-wallet identity linkage"
+    },
+    {
+      "source": "deployer",
+      "path": "$.data.tokens",
+      "observed_type": "array",
+      "observed_value": [
+        {
+          "mint": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+          "symbol": "GATOGLITCH",
+          "liquidityUsd": 95006.31,
+          "marketCapUsd": 345785.82,
+          "lpBurnedPercent": 91,
+          "hasSocials": true
+        }
+      ],
+      "unit": "array of token launch objects",
+      "meaning": "Actual observed single launch list",
+      "limitation": "Only row keys mint/symbol/liquidityUsd/marketCapUsd/lpBurnedPercent/hasSocials; no prior-rug boolean/history completeness"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.token",
+      "observed_type": "string",
+      "observed_value": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "unit": "Solana mint",
+      "meaning": "Exact mint binding",
+      "limitation": ""
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.firstBuyersAnalysed",
+      "observed_type": "integer",
+      "observed_value": 100,
+      "unit": "count",
+      "meaning": "100 first buyers analysed",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.fullyExited",
+      "observed_type": "integer",
+      "observed_value": 84,
+      "unit": "count",
+      "meaning": "84 exited",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.bundlers.wallets",
+      "observed_type": "integer",
+      "observed_value": 1,
+      "unit": "count",
+      "meaning": "Non-deployer launch bundle wallets",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.bundlers.heldAtLaunchPercent",
+      "observed_type": "number",
+      "observed_value": 0.45,
+      "unit": "percent supply",
+      "meaning": "Non-deployer launch bundle0.45",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.bundlers.heldNowPercent",
+      "observed_type": "integer",
+      "observed_value": 0,
+      "unit": "percent supply",
+      "meaning": "Current holdings of that bundle0",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launch.devBuyPercent",
+      "observed_type": "number",
+      "observed_value": 9.87,
+      "unit": "percent supply",
+      "meaning": "Deployer launch buy9.87",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launch.slot",
+      "observed_type": "integer",
+      "observed_value": 466809652,
+      "unit": "Solana slot integer",
+      "meaning": "Public launch provenance slot466809652",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launch.at",
+      "observed_type": "string",
+      "observed_value": "2026-11-08T06:11:39.000Z",
+      "unit": "ISO8601 UTC timestamp",
+      "meaning": "Launch13:11:39Vietnam",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launchFunding.checked",
+      "observed_type": "integer",
+      "observed_value": 50,
+      "unit": "count",
+      "meaning": "50 funding traces, not all holders",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launchFunding.pattern",
+      "observed_type": "string",
+      "observed_value": "organic",
+      "unit": "categorical string",
+      "meaning": "Provider organic pattern, not proof no coordination",
+      "limitation": "Coverage/sample explicit; not a complete linked-wallet/bundle proof"
+    },
+    {
+      "source": "early_buyers",
+      "path": "$.data.launch.buys",
+      "observed_type": "array",
+      "observed_value": [
+        {
+          "wallet": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+          "block": 0,
+          "tokens": 96435739.58,
+          "signature": "qTB1RF7cDQUEPU6C8sd629ZtgJesKorevjnPgbdBxiVfsP5SSWNqH59bKBYj1fop5SajtGzyyj8gKhnBoCnPVVb",
+          "supplyPercent": 9.87,
+          "holdsNowPercent": 0.39,
+          "deployer": true
+        },
+        {
+          "wallet": "7HXLZBRkMMJQEVUpNYmghAFwDeFAnZGeCzfBuGeYXtoB",
+          "block": 0,
+          "tokens": 4369475.99,
+          "signature": "Wm9ThoWGbH857p9P4cD7T3QN1Nshu8zyVC7JjfUTaxNzpAgRYcXDgEGtCRm7xuNFnNhsR53pLfed6Zq3cdqhwkn",
+          "supplyPercent": 0.45,
+          "holdsNowPercent": 0,
+          "deployer": false
+        }
+      ],
+      "unit": "array of public historical buys",
+      "meaning": "Two actual launch-block buys with wallet/block/supplyPercent/holdsNowPercent/deployer/signature",
+      "limitation": "Historical transaction IDs are public provenance, not credentials or newly signed transactions"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.holders",
+      "observed_type": "integer",
+      "observed_value": 1377,
+      "unit": "count",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.top10HoldersPercent",
+      "observed_type": "number",
+      "observed_value": 14.922103766445538,
+      "unit": "percent",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.windows.1h.uniqueBuyers",
+      "observed_type": "integer",
+      "observed_value": 1095,
+      "unit": "count",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.windows.1h.uniqueSellers",
+      "observed_type": "integer",
+      "observed_value": 731,
+      "unit": "count",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.windows.1h.buys",
+      "observed_type": "integer",
+      "observed_value": 2136,
+      "unit": "count",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.windows.1h.sells",
+      "observed_type": "integer",
+      "observed_value": 1607,
+      "unit": "count",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.organic24h.organicSharePct",
+      "observed_type": "number",
+      "observed_value": 0.4,
+      "unit": "percent",
+      "meaning": "Actual provider window/count value",
+      "limitation": "1h is provider window; no completeness timestamp/chain slot on this result"
+    },
+    {
+      "source": "stats",
+      "path": "$.data.token",
+      "observed_type": "string",
+      "observed_value": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "unit": "Solana mint",
+      "meaning": "Exact mint binding",
+      "limitation": ""
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.token",
+      "observed_type": "string",
+      "observed_value": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "unit": "Solana mint",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.capturedAt",
+      "observed_type": "string",
+      "observed_value": "2026-11-08T06:56:01.771Z",
+      "unit": "ISO8601 UTC timestamp",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.totalHolders",
+      "observed_type": "integer",
+      "observed_value": 1377,
+      "unit": "count",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.trackedHolderCount",
+      "observed_type": "integer",
+      "observed_value": 3,
+      "unit": "count returned tracked rows",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.top10HoldersPercent",
+      "observed_type": "number",
+      "observed_value": 14.922103766445538,
+      "unit": "percent supply",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "snapshot",
+      "path": "$.data.trackedHolders",
+      "observed_type": "array",
+      "observed_value": [
+        {
+          "handle": "aledjjs",
+          "amount": 5260410.15,
+          "valueUsd": 1824.05
+        },
+        {
+          "handle": "SoreFirmLark",
+          "amount": 2886892.35,
+          "valueUsd": 1001.03
+        },
+        {
+          "handle": "LuckyLynx",
+          "amount": 2386772.64,
+          "valueUsd": 827.614
+        }
+      ],
+      "unit": "array of sampled tracked holders",
+      "meaning": "t=0 baseline snapshot",
+      "limitation": "trackedHolderCount3 equals requested returned sample; not total tracked-holder population. No growth until compatible t1 snapshot."
+    },
+    {
+      "source": "holder_quality",
+      "path": "$.data.token",
+      "observed_type": "string",
+      "observed_value": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "unit": "Solana mint",
+      "meaning": "Observed holder-quality sample",
+      "limitation": "100 tracked, only2 scored, average16%; recent closed trades18/25; not whole-wallet lifetime performance or calibrated analyst score"
+    },
+    {
+      "source": "holder_quality",
+      "path": "$.data.trackedHolders",
+      "observed_type": "integer",
+      "observed_value": 100,
+      "unit": "count provider tracked sample population",
+      "meaning": "Observed holder-quality sample",
+      "limitation": "100 tracked, only2 scored, average16%; recent closed trades18/25; not whole-wallet lifetime performance or calibrated analyst score"
+    },
+    {
+      "source": "holder_quality",
+      "path": "$.data.scored",
+      "observed_type": "integer",
+      "observed_value": 2,
+      "unit": "count",
+      "meaning": "Observed holder-quality sample",
+      "limitation": "100 tracked, only2 scored, average16%; recent closed trades18/25; not whole-wallet lifetime performance or calibrated analyst score"
+    },
+    {
+      "source": "holder_quality",
+      "path": "$.data.averageWinRatePct",
+      "observed_type": "integer",
+      "observed_value": 16,
+      "unit": "percent wins",
+      "meaning": "Observed holder-quality sample",
+      "limitation": "100 tracked, only2 scored, average16%; recent closed trades18/25; not whole-wallet lifetime performance or calibrated analyst score"
+    },
+    {
+      "source": "holder_quality",
+      "path": "$.data.holders",
+      "observed_type": "array",
+      "observed_value": [
+        {
+          "handle": "aledjjs",
+          "userId": null,
+          "valueUsd": 1824,
+          "amount": 5260410.15,
+          "winRatePct": 0,
+          "closedSampled": 18,
+          "wins": 0,
+          "losses": 18,
+          "realizedPnlUsdSampled": -1473,
+          "medianHoldHours": 0.1
+        },
+        {
+          "handle": "SoreFirmLark",
+          "userId": null,
+          "valueUsd": 1001,
+          "amount": 2886892.35,
+          "winRatePct": 32,
+          "closedSampled": 25,
+          "wins": 8,
+          "losses": 17,
+          "realizedPnlUsdSampled": -1230,
+          "medianHoldHours": 0.2
+        }
+      ],
+      "unit": "array of sampled holder performance",
+      "meaning": "Observed holder-quality sample",
+      "limitation": "100 tracked, only2 scored, average16%; recent closed trades18/25; not whole-wallet lifetime performance or calibrated analyst score"
+    }
+  ],
+  "derived": {
+    "bundle_launch_including_dev_percent": "10.32",
+    "derivation": "9.87 dev +0.45 nondev same launch block =10.32%; not an independent provider field. Verify disjointness against launch.buys/deployer flags; do not double count.",
+    "holder_growth": null,
+    "growth_state": "t0_only"
+  },
+  "public_rest_contract": {
+    "file": "/workspace/nov8-stalkchain-public-api-contract.json",
+    "observed_public_200_description": "{ data, notes?, credits, meta }",
+    "formal_response_json_schema": "Absent in saved200response; description only.",
+    "rest_envelope_status": "UNVERIFIED_BY_AUTHENTICATED_REST_FETCH. Public description resembles MCP envelope but these fixtures were never fetched through REST. No live REST adapter success claim."
+  },
+  "strict_fixture_adapter_rules": [
+    "Verify exact request mint against response mint/token; deployer result has no top-level mint: require requested token in tokens list and consistent deployer join, not assume all history only concerns request token.",
+    "Require actual boolean types for authority flags and numeric finite percent0..100; reject null/missing/string/bool-as-number. Unknown stays unknown, never default zero/false.",
+    "Bind timestamp/transport/source provenance separately; do not use creation time as freshness. No source timestamp => freshness unknown unless trusted capture-time policy explicitly satisfied. These historical fixtures cannot authorize fresh LIVE.",
+    "LP91 cannot satisfy full burned/locked/expiry proof. Missing lock expiry remains unknown.",
+    "Deployer list1 cannot imply clean rugs or complete history. Return coverage unknown.",
+    "Keep bundle nondev0.45 and dev9.87 separately; explicitly configured inclusive launch metric10.32. Do not silently filter dev.",
+    "Growth must compare same tool/version/mint/chain/metric at t0 and later actualt1, matching sample/limit when tracking rows; retain provenance and reject zero/negative elapsed time. Onchain1588 vs stats1377 is not growth.",
+    "Keep holder-quality sample2 and closedSampled18/25; no >=70 analyst score fabricated from16%winrate.",
+    "REST unit tests may use fixtures only as observed examples, not a schema guarantee. Require separately authorized actual REST capture/schema validation before integration certification."
+  ],
+  "no_live_pass": true
+}

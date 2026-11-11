@@ -1,0 +1,747 @@
+{
+ "meta": {
+  "name": "dex_search_moonshot",
+  "method": "GET",
+  "url": "https://api.dexscreener.com/latest/dex/search?q=moonshot",
+  "status": 200,
+  "latency_ms": 93,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:00:53+0700",
+  "fetched_unix": 1794326453.05019,
+  "request_body": null
+ },
+ "body": {
+  "schemaVersion": "1.0.0",
+  "pairs": [
+   {
+    "chainId": "near",
+    "dexId": "rhea-finance",
+    "url": "https://dexscreener.com/near/refv2-moonshot.v2-launchpad.justhoot.near:wrap.near:10000",
+    "pairAddress": "refv2-moonshot.v2-launchpad.justhoot.near:wrap.near:10000",
+    "baseToken": {
+     "address": "moonshot.v2-launchpad.justhoot.near",
+     "name": "Moonshot",
+     "symbol": "MOONSHOT"
+    },
+    "quoteToken": {
+     "address": "wrap.near",
+     "name": "Wrapped NEAR fungible token",
+     "symbol": "wNEAR"
+    },
+    "priceNative": "0.000003336",
+    "priceUsd": "0.00001212",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 4.14,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": 1.51
+    },
+    "liquidity": {
+     "usd": 10331.63,
+     "base": 612179476,
+     "quote": 799.9621
+    },
+    "fdv": 12127,
+    "marketCap": 12127,
+    "pairCreatedAt": 1793625820000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpswap",
+    "url": "https://dexscreener.com/solana/8rlmob9ffktb3uddievqppvdudwj5jpl52nqd6ybjeek",
+    "pairAddress": "8rLmob9fFkTb3UDDieVqPpvdUdWJ5JpL52nQd6yBjeEk",
+    "baseToken": {
+     "address": "73nBoTeEAJAWaNP8ayTDUZbx6ag3JcHm4CPxGi8Tpump",
+     "name": "MOONSHOT",
+     "symbol": "MOONSHOT"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002588",
+    "priceUsd": "0.000002189",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 6
+     }
+    },
+    "volume": {
+     "h24": 1.49,
+     "h6": 0.6,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -1.93,
+     "h24": -2.57
+    },
+    "liquidity": {
+     "usd": 2363.41,
+     "base": 874093046,
+     "quote": 5.3198
+    },
+    "fdv": 2142,
+    "marketCap": 2142,
+    "pairCreatedAt": 1789685291000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/vlW_o93VPeHXg9-d?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/qla_OijPzyLIN4GO?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/73nBoTeEAJAWaNP8ayTDUZbx6ag3JcHm4CPxGi8Tpump?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://moonshotsol.fun",
+       "label": "Website"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/mshotsolx",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/moonshotsolportal",
+       "type": "telegram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/bqceeejd7gwnr3ndpmthzynwkpq158zgmnweg1qpnf8p",
+    "pairAddress": "BqCeEeJd7GwnR3ndpmthZynwKPQ158zGMNWEg1qPNF8p",
+    "labels": [
+     "CPMM"
+    ],
+    "baseToken": {
+     "address": "DnHn8Cjucig8yMvow9praq56gNgey1AKiaR1V67zrohM",
+     "name": "moonshot",
+     "symbol": "MOONSHOT"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000005988",
+    "priceUsd": "0.000005118",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 2
+     }
+    },
+    "volume": {
+     "h24": 0,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -1.51,
+     "h24": -1.51
+    },
+    "liquidity": {
+     "usd": 190.78,
+     "base": 18638463,
+     "quote": 1.116
+    },
+    "fdv": 5116,
+    "marketCap": 5116,
+    "pairCreatedAt": 1737250999000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/7nwgfwuhshjzs1kwxvaaheyhzrjgbop2f9ejtfdtzrgx",
+    "pairAddress": "7NwgFWUHsHjZs1kWXVAAheYHZrjGBop2f9ejTFdtzRGX",
+    "baseToken": {
+     "address": "mHGPL8iknYhmJrT75VgwPh43StsyfjsPf9DwrsSpump",
+     "name": "Agent Moonshot (sniper)",
+     "symbol": "Moonshot"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000003064",
+    "priceUsd": "0.000002644",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 0.02,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "fdv": 2644,
+    "marketCap": 2644,
+    "pairCreatedAt": 1734243730000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "pumpfun",
+    "url": "https://dexscreener.com/solana/3fq4hh9bt7fkd5echwazkqb6n82pfppw2fcd48nnkyae",
+    "pairAddress": "3Fq4hH9bt7fKD5eCHWAZKQB6n82pfPpW2FCd48NNkyaE",
+    "baseToken": {
+     "address": "5zEu7DY1tALNkJPDZZdN1mUZdZ1wKXXx8CiTbJxBpump",
+     "name": "Moonshot",
+     "symbol": "MS"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000002795",
+    "priceUsd": "0.000002337",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 5,
+      "sells": 5
+     },
+     "h24": {
+      "buys": 5,
+      "sells": 5
+     }
+    },
+    "volume": {
+     "h24": 282.93,
+     "h6": 282.93,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -5.86,
+     "h24": -5.86
+    },
+    "fdv": 2337.09,
+    "marketCap": 2337.09,
+    "pairCreatedAt": 1794320823000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteoradbc",
+    "url": "https://dexscreener.com/solana/8vhcxfod6mg3zevgjqszzfauulgyqqnns8db13eq5kzz",
+    "pairAddress": "8vHCXFoD6mG3zEVgjQSZzfaUULgYQQnnS8dB13Eq5KZZ",
+    "baseToken": {
+     "address": "HzBw2dfNiTAcqbQFD7Y9xAkFZ752SQzv1mtm3Y96moon",
+     "name": "Moonshot",
+     "symbol": "MOONSHOT"
+    },
+    "quoteToken": {
+     "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "name": "USD Coin",
+     "symbol": "USDC"
+    },
+    "priceNative": "0.000005007",
+    "priceUsd": "0.000005007",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 5.92,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "fdv": 5007.75,
+    "marketCap": 5007.75,
+    "pairCreatedAt": 1791505825000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/h64asx6xnm5u92p5dbqyz3ykppgvj6ezae4f9tjjlcpl",
+    "pairAddress": "H64aSx6XNm5u92P5DBQyZ3yKPPGvj6Ezae4F9tJJLcpL",
+    "labels": [
+     "DYN2"
+    ],
+    "baseToken": {
+     "address": "EuwTQRtAQQe3FjvVMXepm8vrw3CLpRoQSoEpv6Fomoon",
+     "name": "UK FINANCIAL MOONSHOT TOKEN",
+     "symbol": "UKFLMS"
+    },
+    "quoteToken": {
+     "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "name": "USD Coin",
+     "symbol": "USDC"
+    },
+    "priceNative": "0.002284",
+    "priceUsd": "0.002284",
+    "txns": {
+     "m5": {
+      "buys": 13,
+      "sells": 2
+     },
+     "h1": {
+      "buys": 27,
+      "sells": 22
+     },
+     "h6": {
+      "buys": 54,
+      "sells": 44
+     },
+     "h24": {
+      "buys": 117,
+      "sells": 80
+     }
+    },
+    "volume": {
+     "h24": 49601.57,
+     "h6": 35297.09,
+     "h1": 20800.19,
+     "m5": 11474.58
+    },
+    "priceChange": {
+     "m5": -10.89,
+     "h1": -14.81,
+     "h6": -29.66,
+     "h24": -20.8
+    },
+    "liquidity": {
+     "usd": 199234.43,
+     "base": 43606439,
+     "quote": 99617
+    },
+    "fdv": 2284451,
+    "marketCap": 2284451,
+    "pairCreatedAt": 1791918387000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/2lrl_yAIwSxLGcqO?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/u2spjlEv4ycIheJe?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/EuwTQRtAQQe3FjvVMXepm8vrw3CLpRoQSoEpv6Fomoon?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.ukfinancialltd.com",
+       "label": "Website"
+      },
+      {
+       "url": "https://pinionnewswire.com/press-release/uk-financial-ltd-announces-the-uk-financial-launchpad-series-launching-first-with-the-ukfl-moonshot-token-on-the-moonshot-app/",
+       "label": "Latest Press Release"
+      },
+      {
+       "url": "https://ukfinancialltd.com",
+       "label": "UK Financial LTD corporate website"
+      },
+      {
+       "url": "https://www.mayapreferred.io",
+       "label": "the Maya Preferred Project"
+      },
+      {
+       "url": "https://UKFinancialltd.com/news",
+       "label": "UK FINANCIAL NEWS CHANNEL"
+      },
+      {
+       "url": "https://www.mayapreferred.io/Bitcoin2019gold",
+       "label": "PROOF THE MAYA PREFERRED PROJECT BACKED BITCOIN IN 2019"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/UKFinancial_Ltd",
+       "type": "twitter"
+      },
+      {
+       "url": "https://t.me/UK_FINANCIAL_LAUNCHPAD_SERIES",
+       "type": "telegram"
+      },
+      {
+       "url": "https://www.instagram.com/the_maya_preferred_project",
+       "type": "instagram"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "ethereum",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/ethereum/0xb7b733ef5f8df9e95331c02d37f0dec523ddb6dd",
+    "pairAddress": "0xB7b733eF5f8df9e95331c02d37F0DeC523DDb6dd",
+    "labels": [
+     "v3"
+    ],
+    "baseToken": {
+     "address": "0xcEEeFeB1c982c1c513Cbd4eaAff14c0A5218FB2F",
+     "name": "UK FINANCIAL MOONSHOT TOKEN",
+     "symbol": "UKFLMS"
+    },
+    "quoteToken": {
+     "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+     "name": "Wrapped Ether",
+     "symbol": "WETH"
+    },
+    "priceNative": "0.0000006677",
+    "priceUsd": "0.001400",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 4,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 43.38,
+     "h6": 0.2,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h6": -1.56,
+     "h24": -1.72
+    },
+    "liquidity": {
+     "usd": 700258.97,
+     "base": 499999732,
+     "quote": 0.00024
+    },
+    "fdv": 1400518,
+    "marketCap": 1400518,
+    "pairCreatedAt": 1794253871000
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/dfe4tzptwju4rabydfvypmctowewhzwqwxfevu8saxke",
+    "pairAddress": "DFE4tZPtWJu4RabyDFvYpMCToWEWhZwqWxFeVU8saXke",
+    "labels": [
+     "CPMM"
+    ],
+    "baseToken": {
+     "address": "F9JPcq4UvdUqwBfmfxyP1LDR5SG1GyhhbR8k5XFnA886",
+     "name": "Luke The Moonshot",
+     "symbol": "XCAT"
+    },
+    "quoteToken": {
+     "address": "WXMRyRZhsa19ety5erZhHg4N3xj3EVN92u94422teJp",
+     "name": "Wrapped Monero",
+     "symbol": "wXMR"
+    },
+    "priceNative": "0.000000006965",
+    "priceUsd": "0.000003824",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 4.04,
+     "h6": 4.04,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {},
+    "liquidity": {
+     "usd": 5461.99,
+     "base": 714055125,
+     "quote": 4.9735
+    },
+    "fdv": 3825,
+    "marketCap": 3825,
+    "pairCreatedAt": 1789455280000,
+    "info": {
+     "imageUrl": "https://cdn.dexscreener.com/cms/images/24vAIfj2aiPD2L8e?width=800&height=800&quality=95&format=auto",
+     "header": "https://cdn.dexscreener.com/cms/images/GiZC7PN6p5mN-Jp7?width=1500&height=500&quality=95&format=auto",
+     "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/F9JPcq4UvdUqwBfmfxyP1LDR5SG1GyhhbR8k5XFnA886?timestamp=1794326400000",
+     "websites": [
+      {
+       "url": "https://www.lukethemoonshot.com/",
+       "label": "Website"
+      },
+      {
+       "url": "https://www.stonkfun.xyz/token/F9JPcq4UvdUqwBfmfxyP1LDR5SG1GyhhbR8k5XFnA886",
+       "label": "My humble beginning"
+      }
+     ],
+     "socials": [
+      {
+       "url": "https://x.com/lukethemoonshot",
+       "type": "twitter"
+      }
+     ]
+    }
+   },
+   {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "url": "https://dexscreener.com/solana/8bbyjxhmx9knjhe5svvnc4cnthcnzvsagndal7w3tiej",
+    "pairAddress": "8bbYJXHmX9KnJhE5svVNc4CntHCNZvsagnDaL7W3TiEj",
+    "baseToken": {
+     "address": "JCV7ootnEcsha8QfrhknfVgpbvsvrvqFosxRPh9osfVj",
+     "name": "SP NEW MOONSHOT MASCOT",
+     "symbol": "MOONY"
+    },
+    "quoteToken": {
+     "address": "So11111111111111111111111111111111111111112",
+     "name": "Wrapped SOL",
+     "symbol": "SOL"
+    },
+    "priceNative": "0.00000000004929",
+    "priceUsd": "0.000000004056",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 1,
+      "sells": 1
+     },
+     "h6": {
+      "buys": 1,
+      "sells": 1
+     },
+     "h24": {
+      "buys": 1,
+      "sells": 1
+     }
+    },
+    "volume": {
+     "h24": 0,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h1": 15151,
+     "h6": 15151,
+     "h24": 15151
+    },
+    "liquidity": {
+     "usd": 0.44,
+     "base": 26886,
+     "quote": 0.005463
+    },
+    "fdv": 4,
+    "marketCap": 4,
+    "pairCreatedAt": 1747595755000
+   },
+   {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xd75a2c0be855ee59254f91da568628501f97335cd97c27dff2a42218451caf3c",
+    "pairAddress": "0xd75a2c0be855ee59254f91da568628501f97335cd97c27dff2a42218451caf3c",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x80306616E14a9B4564015c93dc0c70FC1b8268d6",
+     "name": "Moonshots on Robinhood",
+     "symbol": "Moonshots"
+    },
+    "quoteToken": {
+     "address": "0x0339f5459FC690aC85F1782e15782A151b4A9E1b",
+     "name": "Robinhood Wallet",
+     "symbol": "WALLET"
+    },
+    "priceNative": "0.0001656",
+    "priceUsd": "0.000001912",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 0,
+      "sells": 4
+     }
+    },
+    "volume": {
+     "h24": 10.31,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": -1.18
+    },
+    "liquidity": {
+     "usd": 637.64,
+     "base": 333333328,
+     "quote": 0.0008315
+    },
+    "fdv": 1911,
+    "marketCap": 1911,
+    "pairCreatedAt": 1790403007000
+   },
+   {
+    "chainId": "robinhood",
+    "dexId": "uniswap",
+    "url": "https://dexscreener.com/robinhood/0xcf56d9ef2b3b589c322835fa6896a30b6039d5dc65cdce76f132170616679edd",
+    "pairAddress": "0xcf56d9ef2b3b589c322835fa6896a30b6039d5dc65cdce76f132170616679edd",
+    "labels": [
+     "v4"
+    ],
+    "baseToken": {
+     "address": "0x80306616E14a9B4564015c93dc0c70FC1b8268d6",
+     "name": "Moonshots on Robinhood",
+     "symbol": "Moonshots"
+    },
+    "quoteToken": {
+     "address": "0x7FE995a80075dF3Dc8Ae11A9b82c7FE4202CD87f",
+     "name": "Thinking Cat",
+     "symbol": "HMM"
+    },
+    "priceNative": "0.0003015",
+    "priceUsd": "0.000001831",
+    "txns": {
+     "m5": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h1": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h6": {
+      "buys": 0,
+      "sells": 0
+     },
+     "h24": {
+      "buys": 4,
+      "sells": 0
+     }
+    },
+    "volume": {
+     "h24": 10.11,
+     "h6": 0,
+     "h1": 0,
+     "m5": 0
+    },
+    "priceChange": {
+     "h24": 0.87
+    },
+    "liquidity": {
+     "usd": 610.42,
+     "base": 327870037,
+     "quote": 1620.5088
+    },
+    "fdv": 1830,
+    "marketCap": 1830,
+    "pairCreatedAt": 1790403007000
+   }
+  ]
+ }
+}

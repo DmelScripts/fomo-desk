@@ -11,6 +11,10 @@ sqrt price before and after the same loop. context_slot is not a blockhash.
 from __future__ import annotations
 
 FEE_RATE_DENOMINATOR = 1_000_000
+# programs/whirlpool/src/math/token_math.rs at 2509ad9. update_fee_rate rejects a larger static rate.
+MAX_STATIC_FEE_RATE = 60_000
+# fee_rate_manager.rs. Adaptive totals are capped here. This quote refuses adaptive pools.
+FEE_RATE_HARD_LIMIT = 100_000
 BPS_DENOMINATOR = 10_000
 MIN_SQRT_PRICE = 4295048016
 MAX_SQRT_PRICE = 79226673515401279992447579055
@@ -27,6 +31,36 @@ _LOG_UPPER = 15793534762490258745
 class QuoteError(Exception):
     def __init__(self, category: str):
         self.category = category
+
+
+def exact_in_input_ceiling(amount: int) -> int:
+    """The fee of a successful exact-in cannot exceed the input.
+
+    compute_swap subtracts amount_in + fee_amount from amount_remaining.
+    A subtraction that does not fit is not a successful swap, so the fees
+    add to at most the input. It does not use the current fee rate.
+
+    Equality is not proven for a frozen route. A step that does not move
+    the price can set amount_in to 0, the fee to the whole remainder, and
+    the output to 0. programs/whirlpool/src/instructions/swap.rs at 2509ad9
+    returns AmountOutBelowMinimum when other_amount_threshold is greater
+    than that output. route_v2 does not encode other_amount_threshold or
+    sqrt_price_limit, so that step is not a successful execution of a
+    message with a positive minimum output, and it does not prove the fee
+    can equal the input on such a message.
+    """
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0 or amount >= 2**64:
+        raise QuoteError("spend_unbound")
+    return amount
+
+
+def crossing_step_fee(amount_in: int, fee_rate: int) -> int:
+    """ceil(amount_in * rate / (1_000_000 - rate)). The max-swap branch."""
+    if amount_in < 0 or not 0 <= fee_rate < FEE_RATE_DENOMINATOR:
+        raise QuoteError("fee_unbound")
+    if amount_in == 0 or fee_rate == 0:
+        return 0
+    return (amount_in * fee_rate + (FEE_RATE_DENOMINATOR - fee_rate) - 1) // (FEE_RATE_DENOMINATOR - fee_rate)
 
 
 def min_amount(amount: int, slippage_bps: int) -> int:
@@ -196,6 +230,7 @@ def _compute_swap(amount: int, sqrt_price_limit: int, pool: dict, arrays: list[d
         "trade_fee": fee,
         "sqrt_price": price,
         "amount_remaining": remaining,
+        "steps": steps,
     }
 
 

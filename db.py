@@ -285,6 +285,7 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA recursive_triggers=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
@@ -409,6 +410,10 @@ def init_db() -> None:
                 if column not in have:
                     conn.execute(ddl)
             conn.execute("PRAGMA user_version=11")
+        import owner_slippage
+        owner_slippage.apply_on_startup(conn)
+        if version < 12:
+            conn.execute("PRAGMA user_version=12")
         conn.commit()
     finally:
         conn.close()

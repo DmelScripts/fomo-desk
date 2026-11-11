@@ -1,0 +1,26 @@
+{
+  "binary": {"encoding": "hex", "data": []},
+  "parsed": [
+    {
+      "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+      "price": {
+        "price": "8301650000",
+        "conf": "7800000",
+        "expo": -8,
+        "publish_time": 1794360000
+      },
+      "ema_price": {
+        "price": "8301650000",
+        "conf": "7800000",
+        "expo": -8,
+        "publish_time": 1794360000
+      },
+      "metadata": {
+        "slot": 467780000,
+        "proof_available_time": 1794360000,
+        "prev_publish_time": 1794359999
+      },
+      "status": "trading"
+    }
+  ]
+}

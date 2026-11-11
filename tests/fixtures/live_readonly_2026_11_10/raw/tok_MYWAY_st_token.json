@@ -1,0 +1,226 @@
+{
+ "meta": {
+  "name": "tok_MYWAY_st_token",
+  "method": "GET",
+  "url": "https://data.solanatracker.io/tokens/tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+  "status": 200,
+  "latency_ms": 151,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:25+0700",
+  "fetched_unix": 1794326545.2630005,
+  "request_body": null
+ },
+ "body": {
+  "token": {
+   "name": "I said this way",
+   "symbol": "MYWAY",
+   "mint": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+   "decimals": 6,
+   "uri": "https://ipfs.io/ipfs/QmQ6sDLxcdJMZixzgTP19zA2C1AFHVSxsTgtJRwhJZ4K6P",
+   "createdOn": "https://pump.fun",
+   "description": "A Shiba with a route in mind. \nReaction pics for when you\u2019ve already picked yours. \nAn independent meme project inspired by Miton.",
+   "image": "https://image.solanatracker.io/proxy?url=https%3A%2F%2Fipfs-forward.solanatracker.io%2Fipfs%2FQmNMb9N4WgFfLk5uEJfof4z9eTrrC1y6egfcTGQ4fYusGA",
+   "showName": true,
+   "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540",
+   "hasFileMetaData": true,
+   "strictSocials": {
+    "tiktok": "https://www.tiktok.com/@yus161503/video/7702768162307083540",
+    "website": "https://www.tiktok.com/@yus161503/video/7702768162307083540"
+   },
+   "creation": {
+    "creator": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "created_tx": "31iM1sUVnjwrqZJzD8ynAENH97QFn7o76nD2VoQ8LSJyyfRTPbZYP2V8jjd2rjZhfzXSR2t8RZUa1jryxbHZHpNp",
+    "created_time": 1794149036
+   }
+  },
+  "pools": [
+   {
+    "poolId": "CV3MT2sZ4kfzc6GpBhw9esoz2dCfKkz5ZGS8uZP85p32",
+    "liquidity": {
+     "quote": 393.53693604,
+     "usd": 64760.1958547693
+    },
+    "price": {
+     "quote": 7.725512057097151e-06,
+     "usd": 0.000635652753373499
+    },
+    "tokenSupply": 987019430.250901,
+    "lpBurn": 100,
+    "tokenAddress": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "marketCap": {
+     "quote": 7625.230508992497,
+     "usd": 627401.6184721276
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "market": "pumpfun-amm",
+    "pumpfun-amm": {
+     "isMayhemMode": false,
+     "isCashbackCoin": false,
+     "isHolderReward": false,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "virtualQuoteReserves": "17582080311",
+     "effectiveQuoteTokenAmount": "393536936040",
+     "effectiveQuoteTokenUiAmount": "393.53693604"
+    },
+    "deployer": "7dfC8WCGpeSjd78ZuRddnQhNpbRYmEubjGHBeBbjCoH9",
+    "lastUpdated": 1794326541159,
+    "createdAt": 1794149036742,
+    "txns": {
+     "buys": 16217,
+     "sells": 13688,
+     "total": 29905,
+     "volume": 2091260,
+     "volume24h": 821282.8864658414
+    }
+   },
+   {
+    "poolId": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "liquidity": {
+     "quote": 0,
+     "usd": 0
+    },
+    "price": {
+     "quote": 0,
+     "usd": 0
+    },
+    "tokenSupply": 1000000000,
+    "lpBurn": 100,
+    "tokenAddress": "tx41eAXzN6jHH22LSgF7eSxpTNvJXwcbrcGsbDrpump",
+    "marketCap": {
+     "quote": 0,
+     "usd": 0
+    },
+    "decimals": 6,
+    "security": {
+     "freezeAuthority": null,
+     "mintAuthority": null
+    },
+    "quoteToken": "So11111111111111111111111111111111111111112",
+    "market": "pumpfun",
+    "deployer": "GPd7fqFxZQmGwZsGwQbFsW1zUvEPD2byUvMB63Cyp43J",
+    "pumpfun": {
+     "complete": true,
+     "isMayhemMode": false,
+     "isHolderReward": false,
+     "isCashbackCoin": false,
+     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+     "quoteMint": "So11111111111111111111111111111111111111112",
+     "quoteDepth": 0
+    },
+    "curvePercentage": 100,
+    "curve": "Dj9rrzwD7NDvDDYSvjtPxmqfNZzhkTrRVvsDm94NsAfF",
+    "lastUpdated": 1794313942711,
+    "createdAt": 1794149036685,
+    "txns": {
+     "buys": 13,
+     "sells": 0,
+     "total": 13,
+     "volume": 4915,
+     "volume24h": 0
+    }
+   }
+  ],
+  "events": {
+   "1m": {
+    "priceChangePercentage": -0.2691854661412288
+   },
+   "5m": {
+    "priceChangePercentage": -0.7661310509321899
+   },
+   "15m": {
+    "priceChangePercentage": -3.3112424663668865
+   },
+   "30m": {
+    "priceChangePercentage": 0.45396490670790557
+   },
+   "1h": {
+    "priceChangePercentage": 6.297518328201828
+   },
+   "2h": {
+    "priceChangePercentage": 5.5725080668943345
+   },
+   "3h": {
+    "priceChangePercentage": -64.34320855322841
+   },
+   "4h": {
+    "priceChangePercentage": -63.123351257226275
+   },
+   "5h": {
+    "priceChangePercentage": -61.5377938629857
+   },
+   "6h": {
+    "priceChangePercentage": -52.978107037259214
+   },
+   "12h": {
+    "priceChangePercentage": -12.127472402176366
+   },
+   "24h": {
+    "priceChangePercentage": -2.221188341508728
+   }
+  },
+  "risk": {
+   "snipers": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "insiders": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "bundlers": {
+    "count": 0,
+    "totalBalance": 0,
+    "totalPercentage": 0,
+    "wallets": []
+   },
+   "top10": 2.6702999999999997,
+   "dev": {
+    "percentage": 0,
+    "amount": 0
+   },
+   "fees": {
+    "helius-sender": 0.020075,
+    "network": 0.12571973,
+    "jito": 0.085397227,
+    "gmgn": 0.0809314728873848,
+    "axiom": 0.089869903,
+    "pumpfun-app": 0.04980083735239649,
+    "astralane": 0.00895167,
+    "padre": 0.013434722,
+    "0slot": 0.0003,
+    "nozomi": 0.0012,
+    "fomo": 0.1271524119513489,
+    "maestro": 0.095965302,
+    "photon": 0.015211402,
+    "trojan": 0.008387135,
+    "bloxroute": 0.0022251,
+    "totalTrading": 0.4807531861911302,
+    "totalTips": 0.243868727,
+    "total": 0.7246219131911302
+   },
+   "rugged": false,
+   "risks": [
+    {
+     "name": "No social media",
+     "description": "This token has no social media links",
+     "level": "warning",
+     "score": 2000
+    }
+   ],
+   "score": 2
+  },
+  "buys": 16217,
+  "sells": 13688,
+  "txns": 29905,
+  "holders": 6444
+ }
+}

@@ -1,0 +1,430 @@
+{
+  "kind": "OBSERVED_MCP_FIXTURE_ONLY",
+  "mint": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+  "requests": {
+    "onchain": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
+    },
+    "deployer": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump"
+    },
+    "early_buyers": {
+      "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "limit": 5
+    },
+    "holder_quality": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana",
+      "limit": 2
+    },
+    "snapshot": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana",
+      "holdersLimit": 3
+    },
+    "stats": {
+      "address": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+      "chain": "solana"
+    }
+  },
+  "responses": {
+    "onchain": {
+      "data": {
+        "mint": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+        "name": "GTA6GLITCH",
+        "symbol": "GATOGLITCH",
+        "imageUrl": "https://cdn.dexscreener.com/cms/images/EZ1_dFT3IlPDlR9F?width=800&height=800&quality=95&format=auto",
+        "holdersTotal": 1588,
+        "supply": 977156443.107262,
+        "lpBurnedPercent": 91,
+        "mainPoolMarket": "pumpfun-amm",
+        "mintAuthorityActive": false,
+        "freezeAuthorityActive": false,
+        "deployer": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+        "createdAt": "2026-11-08T06:11:39.000Z",
+        "ageDays": 0,
+        "priceUsd": 0.0003207,
+        "marketCapUsd": 320700,
+        "fdvUsd": 320700,
+        "marketCapBasis": "fully diluted",
+        "marketCapSource": "live DEX pools + market index",
+        "liquidityUsd": 93917.08,
+        "concentration": {
+          "top10Percent": 13.43,
+          "devPercent": 0.38
+        },
+        "launch": {
+          "sniperCount": 0,
+          "sniperPercent": 0,
+          "insiderCount": 0,
+          "insiderPercent": 0
+        },
+        "risk": {
+          "score": 4,
+          "rugged": false,
+          "verified": false,
+          "flags": [
+            {
+              "name": "Top 10 Holders",
+              "level": "danger",
+              "description": "Top 10 holders own more than 13.43% of the total supply."
+            }
+          ]
+        },
+        "flow24h": {
+          "volumeUsd": 809537.96,
+          "organicVolumeUsd": 3222.97,
+          "organicSharePct": 0.4,
+          "buys": 5651,
+          "sells": 4494,
+          "traders": 2265,
+          "source": "routing provider"
+        },
+        "priceChangePercent": {
+          "1m": 8.12,
+          "5m": -4.09,
+          "15m": 45.97,
+          "30m": 401.13,
+          "1h": 401.13,
+          "2h": 401.13,
+          "3h": 401.13,
+          "4h": 401.13,
+          "5h": 401.13,
+          "6h": 401.13,
+          "12h": 401.13,
+          "24h": 401.13
+        }
+      },
+      "notes": [
+        "Only 91% of the liquidity pool is burned; the rest can be pulled.",
+        "Only 0.4% of the 24h volume ($3k of $810k) comes from organic traders: the rest is bots (arbitrage, MEV and wash trading), so the volume overstates demand."
+      ]
+    },
+    "deployer": {
+      "data": {
+        "deployer": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+        "launchedToken": "GATOGLITCH",
+        "tokensLaunched": 1,
+        "graduated": 1,
+        "stillLiquid": 1,
+        "tokens": [
+          {
+            "mint": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+            "symbol": "GATOGLITCH",
+            "liquidityUsd": 95006.31,
+            "marketCapUsd": 345785.82,
+            "lpBurnedPercent": 91,
+            "hasSocials": true
+          }
+        ]
+      },
+      "notes": [
+        "This is the only token this wallet has launched."
+      ]
+    },
+    "early_buyers": {
+      "data": {
+        "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+        "firstBuyersAnalysed": 100,
+        "fullyExited": 84,
+        "statusCounts": {
+          "holding": 2,
+          "trimmed": 14,
+          "exited": 84
+        },
+        "bundlers": {
+          "wallets": 1,
+          "heldAtLaunchPercent": 0.45,
+          "heldNowPercent": 0
+        },
+        "snipers": {
+          "wallets": 0,
+          "boughtPercent": 0,
+          "heldNowPercent": 0,
+          "blocks": 3
+        },
+        "launch": {
+          "signature": "qTB1RF7cDQUEPU6C8sd629ZtgJesKorevjnPgbdBxiVfsP5SSWNqH59bKBYj1fop5SajtGzyyj8gKhnBoCnPVVb",
+          "slot": 466809652,
+          "at": "2026-11-08T06:11:39.000Z",
+          "deployer": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+          "devBuyPercent": 9.87,
+          "buys": [
+            {
+              "wallet": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+              "block": 0,
+              "tokens": 96435739.58,
+              "signature": "qTB1RF7cDQUEPU6C8sd629ZtgJesKorevjnPgbdBxiVfsP5SSWNqH59bKBYj1fop5SajtGzyyj8gKhnBoCnPVVb",
+              "supplyPercent": 9.87,
+              "holdsNowPercent": 0.39,
+              "deployer": true
+            },
+            {
+              "wallet": "7HXLZBRkMMJQEVUpNYmghAFwDeFAnZGeCzfBuGeYXtoB",
+              "block": 0,
+              "tokens": 4369475.99,
+              "signature": "Wm9ThoWGbH857p9P4cD7T3QN1Nshu8zyVC7JjfUTaxNzpAgRYcXDgEGtCRm7xuNFnNhsR53pLfed6Zq3cdqhwkn",
+              "supplyPercent": 0.45,
+              "holdsNowPercent": 0,
+              "deployer": false
+            }
+          ]
+        },
+        "launchFunding": {
+          "checked": 50,
+          "fresh": 3,
+          "viaHops": 0,
+          "fromExchanges": 1,
+          "sharedFunders": [],
+          "pattern": "organic"
+        },
+        "buyers": [
+          {
+            "wallet": "5JeEemUcQK7tbiwPvAur3fmCCtkmdnCiYoJNQFDmk6rA",
+            "firstBuyAt": "2026-11-08T06:11:39.000Z",
+            "status": "holding",
+            "soldPercent": 0,
+            "stillHolding": true,
+            "investedUsd": 263.98,
+            "realizedUsd": 0,
+            "unrealizedUsd": 35482.7,
+            "totalPnlUsd": 35482.7,
+            "transactions": 1
+          },
+          {
+            "wallet": "7HXLZBRkMMJQEVUpNYmghAFwDeFAnZGeCzfBuGeYXtoB",
+            "firstBuyAt": "2026-11-08T06:11:39.000Z",
+            "status": "exited",
+            "soldPercent": 100,
+            "stillHolding": false,
+            "investedUsd": 13.3,
+            "realizedUsd": -0.27,
+            "unrealizedUsd": 0,
+            "totalPnlUsd": -0.27,
+            "transactions": 2
+          },
+          {
+            "wallet": "Hy2xhLDgcrxcfqFqC4ksJmmGhzkJYGjgCDh6nQjKB6Zu",
+            "firstBuyAt": "2026-11-08T06:11:51.000Z",
+            "status": "exited",
+            "soldPercent": 100,
+            "stillHolding": false,
+            "investedUsd": 2813.53,
+            "realizedUsd": 374.67,
+            "unrealizedUsd": 0,
+            "totalPnlUsd": 374.67,
+            "transactions": 286
+          },
+          {
+            "wallet": "CMbGuL3wss2jLTsPa4pt9ejbCSkLaLZmCGn6f7YjmZv2",
+            "firstBuyAt": "2026-11-08T06:11:51.000Z",
+            "status": "exited",
+            "soldPercent": 100,
+            "stillHolding": false,
+            "investedUsd": 2823.35,
+            "realizedUsd": 378.49,
+            "unrealizedUsd": 0,
+            "totalPnlUsd": 378.49,
+            "transactions": 286
+          },
+          {
+            "wallet": "7Sen4RzsL7X8142ywwey7wfGTzzSBzci3ezRGAK2qfT8",
+            "firstBuyAt": "2026-11-08T06:11:51.000Z",
+            "status": "exited",
+            "soldPercent": 100,
+            "stillHolding": false,
+            "investedUsd": 2852.77,
+            "realizedUsd": 394.01,
+            "unrealizedUsd": 0,
+            "totalPnlUsd": 394.01,
+            "transactions": 286
+          }
+        ]
+      },
+      "notes": [
+        "1 wallet bought in the launch block itself, beside the deployer's own 9.87%, taking 0.45% of supply: a launch bundle; they have sold all of it.",
+        "84 of the first 100 buyers have fully exited."
+      ]
+    },
+    "holder_quality": {
+      "data": {
+        "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+        "trackedHolders": 100,
+        "scored": 2,
+        "averageWinRatePct": 16,
+        "holders": [
+          {
+            "handle": "aledjjs",
+            "userId": null,
+            "valueUsd": 1824,
+            "amount": 5260410.15,
+            "winRatePct": 0,
+            "closedSampled": 18,
+            "wins": 0,
+            "losses": 18,
+            "realizedPnlUsdSampled": -1473,
+            "medianHoldHours": 0.1
+          },
+          {
+            "handle": "SoreFirmLark",
+            "userId": null,
+            "valueUsd": 1001,
+            "amount": 2886892.35,
+            "winRatePct": 32,
+            "closedSampled": 25,
+            "wins": 8,
+            "losses": 17,
+            "realizedPnlUsdSampled": -1230,
+            "medianHoldHours": 0.2
+          }
+        ]
+      }
+    },
+    "snapshot": {
+      "data": {
+        "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+        "capturedAt": "2026-11-08T06:56:01.771Z",
+        "priceUsd": 0.0003615,
+        "marketCapUsd": 361500,
+        "totalHolders": 1377,
+        "top10HoldersPercent": 14.922103766445538,
+        "trackedHolderCount": 3,
+        "trackedHolders": [
+          {
+            "handle": "aledjjs",
+            "amount": 5260410.15,
+            "valueUsd": 1824.05
+          },
+          {
+            "handle": "SoreFirmLark",
+            "amount": 2886892.35,
+            "valueUsd": 1001.03
+          },
+          {
+            "handle": "LuckyLynx",
+            "amount": 2386772.64,
+            "valueUsd": 827.614
+          }
+        ],
+        "flow24h": {
+          "buys": 2136,
+          "sells": 1607,
+          "uniqueBuyers": 1095,
+          "uniqueSellers": 731,
+          "buyVolumeUsd": 114431.48508740998,
+          "sellVolumeUsd": 100522.16152045445,
+          "netVolumeUsd": 13909.323566955529,
+          "buySellRatio": 1.329
+        }
+      }
+    },
+    "stats": {
+      "data": {
+        "token": "CdmzERuZnYQwqwa2rxtRjsMjDU6y6qrM5ez6n2mxpump",
+        "networkId": 1399811149,
+        "holders": 1377,
+        "top10HoldersPercent": 14.922103766445538,
+        "lowFees": false,
+        "windows": {
+          "5m": {
+            "buys": 882,
+            "sells": 665,
+            "uniqueBuyers": 374,
+            "uniqueSellers": 260,
+            "buyVolumeUsd": 53083.39507685009,
+            "sellVolumeUsd": 50814.74589475056,
+            "netVolumeUsd": 2268.649182099529,
+            "buySellRatio": 1.326
+          },
+          "1h": {
+            "buys": 2136,
+            "sells": 1607,
+            "uniqueBuyers": 1095,
+            "uniqueSellers": 731,
+            "buyVolumeUsd": 114431.48508740998,
+            "sellVolumeUsd": 100522.16152045445,
+            "netVolumeUsd": 13909.323566955529,
+            "buySellRatio": 1.329
+          },
+          "4h": {
+            "buys": 2136,
+            "sells": 1607,
+            "uniqueBuyers": 1095,
+            "uniqueSellers": 731,
+            "buyVolumeUsd": 114431.48508740998,
+            "sellVolumeUsd": 100522.16152045445,
+            "netVolumeUsd": 13909.323566955529,
+            "buySellRatio": 1.329
+          },
+          "24h": {
+            "buys": 2136,
+            "sells": 1607,
+            "uniqueBuyers": 1095,
+            "uniqueSellers": 731,
+            "buyVolumeUsd": 114431.48508740998,
+            "sellVolumeUsd": 100522.16152045445,
+            "netVolumeUsd": 13909.323566955529,
+            "buySellRatio": 1.329
+          }
+        },
+        "chain": "solana",
+        "organic24h": {
+          "volumeUsd": 824319.88,
+          "organicVolumeUsd": 3343.21,
+          "organicSharePct": 0.4,
+          "buys": 5758,
+          "sells": 4582,
+          "traders": 2296,
+          "source": "routing provider"
+        }
+      },
+      "notes": [
+        "Only 0.4% of the 24h volume ($3k of $824k) comes from organic traders: the rest is bots (arbitrage, MEV and wash trading), so the volume overstates demand."
+      ]
+    }
+  },
+  "sources": {
+    "onchain": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/bd676f96d6f7b80a4a9b02e081df57a04b95f2f8e8ee415d18dfa02736f59ae2.txt",
+      "sha256": "bd676f96d6f7b80a4a9b02e081df57a04b95f2f8e8ee415d18dfa02736f59ae2",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "deployer": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/9d0b83d265491a3a1f50d28c9e5c062d922ca0a5de4dbcac4e89c23847f7c94d.txt",
+      "sha256": "9d0b83d265491a3a1f50d28c9e5c062d922ca0a5de4dbcac4e89c23847f7c94d",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "early_buyers": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/64600908f9582664247259895a4d5dad36c873150ee7a150ce54e36d20337af2.txt",
+      "sha256": "64600908f9582664247259895a4d5dad36c873150ee7a150ce54e36d20337af2",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "holder_quality": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/f3a3d7fdd93397ed936f9fda900d97d11854b41996b16e656db7d5b655085209.txt",
+      "sha256": "f3a3d7fdd93397ed936f9fda900d97d11854b41996b16e656db7d5b655085209",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "snapshot": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/7e94efca4f718d7f5cf086b533af8cc5430073616f04b182c0d25328c015c83d.txt",
+      "sha256": "7e94efca4f718d7f5cf086b533af8cc5430073616f04b182c0d25328c015c83d",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": "2026-11-08T13:56:01.771+07:00",
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    },
+    "stats": {
+      "raw_file": "/cursor/stores/user/grok-bot/agents/a4f493bd-f252-41cf-b451-9705499d0e30/assets/e66dc41eb1fad355d9f9075422dc708dc845b398fcf0e1123daab03342e43e42.txt",
+      "sha256": "e66dc41eb1fad355d9f9075422dc708dc845b398fcf0e1123daab03342e43e42",
+      "transport": "OBSERVED installed user-Fomo MCP result, JSON inside saved tool wrapper",
+      "timestamp": null,
+      "timestamp_note": "snapshot capturedAt is source timestamp; other files lack response capturedAt. Prior run completed13:56:30Vietnam; do not treat token createdAt/launch.at as response freshness."
+    }
+  }
+}

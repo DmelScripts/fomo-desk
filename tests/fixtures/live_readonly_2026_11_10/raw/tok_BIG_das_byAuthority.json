@@ -1,0 +1,33 @@
+{
+ "meta": {
+  "name": "tok_BIG_das_byAuthority",
+  "method": "POST",
+  "url": "https://mainnet.helius-rpc.com/?api-key=REDACTED",
+  "status": 200,
+  "latency_ms": 159,
+  "rate_headers": {},
+  "fetched_local": "2026-11-10T23:02:02+0700",
+  "fetched_unix": 1794326522.7306824,
+  "request_body": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "getAssetsByAuthority",
+   "params": {
+    "authorityAddress": "3gGYvne8RDn7wXca7tuejFoh46hP9wnofQy649DFRbYR",
+    "page": 1,
+    "limit": 20
+   }
+  }
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "result": {
+   "last_indexed_slot": 467780431,
+   "total": 0,
+   "limit": 20,
+   "page": 1,
+   "items": []
+  },
+  "id": 1
+ }
+}
