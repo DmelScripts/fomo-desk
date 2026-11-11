@@ -417,6 +417,8 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+    import spend_policy
+    spend_policy.record_loss_policy()
 
 
 def execute(sql: str, params: tuple = ()) -> None:
