@@ -95,13 +95,9 @@ def _exchange_once(url: str, data: bytes, timeout: float, headers: dict | None, 
         return None, {"status": status if type(status) is int else 0, "body": None}
     if max_bytes is not None and len(raw) > max_bytes:
         return "body", None
-    parsed = None
-    bad = False
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except Exception:
-        bad = True
-    if bad or not isinstance(parsed, dict):
         return "rpc_bad_json", None
     return None, {"status": 200, "body": parsed}
 
@@ -155,13 +151,17 @@ def call(payload: dict) -> dict:
         raise RpcRefused("helius_api_key_missing")
     posted = post(payload)
     status = posted.get("status")
+    body = posted.get("body")
+    reason = None
     if type(status) is not int or status != 200:
         code = status if type(status) is int else 0
-        raise RpcRefused("rpc_http_%s" % code)
-    body = posted.get("body")
-    if not isinstance(body, dict):
-        raise RpcRefused("rpc_bad_json")
-    return body
+        reason = "rpc_http_%s" % code
+    elif not isinstance(body, dict):
+        reason = "rpc_bad_json"
+    else:
+        return body
+    del posted, body, status
+    _refuse(reason)
 
 
 def _wire_url() -> str:

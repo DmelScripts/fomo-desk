@@ -103,10 +103,22 @@ def shutdown() -> None:
     _LAST.clear()
 
 
+def _fail(reason: str):
+    """Raise after every keyed frame has returned. This frame holds only the reason code."""
+    raise cross_source.FetchFailed(reason)
+
+
 def production_fetch(kind, mint, pair_id=None):
     _start_decision()
     if not _safe_address(mint):
-        raise cross_source.FetchFailed("mint")
+        _fail("mint")
+    reason, body = _fetch(kind, mint, pair_id)
+    if reason:
+        _fail(reason)
+    return body
+
+
+def _fetch(kind, mint, pair_id=None):
     if kind == "dex":
         # token-pairs/v1 returns a JSON array of pair objects. The saved
         # dex_pair files are the other endpoint, latest/dex/pairs, whose body
@@ -120,60 +132,83 @@ def production_fetch(kind, mint, pair_id=None):
     if kind == "holders_chart":
         return _json("solana_tracker", "GET", "https://data.solanatracker.io/holders/chart/" + mint, _tracker())
     if kind == "deployer":
-        creator = _creator(mint)
+        reason, creator = _creator(mint)
+        if reason:
+            return reason, None
         return _json("solana_tracker", "GET", "https://data.solanatracker.io/deployer/" + creator, _tracker())
     if kind == "das":
-        creator = _creator(mint)
+        reason, creator = _creator(mint)
+        if reason:
+            return reason, None
         return _json("helius", "POST", "https://mainnet.helius-rpc.com/", _helius(), _das_body(creator))
-    raise cross_source.FetchFailed("provider_unparsed")
+    return "provider_unparsed", None
 
 
 def fetch_hermes(now: float) -> dict:
-    """One Hermes SOL/USD read. A 401 or 403 is price_unknown. No on-chain substitute."""
+    """One Hermes SOL/USD read. A 401 or a 403 is price_unknown. No on-chain substitute."""
     _start_decision()
     if not _present("PYTH_API_KEY"):
         return {"ok": False, "reason": "price_unknown", "cause": "pyth_api_key_missing", "onchain_substituted": False, "live": False}
+    status, body, reason = _exchange("hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None)
+    if reason:
+        return _hermes_stopped(reason)
+    priced = pyth_sponsored.read_hermes_response({"status": status, "body": body}, now)
+    if priced.get("ok") is not True:
+        cause = priced.get("cause") if type(priced.get("cause")) is str else "hermes_unparsed"
+        _hermes_stopped(cause)
+    return priced
+
+
+def _hermes_stopped(reason: str) -> dict:
     try:
-        status, body = _exchange("hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None)
+        _fail(reason)
     except cross_source.FetchFailed as exc:
-        return {"ok": False, "reason": "price_unknown", "cause": exc.reason, "onchain_substituted": False, "live": False}
-    return pyth_sponsored.read_hermes_response({"status": status, "body": body}, now)
+        cause = exc.reason
+    return {"ok": False, "reason": "price_unknown", "cause": cause, "onchain_substituted": False, "live": False}
 
 
 def _json(provider: str, method: str, url: str, headers: dict, payload=None):
-    status, body = _exchange(provider, method, url, headers, payload)
+    status, body, reason = _exchange(provider, method, url, headers, payload)
+    if reason:
+        return reason, None
     if status == 403:
-        raise cross_source.FetchFailed("hermes_unauthorized" if provider == "hermes" else provider + "_forbidden")
+        return ("hermes_unauthorized" if provider == "hermes" else provider + "_forbidden"), None
     if status == 429:
-        raise cross_source.FetchFailed(provider + "_rate_limited")
+        return provider + "_rate_limited", None
     if status != 200:
-        raise cross_source.FetchFailed(provider + "_status")
+        return provider + "_status", None
     if provider == "dexscreener" and "/token-pairs/v1/" in url and isinstance(body, list):
         if any(type(item) is not dict for item in body):
-            raise cross_source.FetchFailed("dexscreener_unparsed")
-        return {"pairs": body}
+            return "dexscreener_unparsed", None
+        return None, {"pairs": body}
     if type(body) is not dict:
-        raise cross_source.FetchFailed(provider + "_unparsed")
-    return body
+        return provider + "_unparsed", None
+    return None, body
 
 
 def _exchange(provider: str, method: str, url: str, headers: dict, payload):
-    _pace(provider)
+    """One provider call. Failures are reason strings. This frame does not raise."""
+    try:
+        _pace(provider)
+    except cross_source.FetchFailed as exc:
+        return None, None, exc.reason
     spec = {"provider": provider, "method": method, "url": url, "headers": dict(headers), "json": payload}
     try:
         if callable(_TRANSPORT):
             result = _TRANSPORT(spec)
         else:
             result = _urllib(spec)
-    except cross_source.FetchFailed:
-        raise
+    except cross_source.FetchFailed as exc:
+        return None, None, exc.reason
     except TimeoutError:
-        raise cross_source.FetchFailed(provider + "_timeout") from None
+        return None, None, provider + "_timeout"
     except Exception:
-        raise cross_source.FetchFailed(provider + "_status") from None
+        return None, None, provider + "_status"
+    if isinstance(result, dict) and set(result) == {"_reason"} and type(result.get("_reason")) is str:
+        return None, None, result["_reason"]
     if not isinstance(result, dict) or type(result.get("status")) is not int:
-        raise cross_source.FetchFailed(provider + "_unparsed")
-    return result.get("status"), result.get("body")
+        return None, None, provider + "_unparsed"
+    return result.get("status"), result.get("body"), None
 
 
 def _urllib(spec: dict) -> dict:
@@ -184,23 +219,20 @@ def _urllib(spec: dict) -> dict:
     if isinstance(key, str) and key != "":
         import solana_rpc
         keyed = url + "?api-key=" + key
-        reason = None
-        try:
-            return solana_rpc.exchange(keyed, data or b"", timeout=_remaining(), headers=headers)
-        except solana_rpc.RpcRefused as exc:
-            reason = exc.reason
-        del keyed, key, data, url
-        if reason == "rpc_bad_json":
-            raise cross_source.FetchFailed("rpc_bad_json")
-        if reason == "rpc_timeout":
-            raise cross_source.FetchFailed(spec["provider"] + "_timeout")
-        raise cross_source.FetchFailed(spec["provider"] + "_status")
+        transport_reason, result = solana_rpc._exchange_once(keyed, data or b"", _remaining(), headers, None)
+        if transport_reason == "rpc_bad_json":
+            return {"_reason": "rpc_bad_json"}
+        if transport_reason == "rpc_timeout":
+            return {"_reason": spec["provider"] + "_timeout"}
+        if transport_reason:
+            return {"_reason": spec["provider"] + "_status"}
+        return result
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
     status, raw = _read(request, _remaining())
     if status == "timeout":
-        raise cross_source.FetchFailed(spec["provider"] + "_timeout")
+        return {"_reason": spec["provider"] + "_timeout"}
     if type(status) is not int:
-        raise cross_source.FetchFailed(spec["provider"] + "_status")
+        return {"_reason": spec["provider"] + "_status"}
     parsed = None
     if isinstance(raw, (bytes, bytearray)) and raw:
         try:
@@ -259,14 +291,16 @@ def _remaining() -> float:
     return max(0.001, deadline - _NOW())
 
 
-def _creator(mint: str) -> str:
-    body = _json("solana_tracker", "GET", "https://data.solanatracker.io/tokens/" + mint, _tracker())
+def _creator(mint: str):
+    reason, body = _json("solana_tracker", "GET", "https://data.solanatracker.io/tokens/" + mint, _tracker())
+    if reason:
+        return reason, None
     token = body.get("token") if isinstance(body.get("token"), dict) else {}
     creation = token.get("creation") if isinstance(token.get("creation"), dict) else {}
     creator = creation.get("creator")
     if not _safe_address(creator):
-        raise cross_source.FetchFailed("solana_tracker_unparsed")
-    return creator
+        return "solana_tracker_unparsed", None
+    return None, creator
 
 
 def _das_body(creator: str) -> dict:

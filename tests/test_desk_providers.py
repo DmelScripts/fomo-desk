@@ -249,14 +249,17 @@ class DeskProviderTests(unittest.TestCase):
         urllib.request.urlopen = boom
         self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
         desk_providers.set_transport(None)
+        result = desk_providers._urllib({
+            "provider": "helius",
+            "method": "POST",
+            "url": "https://mainnet.helius-rpc.com/",
+            "headers": {"Accept": "application/json", "User-Agent": "fomo-desk/1.0", "_helius_key": key},
+            "json": {"method": "getAssetsByCreator"},
+        })
+        self.assertEqual(result.get("_reason"), "helius_status")
+        self.assertNotIn(key, repr(result))
         with self.assertRaises(cross_source.FetchFailed) as caught:
-            desk_providers._urllib({
-                "provider": "helius",
-                "method": "POST",
-                "url": "https://mainnet.helius-rpc.com/",
-                "headers": {"Accept": "application/json", "User-Agent": "fomo-desk/1.0", "_helius_key": key},
-                "json": {"method": "getAssetsByCreator"},
-            })
+            desk_providers._fail(result["_reason"])
         text = "".join(traceback.format_exception(caught.exception))
         self.assertNotIn(key, text)
         self.assertNotIn(key, repr(caught.exception))
