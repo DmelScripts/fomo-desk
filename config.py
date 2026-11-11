@@ -18,7 +18,7 @@ DESK_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 DESK_ROOT = Path(__file__).resolve().parent
 SETTINGS_SEED_PATH = DESK_ROOT / "settings.seed.json"
 SECRETS_ENV_PATH = Path.home() / ".desk-secrets" / "env"
-DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com"
+DEFAULT_RPC_URL = "https://mainnet.helius-rpc.com"
 
 SECRET_KEYS = (
     "TYPESAFE_API_KEY",
@@ -81,7 +81,7 @@ SETTINGS_DEFAULTS = {
     "report_time": "08:00",
     # Telegram was skipped. New databases use the channel that actually sends.
     "notifier": "webpush",
-    "rpc_url": "https://api.mainnet-beta.solana.com",
+    "rpc_url": "https://mainnet.helius-rpc.com",
     "push_rejects": "false",
     "fees_ref_discount": "0.10",
     "risk.poll_s": "15",

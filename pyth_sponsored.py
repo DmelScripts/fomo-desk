@@ -42,7 +42,7 @@ SOL_FEED = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
 USDC_FEED = usdc_valuation.FEED_ID
 SOL_ACCOUNT = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
 USDC_ACCOUNT = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
-RPC = "https://api.mainnet-beta.solana.com"
+RPC = "https://mainnet.helius-rpc.com"
 _LAST = None
 
 
@@ -545,14 +545,9 @@ def public_fetch(now: float) -> dict:
             "params": [request["accounts"], {"encoding": "base64", "commitment": "confirmed"}],
         }
 
-        class _NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-
-        opener = urllib.request.build_opener(_NoRedirect)
+        import solana_rpc
         try:
-            with opener.open(urllib.request.Request(RPC, data=json.dumps(payload).encode(), headers={"content-type": "application/json"}), timeout=8) as response:
-                return {"status": response.status, "body": json.loads(response.read().decode())}
-        except urllib.error.HTTPError as exc:
-            return {"status": exc.code, "body": None}
+            return solana_rpc.post(payload)
+        except solana_rpc.RpcRefused as exc:
+            raise RuntimeError(exc.reason) from None
     return read_accounts(transport, now)

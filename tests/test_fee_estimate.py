@@ -113,6 +113,8 @@ class FeeEstimateTests(unittest.TestCase):
         _tmp, restore = temp_desk_env()
         self.addCleanup(restore)
         os.environ.pop("STALKCHAIN_API_KEY", None)
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
         db.init_db()
         memecoin_desk._ensure()
         pyth_sponsored._LAST = None
@@ -1261,8 +1263,10 @@ class FeeEstimateTests(unittest.TestCase):
             "SELECT verdict, reason, evidence_json FROM memecoin_log WHERE case_id = 'sim-case' AND stage = 'preflight' ORDER BY ts"
         )
         self.assertEqual(logged[-1]["verdict"], "pass")
-        self.assertIn("api.mainnet-beta.solana.com", logged[-1]["evidence_json"])
-        self.assertIn("configured_rpc", logged[-1]["evidence_json"])
+        self.assertIn("mainnet.helius-rpc.com", logged[-1]["evidence_json"])
+        self.assertIn("\"rpc_provider\": \"helius\"", logged[-1]["evidence_json"])
+        self.assertNotIn("test-helius-not-a-secret", logged[-1]["evidence_json"])
+        self.assertNotIn("api-key=", logged[-1]["evidence_json"])
 
         def expect(body, cause, boom=None):
             result = run(body, boom)
@@ -1297,18 +1301,23 @@ class FeeEstimateTests(unittest.TestCase):
                 calls["n"] += 1
             return self._transport(accounts)(request)
 
-        db.set_setting("rpc_url", "https://mainnet.helius-rpc.com", "test")
+        os.environ.pop("HELIUS_API_KEY", None)
         missed = desk_loop.approach_signer("sim-case", digest, counting, NOW, auth)
         self.assertEqual(missed["reason"], "helius_api_key_missing", missed)
         self.assertEqual(calls["n"], 0)
         self.assertFalse(missed["signer_reached"])
-        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
-        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
-        held = run(saved)
-        self.assertTrue(held["preflight_ready"], held)
+        self.assertFalse(missed["sign"])
+        self.assertFalse(missed["live_ready"])
+        db.set_setting("rpc_url", "https://override.example/solana", "test")
+        overridden = run(saved)
+        self.assertTrue(overridden["preflight_ready"], overridden)
+        self.assertFalse(overridden["sign"])
+        self.assertFalse(overridden["send"])
+        self.assertFalse(overridden["live_ready"])
         fresh = db.query(
             "SELECT evidence_json FROM memecoin_log WHERE case_id = 'sim-case' AND stage = 'preflight' ORDER BY ts"
         )[-1]["evidence_json"]
-        self.assertNotIn("test-helius-not-a-secret", fresh)
-        self.assertIn("helius", fresh)
+        self.assertIn("override.example", fresh)
+        self.assertIn("configured_rpc", fresh)
         self.assertNotIn("api-key=", fresh)
+        self.assertNotIn("test-helius-not-a-secret", fresh)

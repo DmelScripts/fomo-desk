@@ -1,8 +1,8 @@
 """Read-only Solana JSON-RPC for the canonical SOL/USDC pool.
 
-Reads stay off until solana_read_enabled is set and rpc_url is the official
+Reads stay off until solana_read_enabled is set and rpc_url is the Helius
 mainnet endpoint. The client allows documented read methods only. It does not
-send a transaction, follow a redirect, or attach a cookie, token, or session.
+send a transaction, follow a redirect, or fall back to public mainnet.
 """
 
 from __future__ import annotations
@@ -12,9 +12,10 @@ import time
 import db
 import solana_direct_swap
 import solana_inspect
+import solana_rpc
 import solana_tx
 
-ALLOWED_URL = solana_inspect.MAINNET_RPC
+ALLOWED_URL = solana_rpc.HELIUS_RPC
 MAINNET_GENESIS = solana_inspect.MAINNET_GENESIS
 READ_KEY = "solana_read_enabled"
 MAX_CALLS = 9
@@ -102,22 +103,25 @@ def configured_reader() -> ReadRpc | None:
 
 
 def http_transport(payload: dict) -> dict:
-    """POST the official endpoint once. Redirects and cookies are not used."""
+    """POST the configured endpoint once. Redirects and cookies are not used."""
     import httpx
     if not isinstance(payload, dict) or payload.get("method") not in METHODS:
         raise RpcError("method_refused")
+    info = solana_rpc.describe()
+    if info["ok"] is not True:
+        raise RpcError("helius_api_key_missing")
     try:
         response = httpx.post(
-            ALLOWED_URL,
+            solana_rpc._wire_url(),
             json=payload,
             timeout=httpx.Timeout(TIMEOUT_S, connect=4.0),
             follow_redirects=False,
             headers={"content-type": "application/json", "accept": "application/json"},
         )
-    except httpx.TimeoutException as exc:
-        raise RpcError("timeout") from exc
-    except httpx.HTTPError as exc:
-        raise RpcError("transport") from exc
+    except httpx.TimeoutException:
+        raise RpcError("timeout") from None
+    except httpx.HTTPError:
+        raise RpcError("transport") from None
     if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
         raise RpcError("redirect")
     if response.status_code != 200:

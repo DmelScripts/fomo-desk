@@ -61,13 +61,20 @@ def clear_filter_fixtures() -> None:
 def temp_desk_env():
     tmp = tempfile.TemporaryDirectory()
     previous = os.environ.get("DESK_DATA_DIR")
+    previous_helius = os.environ.get("HELIUS_API_KEY")
     os.environ["DESK_DATA_DIR"] = tmp.name
+    if previous_helius is None:
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
 
     def restore():
         if previous is None:
             os.environ.pop("DESK_DATA_DIR", None)
         else:
             os.environ["DESK_DATA_DIR"] = previous
+        if previous_helius is None:
+            os.environ.pop("HELIUS_API_KEY", None)
+        else:
+            os.environ["HELIUS_API_KEY"] = previous_helius
         tmp.cleanup()
 
     return tmp, restore

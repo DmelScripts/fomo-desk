@@ -1,5 +1,6 @@
 """Guards around the read-only RPC adapter. No socket and no CLI."""
 import base64
+import os
 import hashlib
 import threading
 import time
@@ -46,14 +47,28 @@ class ReadRpcTests(unittest.TestCase):
             def json(self):
                 return {"result": "no"}
 
+        calls = {"n": 0}
+
+        def posted(*args, **kwargs):
+            calls["n"] += 1
+            return Redirected()
+
         original = httpx.post
-        httpx.post = lambda *args, **kwargs: Redirected()
+        httpx.post = posted
+        os.environ.pop("HELIUS_API_KEY", None)
         try:
+            with self.assertRaises(solana_read_rpc.RpcError) as missing:
+                solana_read_rpc.http_transport({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash", "params": []})
+            self.assertEqual(missing.exception.reason, "helius_api_key_missing")
+            self.assertEqual(calls["n"], 0)
+            os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+            self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
             with self.assertRaises(solana_read_rpc.RpcError) as redirected:
                 solana_read_rpc.http_transport({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash", "params": []})
         finally:
             httpx.post = original
         self.assertEqual(redirected.exception.reason, "redirect")
+        self.assertEqual(calls["n"], 1)
         self.assertFalse(solana_read_rpc.reads_enabled())
         solana_read_rpc.enable_reads()
         db.set_setting("rpc_url", "https://other.example", "test")

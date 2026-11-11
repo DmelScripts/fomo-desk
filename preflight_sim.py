@@ -1,43 +1,23 @@
 """Unsigned simulateTransaction of the exact reserved swap, before any signature.
 
-The live POST target is the configured ``rpc_url``. The default is
-``https://api.mainnet-beta.solana.com``. When that setting's host is
-``mainnet.helius-rpc.com``, the call is Helius and it needs
-``HELIUS_API_KEY``. The key is never copied into a log or a result. This
-module does not open a socket: the desk transport sends the JSON-RPC body.
-Sign and send stay mocked.
+The live POST target is ``rpc_url``. The default is Helius mainnet, which
+needs ``HELIUS_API_KEY``. The key is not copied into a log or a result. An
+override URL is used as stored. This module does not open a socket: the desk
+transport sends the JSON-RPC body. Sign and send stay mocked.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
-from urllib.parse import urlparse
 
-import config
+import solana_rpc
 
-HELIUS_HOST = "mainnet.helius-rpc.com"
 COMMITMENT = "processed"
 
 
 def simulation_endpoint() -> dict:
     """Which RPC a live simulate would post to. Booleans and the host only."""
-    import db
-    import os
-    raw = db.get_setting("rpc_url") or config.DEFAULT_RPC_URL
-    host = urlparse(raw).hostname if isinstance(raw, str) else None
-    if type(host) is not str or host == "":
-        host = urlparse(config.DEFAULT_RPC_URL).hostname or ""
-    helius = host == HELIUS_HOST
-    present = False
-    if helius:
-        key = os.environ.get("HELIUS_API_KEY")
-        present = type(key) is str and key.strip() != ""
-    return {
-        "provider": "helius" if helius else "configured_rpc",
-        "host": host,
-        "uses_helius_key": helius,
-        "helius_key_present": present,
-    }
+    return solana_rpc.describe()
 
 
 def rpc_body(transaction: str, output_account: str) -> dict:

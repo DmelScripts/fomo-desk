@@ -21,7 +21,7 @@ REMAINING = (
     "route_v2 Whirlpool is decoded from the JUP6 IDL. The minimum is quoted_out_amount minus the instruction slippage. Other hops do not publish remaining accounts. A build without SetComputeUnitLimit cannot price the network fee.",
     "A Jupiter API key from https://developers.jup.ag/portal raises the keyless 0.5 rps limit. This process does not attach a key. The key is not a signer.",
     "PYTH_API_KEY for the documented Hermes USDC/USD latest-price route. This process does not call Hermes, and a test quote is not that credential.",
-    "solana_read_enabled and rpc_url https://api.mainnet-beta.solana.com for accounts a proven decoder names. A mint account proves mint and freeze authority only.",
+    "solana_read_enabled and rpc_url https://mainnet.helius-rpc.com with HELIUS_API_KEY for accounts a proven decoder names. A mint account proves mint and freeze authority only.",
     "Developer holding, past rugs, and launch bundles are not on the public mint account or DexScreener. The credentialed StalkChain reads were not called.",
     "A Phantom session for wallet 7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t, id eba28e4f-6b99-4543-af72-c7d1b008ce4e. A phone connection to a different wallet is not this session.",
 )

@@ -5301,7 +5301,12 @@ def public_reader(request: dict) -> dict:
         else:
             raise RuntimeError("method_refused")
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        req = urllib.request.Request("https://api.mainnet-beta.solana.com", data=json.dumps(payload).encode(), headers={"content-type": "application/json"})
+        import solana_rpc
+        try:
+            posted = solana_rpc.post(payload)
+        except solana_rpc.RpcRefused as exc:
+            raise RuntimeError(exc.reason) from None
+        return posted
     else:
         rugcheck_summary = isinstance(url, str) and url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report/summary")
         if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/") or rugcheck_summary):

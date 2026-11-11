@@ -419,14 +419,14 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps(_pair()).encode())
             if url.endswith("/report/summary"):
                 return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
-            if "api.mainnet-beta.solana.com" in url:
+            if "mainnet.helius-rpc.com" in url or "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
                 raw[45] = 1
                 import base64
                 body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
                 return _Response(200, json.dumps(body).encode())
-            raise AssertionError(url)
+            raise AssertionError(url.split("/")[2].split("?")[0])
 
         def build_opener(*handlers):
             self.assertTrue(any(item is stalkchain_adapter._NoRedirect or isinstance(item, stalkchain_adapter._NoRedirect) for item in handlers))
@@ -470,14 +470,14 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps(body).encode())
             if url.endswith("/report/summary"):
                 return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
-            if "api.mainnet-beta.solana.com" in url:
+            if "mainnet.helius-rpc.com" in url or "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
                 raw[45] = 1
                 import base64
                 body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
                 return _Response(200, json.dumps(body).encode())
-            raise AssertionError(url)
+            raise AssertionError(url.split("/")[2].split("?")[0])
         urllib.request.urlopen = urlopen
         found = desk_loop.run_discovery(desk_loop.public_reader, NOW)
         self.assertEqual(len(posts), 4)

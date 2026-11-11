@@ -394,8 +394,12 @@ class Scanner:
         return _num(fields.get(payload, fields.RPC_GET_TOKEN_SUPPLY["uiAmount"]))
 
     async def _rpc(self, method: str, params: list) -> Any:
+        import solana_rpc
+        info = solana_rpc.describe()
+        if info["ok"] is not True:
+            return {"error": {"code": -32000, "message": "helius_api_key_missing"}}
         body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        return await self.desk.http.post_json(db.get_setting("rpc_url"), body)
+        return await self.desk.http.post_json(solana_rpc._wire_url(), body)
 
 
 async def migration_silence(ws) -> str:
