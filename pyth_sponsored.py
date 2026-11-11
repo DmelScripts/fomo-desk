@@ -412,20 +412,31 @@ def _signer_int(value) -> int | None:
 
 HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest?ids[]=ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d&parsed=true"
 PYTH_KEY_ENV = "PYTH_API_KEY"
+HERMES_USER_AGENT = "fomo-desk/1.0"
 
 
 def hermes_headers() -> dict:
-    """Authorization: Bearer from PYTH_API_KEY. The key is not copied into results."""
+    """Bearer from PYTH_API_KEY, plus a non-default User-Agent. The key is not copied into results.
+
+    Cloudflare answers Python urllib's default client signature with 403 error 1010.
+    A named User-Agent is what the 2026-11-11 read used.
+    """
     import os
-    headers = {"accept": "application/json"}
+    headers = {"Accept": "application/json", "User-Agent": HERMES_USER_AGENT}
     key = os.environ.get(PYTH_KEY_ENV)
     if isinstance(key, str) and key.strip():
         headers["Authorization"] = "Bearer " + key.strip()
     return headers
 
 
+def hermes_request():
+    """The GET the desk would send. This does not open the socket."""
+    import urllib.request
+    return urllib.request.Request(HERMES_LATEST_URL, headers=hermes_headers(), method="GET")
+
+
 def read_hermes_response(response, now: float, onchain=None) -> dict:
-    """A Hermes body. A missing key or a 401 is price_unknown. An on-chain account is not a substitute."""
+    """A Hermes body. A missing key, a 401, or a 403 is price_unknown. An on-chain account is not a substitute."""
     refused = {"ok": False, "reason": "price_unknown", "onchain_substituted": False, "live": False}
     if onchain is not None:
         refused["onchain_ignored"] = True
@@ -437,12 +448,12 @@ def read_hermes_response(response, now: float, onchain=None) -> dict:
     meta = response.get("meta") if isinstance(response, dict) and isinstance(response.get("meta"), dict) else {}
     if status is None and isinstance(meta.get("status"), int):
         status = meta["status"]
-    if status == 401:
+    if status in {401, 403}:
         return refused | {"cause": "hermes_unauthorized"}
     body = response.get("body") if isinstance(response, dict) else None
     if isinstance(body, dict) and "body" in body and "meta" in body:
         nested = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        if nested.get("status") == 401 or body.get("status") == 401:
+        if nested.get("status") in {401, 403} or body.get("status") in {401, 403}:
             return refused | {"cause": "hermes_unauthorized"}
         body = body.get("body")
     if not isinstance(body, dict):
