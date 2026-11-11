@@ -33,7 +33,7 @@ def _sol_price(now: int, slot: int) -> bytes:
     return bytes(raw)
 
 
-def _sim_result(mint: str, amount: str, fee: int, *, err=None, balances=None, units: int = 85000):
+def _sim_result(mint: str, amount: str, fee: int, *, owner: str, width: int, err=None, balances=None, units: int = 85000, decimals: int = 6):
     """A simulateTransaction result in the RPC shape. The mint is the output."""
     body = {
         "jsonrpc": "2.0",
@@ -47,15 +47,17 @@ def _sim_result(mint: str, amount: str, fee: int, *, err=None, balances=None, un
                 "fee": fee,
                 "innerInstructions": [],
                 "preTokenBalances": [{
-                    "accountIndex": 2, "mint": mint, "owner": "WALLET",
+                    "accountIndex": 2, "mint": mint, "owner": owner,
                     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                    "uiTokenAmount": {"amount": "0", "decimals": 6, "uiAmount": 0, "uiAmountString": "0"},
+                    "uiTokenAmount": {"amount": "0", "decimals": decimals, "uiAmount": 0, "uiAmountString": "0"},
                 }],
                 "postTokenBalances": [{
-                    "accountIndex": 2, "mint": mint, "owner": "WALLET",
+                    "accountIndex": 2, "mint": mint, "owner": owner,
                     "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                    "uiTokenAmount": {"amount": amount, "decimals": 6, "uiAmount": None, "uiAmountString": amount},
+                    "uiTokenAmount": {"amount": amount, "decimals": decimals, "uiAmount": None, "uiAmountString": amount},
                 }],
+                "preBalances": [1_000_000_000] + [0] * (width - 1),
+                "postBalances": [999_995_000] + [0] * (width - 1),
                 "accounts": None,
             },
         },
@@ -155,7 +157,11 @@ class FeeEstimateTests(unittest.TestCase):
             if request.get("method") == "isBlockhashValid":
                 return {"status": 200, "body": {"result": {"value": True}}}
             if request.get("method") == "simulateTransaction" and request.get("purpose") == "pre_sign":
-                return {"status": 200, "body": _sim_result(request.get("output_mint"), "100", 5000)}
+                decoded = solana_tx.decode_transaction(base64.b64decode(request["transaction"]))
+                return {"status": 200, "body": _sim_result(
+                    request.get("output_mint"), "100", 5000,
+                    owner=decoded.fee_payer, width=len(decoded.static_keys),
+                )}
             if request.get("method") == "hermes_price":
                 return {"status": 200, "body": {
                     "parsed": [{
@@ -1210,9 +1216,15 @@ class FeeEstimateTests(unittest.TestCase):
         digest = self._store(encoded, values["pool"], "entry", "sim-case")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-case'", ('{"reserved_usd": "1.00"}',))
         saved = json.loads(Path("tests/fixtures/simulate_transaction_200.json").read_text(encoding="utf-8"))
-        saved["result"]["value"]["preTokenBalances"][0]["mint"] = mint
-        saved["result"]["value"]["postTokenBalances"][0]["mint"] = mint
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded))
+        payer = decoded.fee_payer
+        width = len(decoded.static_keys)
+        for side in ("preTokenBalances", "postTokenBalances"):
+            saved["result"]["value"][side][0]["mint"] = mint
+            saved["result"]["value"][side][0]["owner"] = payer
         saved["result"]["value"]["postTokenBalances"][0]["uiTokenAmount"]["amount"] = "100"
+        saved["result"]["value"]["preBalances"] = [1_000_000_000] + [0] * (width - 1)
+        saved["result"]["value"]["postBalances"] = [999_995_000] + [0] * (width - 1)
         seen = {}
 
         def run(body, boom=None):
@@ -1291,9 +1303,63 @@ class FeeEstimateTests(unittest.TestCase):
         expect(short, "simulated_output_below_min")
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-case'", ('{"reserved_usd": "8.00"}',))
         rented = json.loads(json.dumps(saved))
-        rented["result"]["value"]["preBalances"] = [1_000_000_000, 0]
-        rented["result"]["value"]["postBalances"] = [998_000_000, solana_tx.TOKEN_ACCOUNT_RENT]
+        rented["result"]["value"]["preBalances"] = [1_000_000_000] + [0] * (width - 1)
+        rented["result"]["value"]["postBalances"] = [998_000_000, solana_tx.TOKEN_ACCOUNT_RENT] + [0] * (width - 2)
         expect(rented, "simulated_ticket")
+        stranger = json.loads(json.dumps(saved))
+        stranger["result"]["value"]["preTokenBalances"][0]["owner"] = solana_tx.b58encode(b"\x94" * 32)
+        stranger["result"]["value"]["postTokenBalances"][0]["owner"] = solana_tx.b58encode(b"\x94" * 32)
+        expect(stranger, "simulated_output_unproven")
+        dropped = json.loads(json.dumps(saved))
+        del dropped["result"]["value"]["preBalances"]
+        del dropped["result"]["value"]["postBalances"]
+        expect(dropped, "simulation_ticket_unproven")
+        mismatched = json.loads(json.dumps(saved))
+        mismatched["result"]["value"]["postTokenBalances"][0]["uiTokenAmount"]["decimals"] = 9
+        expect(mismatched, "simulated_output_unproven")
+        missing_owner = json.loads(json.dumps(saved))
+        del missing_owner["result"]["value"]["preTokenBalances"][0]["owner"]
+        del missing_owner["result"]["value"]["postTokenBalances"][0]["owner"]
+        expect(missing_owner, "simulated_output_unproven")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-case'", ('{"reserved_usd": "1.00"}',))
+        priced_tx = _tx(
+            _metas(solana_tx.NATIVE_MINT, mint, values), _route(100, 50, True, amount=4),
+            limit=200_000, price=1_000_000, side="buy", extra_transfer=TIP_ACCOUNT, tip_lamports=0,
+            blockhash=solana_tx.b58encode(b"\x44" * 32),
+        )
+        priced_digest = self._store(priced_tx, values["pool"], "entry", "sim-fee")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-fee'", ('{"reserved_usd": "1.00"}',))
+        priced_decoded = solana_tx.decode_transaction(base64.b64decode(priced_tx))
+        priced_body = json.loads(json.dumps(saved))
+        for side in ("preTokenBalances", "postTokenBalances"):
+            priced_body["result"]["value"][side][0]["owner"] = priced_decoded.fee_payer
+        fee_width = len(priced_decoded.static_keys)
+        priced_body["result"]["value"]["preBalances"] = [1_000_000_000] + [0] * (fee_width - 1)
+        priced_body["result"]["value"]["postBalances"] = [999_995_000] + [0] * (fee_width - 1)
+        del priced_body["result"]["value"]["unitsConsumed"]
+
+        def run_fee(body):
+            base = self._transport(accounts)
+
+            def transport(request):
+                if request.get("purpose") == "pre_sign":
+                    return {"status": 200, "body": body}
+                return base(request)
+
+            return desk_loop.approach_signer("sim-fee", priced_digest, transport, NOW, auth)
+
+        bounded = run_fee(priced_body)
+        self.assertTrue(bounded["preflight_ready"], bounded)
+        self.assertEqual(bounded["simulation"]["fee_lamports"], 205_000)
+        self.assertFalse(bounded["sign"])
+        self.assertFalse(bounded["send"])
+        self.assertFalse(bounded["live_ready"])
+        lied = json.loads(json.dumps(priced_body))
+        lied["result"]["value"]["unitsConsumed"] = True
+        lied_result = run_fee(lied)
+        self.assertEqual(lied_result["reason"], "simulation_fee_unproven", lied_result)
+        self.assertFalse(lied_result["signer_reached"])
+        self.assertFalse(lied_result["sign"])
         calls = {"n": 0}
 
         def counting(request):
@@ -1321,3 +1387,70 @@ class FeeEstimateTests(unittest.TestCase):
         self.assertIn("configured_rpc", fresh)
         self.assertNotIn("api-key=", fresh)
         self.assertNotIn("test-helius-not-a-secret", fresh)
+
+
+def _priced_sol():
+    return {"fresh": True, "used": True, "price": 100, "conf": 0, "expo": 0}
+
+
+def _sim_value(owner="payer", decimals=6, units=1000, fee=5000, width=2):
+    row = lambda amount: {
+        "mint": "mint", "owner": owner,
+        "uiTokenAmount": {"amount": amount, "decimals": decimals, "uiAmountString": amount},
+    }
+    return {
+        "err": None, "unitsConsumed": units, "fee": fee,
+        "preTokenBalances": [row("0")],
+        "postTokenBalances": [row("100")],
+        "preBalances": [1_000_000_000] + [0] * (width - 1),
+        "postBalances": [999_995_000] + [0] * (width - 1),
+    }
+
+
+class PreflightBalanceTests(unittest.TestCase):
+    def _assess(self, value, **extra):
+        from decimal import Decimal
+        import preflight_sim
+        args = dict(
+            output_mint="mint", owner="payer", account_count=2, quoted_out=100,
+            sol=_priced_sol(), dex_fee_usd=Decimal("0.01"), outflow_lamports=4,
+            reserved_usd=Decimal("1.00"), cu_price=0, cu_limit=200_000, mint_decimals=6,
+        )
+        args.update(extra)
+        return preflight_sim.assess(value, **args)
+
+    def test_only_the_payers_output_mint_counts(self):
+        from decimal import Decimal
+        self.assertTrue(self._assess(_sim_value())["ok"])
+        other = _sim_value(owner="someone-else")
+        self.assertEqual(self._assess(other)["cause"], "simulated_output_unproven")
+        missing = _sim_value()
+        del missing["preTokenBalances"][0]["owner"]
+        del missing["postTokenBalances"][0]["owner"]
+        self.assertEqual(self._assess(missing)["cause"], "simulated_output_unproven")
+        shifted = _sim_value()
+        shifted["postTokenBalances"][0]["uiTokenAmount"]["decimals"] = 9
+        self.assertEqual(self._assess(shifted)["cause"], "simulated_output_unproven")
+        both = _sim_value(decimals=9)
+        self.assertEqual(self._assess(both, mint_decimals=6)["cause"], "simulated_output_unproven")
+
+    def test_a_set_compute_price_keeps_the_priority_upper_bound(self):
+        body = _sim_value()
+        del body["unitsConsumed"]
+        priced = self._assess(body, cu_price=1_000_000, cu_limit=200_000)
+        self.assertTrue(priced["ok"], priced)
+        self.assertEqual(priced["fee_lamports"], 205_000)
+        lied = _sim_value()
+        lied["unitsConsumed"] = True
+        self.assertEqual(self._assess(lied, cu_price=1_000_000)["cause"], "simulation_fee_unproven")
+        self.assertFalse(self._assess(lied, cu_price=1_000_000)["sign"])
+
+    def test_ticket_requires_both_balance_arrays(self):
+        body = _sim_value()
+        del body["preBalances"]
+        del body["postBalances"]
+        self.assertEqual(self._assess(body)["cause"], "simulation_ticket_unproven")
+        short = _sim_value()
+        short["preBalances"] = [1]
+        short["postBalances"] = [1]
+        self.assertEqual(self._assess(short, account_count=2)["cause"], "simulation_ticket_unproven")

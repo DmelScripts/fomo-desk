@@ -2724,8 +2724,12 @@ def simulate_before_sign(case_id: str, message_sha256: str, transport, now: floa
         return finish(quiet | {"cause": "simulated_output_unproven"})
     priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
     cu_price = priced.get("requested_micro_lamports_per_cu") if priced.get("ok") is True else 0
+    cu_limit = priced.get("requested_compute_unit_limit") if priced.get("ok") is True else None
     if type(cu_price) is not int:
         cu_price = 0
+    if type(cu_limit) is not int:
+        cu_limit = None
+    mint_decimals = 9 if output_mint == solana_tx.NATIVE_MINT else None
     outflow = _message_outflow(decoded, transport, case, proof["side"])
     if outflow.get("ok") is not True:
         return finish(quiet | {"cause": outflow.get("reason") or "simulated_ticket_unproven"})
@@ -2769,8 +2773,9 @@ def simulate_before_sign(case_id: str, message_sha256: str, transport, now: floa
     if not isinstance(value, dict):
         return finish(quiet | {"cause": "simulation_malformed"})
     checked = preflight_sim.assess(
-        value, output_mint=output_mint, quoted_out=quoted, sol=leg,
-        dex_fee_usd=dex, outflow_lamports=outflow["lamports"], reserved_usd=reserved, cu_price=cu_price,
+        value, output_mint=output_mint, owner=decoded.fee_payer, account_count=len(decoded.static_keys),
+        quoted_out=quoted, sol=leg, dex_fee_usd=dex, outflow_lamports=outflow["lamports"],
+        reserved_usd=reserved, cu_price=cu_price, cu_limit=cu_limit, mint_decimals=mint_decimals,
     )
     checked["rpc"] = endpoint
     checked["preflight_ready"] = checked.get("ok") is True

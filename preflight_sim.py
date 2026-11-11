@@ -38,7 +38,7 @@ def rpc_body(transaction: str, output_account: str) -> dict:
     }
 
 
-def assess(value: dict, *, output_mint: str, quoted_out: int, sol: dict, dex_fee_usd: Decimal, outflow_lamports: int, reserved_usd: Decimal | None, cu_price: int) -> dict:
+def assess(value: dict, *, output_mint: str, owner: str, account_count: int, quoted_out: int, sol: dict, dex_fee_usd: Decimal, outflow_lamports: int, reserved_usd: Decimal | None, cu_price: int, cu_limit: int | None, mint_decimals: int | None) -> dict:
     """Fail closed on the simulated fee, output, and ticket. No network."""
     import jupiter_route_v2
     import memecoin_desk
@@ -47,7 +47,7 @@ def assess(value: dict, *, output_mint: str, quoted_out: int, sol: dict, dex_fee
         return _fail("simulation_malformed")
     if value.get("err") is not None:
         return _fail("simulation_err")
-    fee_lamports = _simulated_fee(value, cu_price)
+    fee_lamports = _simulated_fee(value, cu_price, cu_limit)
     if fee_lamports is None:
         return _fail("simulation_fee_unproven")
     network = pyth_sponsored.lamports_usd(fee_lamports, sol)
@@ -59,14 +59,14 @@ def assess(value: dict, *, output_mint: str, quoted_out: int, sol: dict, dex_fee
     minimum = jupiter_route_v2.minimum_out(quoted_out, 50)
     if minimum is None:
         return _fail("simulated_output_unproven")
-    output = _output_delta(value, output_mint)
+    output = _output_delta(value, output_mint, owner, mint_decimals)
     if output is None:
         return _fail("simulated_output_unproven", minimum_out=minimum)
     if output < minimum:
         return _fail("simulated_output_below_min", output_amount=output, minimum_out=minimum)
-    deposit = _new_account_lamports(value)
+    deposit = _new_account_lamports(value, account_count)
     if deposit is None:
-        return _fail("simulation_malformed")
+        return _fail("simulation_ticket_unproven")
     deposit_usd = pyth_sponsored.lamports_usd(deposit, sol) if deposit else Decimal("0.00")
     spent = pyth_sponsored.lamports_usd(outflow_lamports, sol)
     if deposit_usd is None or spent is None:
@@ -92,80 +92,93 @@ def _fail(cause: str, **extra) -> dict:
     return {"ok": False, "cause": cause, "sign": False, "send": False} | extra
 
 
-def _simulated_fee(value: dict, cu_price: int) -> int | None:
+def _simulated_fee(value: dict, cu_price: int, cu_limit: int | None) -> int | None:
+    """Network lamports charged against the $0.05 cap.
+
+    A compute-unit price uses the larger of unitsConsumed and the transaction's
+    compute-unit limit, so a missing consumption figure still prices the full
+    requested priority. A present unitsConsumed that is not an exact int of 0
+    or more, including bool, is unproven. The RPC fee field is kept when it is
+    higher.
+    """
     import jupiter_route_v2
+    if type(cu_price) is not int or cu_price < 0:
+        return None
+    if type(cu_limit) is not int or cu_limit < 0:
+        cu_limit = None
+    units = None
+    if cu_price > 0 and "unitsConsumed" in value:
+        raw = value.get("unitsConsumed")
+        if type(raw) is not int or raw < 0:
+            return None
+        units = raw
+    bound = None
+    if cu_price > 0:
+        if units is None and cu_limit is None:
+            return None
+        bound = cu_limit if units is None else units if cu_limit is None else max(units, cu_limit)
     found = []
     fee = value.get("fee")
     if type(fee) is int and fee >= 0:
         found.append(fee)
-    units = value.get("unitsConsumed")
-    if type(units) is int and units >= 0 and type(cu_price) is int and cu_price >= 0:
-        found.append(jupiter_route_v2.BASE_FEE_LAMPORTS + (units * cu_price + 999_999) // 1_000_000)
+    if bound is not None:
+        found.append(jupiter_route_v2.BASE_FEE_LAMPORTS + (bound * cu_price + 999_999) // 1_000_000)
     if not found:
         return None
     return max(found)
 
 
-def _output_delta(value: dict, mint: str) -> int | None:
-    pre = _token_map(value.get("preTokenBalances"))
-    post = _token_map(value.get("postTokenBalances"))
-    if pre is None or post is None:
-        return _parsed_account_amount(value.get("accounts"), mint)
-    if mint not in post and mint not in pre:
-        return _parsed_account_amount(value.get("accounts"), mint)
-    return post.get(mint, 0) - pre.get(mint, 0)
-
-
-def _token_map(rows) -> dict | None:
-    if rows is None:
-        return {}
-    if not isinstance(rows, list):
+def _output_delta(value: dict, mint: str, owner: str, mint_decimals: int | None) -> int | None:
+    """Post minus pre for this owner and mint. Another owner does not count."""
+    if not isinstance(value.get("preTokenBalances"), list) or not isinstance(value.get("postTokenBalances"), list):
         return None
-    found = {}
+    pre = _owned_amounts(value.get("preTokenBalances"), mint, owner)
+    post = _owned_amounts(value.get("postTokenBalances"), mint, owner)
+    if pre is None or post is None or (not pre and not post):
+        return None
+    decimals = {item[1] for item in pre + post}
+    if len(decimals) != 1:
+        return None
+    if mint_decimals is not None and decimals.pop() != mint_decimals:
+        return None
+    return sum(item[0] for item in post) - sum(item[0] for item in pre)
+
+
+def _owned_amounts(rows, mint: str, owner: str) -> list | None:
+    found = []
     for row in rows:
         if not isinstance(row, dict):
             return None
-        name = row.get("mint")
+        if row.get("mint") != mint or row.get("owner") != owner:
+            continue
         ui = row.get("uiTokenAmount")
-        if type(name) is not str or not isinstance(ui, dict):
+        if not isinstance(ui, dict):
             return None
         amount = ui.get("amount")
+        decimals = ui.get("decimals")
         if type(amount) is not str or amount == "" or not amount.isdigit():
             return None
-        found[name] = found.get(name, 0) + int(amount)
-    return found
-
-
-def _parsed_account_amount(accounts, mint: str) -> int | None:
-    if not isinstance(accounts, list):
-        return None
-    found = None
-    for account in accounts:
-        if not isinstance(account, dict):
-            continue
-        data = account.get("data")
-        parsed = data.get("parsed") if isinstance(data, dict) else None
-        info = parsed.get("info") if isinstance(parsed, dict) else None
-        if not isinstance(info, dict) or info.get("mint") != mint:
-            continue
-        token = info.get("tokenAmount")
-        amount = token.get("amount") if isinstance(token, dict) else None
-        if type(amount) is not str or not amount.isdigit():
+        if type(decimals) is not int or isinstance(decimals, bool) or decimals < 0:
             return None
-        found = int(amount) if found is None else found + int(amount)
+        found.append((int(amount), decimals))
     return found
 
 
-def _new_account_lamports(value: dict) -> int | None:
+def _new_account_lamports(value: dict, account_count: int) -> int | None:
+    """Lamports that appear in a new account. Both balance arrays are required."""
     pre = value.get("preBalances")
     post = value.get("postBalances")
-    if pre is None and post is None:
-        return 0
-    if not isinstance(pre, list) or not isinstance(post, list) or len(pre) != len(post):
+    if type(account_count) is not int or isinstance(account_count, bool) or account_count < 1:
+        return None
+    if not isinstance(pre, list) or not isinstance(post, list):
+        return None
+    if len(pre) != account_count or len(post) != account_count:
         return None
     total = 0
     for index, (before, after) in enumerate(zip(pre, post)):
-        if type(before) is not int or type(after) is not int or before < 0 or after < 0:
+        if type(before) is not int or type(after) is not int or isinstance(before, bool) or isinstance(after, bool):
+            return None
+        if before < 0 or after < 0:
             return None
         if index == 0:
             continue

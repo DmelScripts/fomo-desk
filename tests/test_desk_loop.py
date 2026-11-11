@@ -2067,10 +2067,16 @@ conn.close()
                     value = 5000
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": value}, "message": echoed}}
             if method == "simulateTransaction" and request.get("purpose") == "pre_sign":
+                decoded_pre = solana_tx.decode_transaction(base64.b64decode(request["transaction"]))
+                width = len(decoded_pre.static_keys)
+                out_mint = request.get("output_mint")
+                decimals = 9 if out_mint == solana_tx.NATIVE_MINT else 6
                 return {"status": 200, "body": {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": 2_000_028}, "value": {
                     "err": None, "unitsConsumed": 1000, "fee": 5000, "innerInstructions": [],
-                    "preTokenBalances": [{"mint": request.get("output_mint"), "uiTokenAmount": {"amount": "0", "decimals": 6, "uiAmountString": "0"}}],
-                    "postTokenBalances": [{"mint": request.get("output_mint"), "uiTokenAmount": {"amount": "1000000000000", "decimals": 6, "uiAmountString": "1000000000000"}}],
+                    "preTokenBalances": [{"mint": out_mint, "owner": decoded_pre.fee_payer, "uiTokenAmount": {"amount": "0", "decimals": decimals, "uiAmountString": "0"}}],
+                    "postTokenBalances": [{"mint": out_mint, "owner": decoded_pre.fee_payer, "uiTokenAmount": {"amount": "1000000000000", "decimals": decimals, "uiAmountString": "1000000000000"}}],
+                    "preBalances": [1_000_000_000] + [0] * (width - 1),
+                    "postBalances": [999_995_000] + [0] * (width - 1),
                 }}}}
             if method == "simulateTransaction":
                 mode = chain.get("preflight_mode")
