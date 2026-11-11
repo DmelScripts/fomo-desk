@@ -1,16 +1,41 @@
 """Readiness gates stay open unless this process parsed a live provider body."""
+import http.client
+import io
+import json
+import os
+import time
 import unittest
+import urllib.request
 
 import desk_loop
 import live_gate_proof
-import urllib.request
+import solana_tx
 from tests.support import temp_desk_env
+
+MINT_A = "JEH7cJxAKdprFG5AvdsY2c4ZqojxLBjFmw19zADV6oK5"
+MINT_B = "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump"
+
+
+def _response(body: bytes):
+    raw = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body
+
+    class Sock:
+        def makefile(self, *args, **kwargs):
+            return io.BytesIO(raw)
+
+        def close(self):
+            return None
+
+    opened = http.client.HTTPResponse(Sock())
+    opened.begin()
+    return opened
 
 
 class LiveGateTests(unittest.TestCase):
     def setUp(self):
         _tmp, restore = temp_desk_env()
         self.addCleanup(restore)
+        self.addCleanup(live_gate_proof._reset_for_tests)
 
     def test_provider_gates_stay_open_without_a_live_parse(self):
         gates = {item["gate"]: item for item in desk_loop.remaining_live_gates()}
@@ -41,24 +66,109 @@ class LiveGateTests(unittest.TestCase):
         self.assertFalse(view["preflight_ready"])
         self.assertFalse(view["gate_complete"])
 
-    def test_a_fixture_body_does_not_close_a_gate_when_urlopen_is_patched(self):
-        original = urllib.request.urlopen
-        urllib.request.urlopen = lambda request, timeout=8: None
-        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
-        live_gate_proof.consider("rugcheck", "https://api.rugcheck.xyz/v1/tokens/Mint/report/summary", {"lpLockedPct": 100})
-        live_gate_proof.consider_jupiter({"expireAt": 9_999_999_999})
-        live_gate_proof.note_history(["Mint"], True)
-        self.assertFalse(live_gate_proof.closed("lp_lock_live"))
-        self.assertFalse(live_gate_proof.closed("quote_expiry"))
-        self.assertFalse(live_gate_proof.closed("rug_history_live"))
+    def test_a_passed_in_body_cannot_close_a_gate(self):
+        self.assertFalse(hasattr(live_gate_proof, "consider"))
+        self.assertFalse(hasattr(live_gate_proof, "consider_jupiter"))
+        self.assertFalse(hasattr(live_gate_proof, "note_history"))
+        opened = _response(b'{"lpLockedPct": 100}')
+        live_gate_proof._from_fetch(
+            opened,
+            "https://api.rugcheck.xyz/v1/tokens/" + MINT_A + "/report/summary",
+            {"lpLockedPct": 100},
+        )
+        live_gate_proof._seal_history(MINT_A, [], True)
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+        self.assertFalse(live_gate_proof.closed("rug_history_live", MINT_A))
 
     def test_a_transport_fixture_does_not_close_the_provider_gates(self):
         import desk_providers
-        mint = "JEH7cJxAKdprFG5AvdsY2c4ZqojxLBjFmw19zADV6oK5"
         desk_providers.set_transport(lambda spec: {"status": 200, "body": {"lpLockedPct": 100}, "_live": True})
         self.addCleanup(lambda: desk_providers.set_transport(None))
-        desk_providers.production_fetch("rugcheck", mint)
-        self.assertFalse(live_gate_proof.closed("lp_lock_live"))
+        desk_providers.production_fetch("rugcheck", MINT_A)
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+
+    def test_lp_burn_or_lock_closes_only_the_fetched_mint(self):
+        import desk_providers
+        previous = desk_providers._GAP
+        desk_providers._GAP = 0
+        self.addCleanup(lambda: setattr(desk_providers, "_GAP", previous))
+        original = urllib.request.urlopen
+
+        def open_summary(body):
+            def urlopen(request, timeout=8):
+                if request.full_url.endswith("/report/summary"):
+                    return _response(json.dumps(body).encode())
+                return _response(b"{}")
+            return urlopen
+
+        urllib.request.urlopen = open_summary({"lpLockedPct": 100})
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        desk_providers.production_fetch("rugcheck", MINT_A)
+        self.assertTrue(live_gate_proof.closed("lp_lock_live", MINT_A))
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_B))
+        self.assertFalse(any(item["closed"] for item in desk_loop.remaining_live_gates() if item["gate"] == "lp_lock_live"))
+        live_gate_proof._reset_for_tests()
+        for body in (
+            {"lpBurn": 100},
+            {"lpBurn": 60, "lpLockedPct": 40},
+            {"lpBurn": 100.0, "lpLockedPct": 0},
+        ):
+            urllib.request.urlopen = open_summary(body)
+            desk_providers.production_fetch("rugcheck", MINT_A)
+            self.assertTrue(live_gate_proof.closed("lp_lock_live", MINT_A), body)
+            live_gate_proof._reset_for_tests()
+        for body in (
+            {"lpLockedPct": 99},
+            {"lpLockedPct": "100"},
+            {"lpLockedPct": True},
+            {"lpBurn": 100, "lpLockedPct": 100},
+            {"lpBurn": 50},
+            {},
+        ):
+            urllib.request.urlopen = open_summary(body)
+            desk_providers.production_fetch("rugcheck", MINT_A)
+            self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A), body)
+            live_gate_proof._reset_for_tests()
+
+    def test_a_quote_and_a_price_belong_to_one_mint(self):
+        import desk_providers
+        now = time.time()
+        os.environ["PYTH_API_KEY"] = "pyth-test-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("PYTH_API_KEY", None))
+        previous = desk_providers._GAP
+        desk_providers._GAP = 0
+        self.addCleanup(lambda: setattr(desk_providers, "_GAP", previous))
+        original = urllib.request.urlopen
+        hermes = {"parsed": [{
+            "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+            "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": int(now)},
+            "status": "trading",
+        }]}
+
+        def urlopen(request, timeout=8):
+            return _response(json.dumps(hermes).encode())
+
+        urllib.request.urlopen = urlopen
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        desk_providers.fetch_hermes(now, MINT_A)
+        self.assertTrue(live_gate_proof.closed("price_freshness_proven", MINT_A, now=time.time()))
+        self.assertFalse(live_gate_proof.closed("price_freshness_proven", MINT_B, now=time.time()))
+        order = "https://api.jup.ag/swap/v2/order?inputMint=%s&outputMint=%s" % (solana_tx.NATIVE_MINT, MINT_A)
+        quote = {"expireAt": int(now) + 30, "inputMint": solana_tx.NATIVE_MINT, "outputMint": MINT_A}
+        urllib.request.urlopen = lambda request, timeout=8: _response(json.dumps(quote).encode())
+        desk_loop.public_reader({"method": "GET", "url": order})
+        moment = time.time()
+        self.assertTrue(live_gate_proof.closed(
+            "quote_expiry", MINT_A, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_B, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_B,
+        ))
+        self.assertIsNone(desk_loop._live_trade_proofs({"mint": MINT_A}, {"side": "entry"}, moment))
+        self.assertEqual(desk_loop._live_trade_proofs({"mint": MINT_B}, {"side": "entry"}, moment), "price_unknown")
 
     def test_stale_hermes_price_and_an_expired_quote_stop_before_signing(self):
         now = 1_700_000_000

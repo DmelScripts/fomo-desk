@@ -156,12 +156,15 @@ def _fetch(kind, mint, pair_id=None):
     return "provider_unparsed", None
 
 
-def fetch_hermes(now: float) -> dict:
+def fetch_hermes(now: float, mint: str | None = None) -> dict:
     """One Hermes SOL/USD read. A 401 or a 403 is price_unknown. No on-chain substitute."""
     _start_decision()
     if not _present("PYTH_API_KEY"):
         return {"ok": False, "reason": "price_unknown", "cause": "pyth_api_key_missing", "onchain_substituted": False, "live": False}
-    status, body, reason = _exchange("hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None)
+    status, body, reason = _exchange(
+        "hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None,
+        proof_mint=mint if isinstance(mint, str) else None,
+    )
     if reason:
         return _hermes_stopped(reason)
     priced = pyth_sponsored.read_hermes_response({"status": status, "body": body}, now)
@@ -198,13 +201,15 @@ def _json(provider: str, method: str, url: str, headers: dict, payload=None):
     return None, body
 
 
-def _exchange(provider: str, method: str, url: str, headers: dict, payload):
+def _exchange(provider: str, method: str, url: str, headers: dict, payload, proof_mint: str | None = None):
     """One provider call. Failures are reason strings. This frame does not raise."""
     try:
         _pace(provider)
     except cross_source.FetchFailed as exc:
         return None, None, exc.reason
     spec = {"provider": provider, "method": method, "url": url, "headers": dict(headers), "json": payload}
+    if isinstance(proof_mint, str) and proof_mint != "":
+        spec["_proof_mint"] = proof_mint
     try:
         if callable(_TRANSPORT):
             result = _TRANSPORT(spec)
@@ -222,9 +227,6 @@ def _exchange(provider: str, method: str, url: str, headers: dict, payload):
         return None, None, provider + "_unparsed"
     status = result.get("status")
     body = result.get("body")
-    if not callable(_TRANSPORT) and result.get("_live") is True and status == 200 and isinstance(body, dict):
-        import live_gate_proof
-        live_gate_proof.consider(provider, url, body)
     return status, body, None
 
 
@@ -245,7 +247,7 @@ def _urllib(spec: dict) -> dict:
             return {"_reason": spec["provider"] + "_status"}
         return result
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
-    status, raw, live = _read(request, _remaining())
+    status, raw, response = _read(request, _remaining())
     if status == "timeout":
         return {"_reason": spec["provider"] + "_timeout"}
     if type(status) is not int:
@@ -256,7 +258,10 @@ def _urllib(spec: dict) -> dict:
             parsed = json.loads(raw.decode("utf-8"))
         except Exception:
             parsed = None
-    return {"status": status, "body": parsed, "_live": live is True}
+    if response is not None and isinstance(parsed, dict):
+        import live_gate_proof
+        live_gate_proof._from_fetch(response, url, parsed, spec.get("_proof_mint"))
+    return {"status": status, "body": parsed}
 
 
 def _read(request, timeout: float):
@@ -264,18 +269,18 @@ def _read(request, timeout: float):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             import http.client
-            live = isinstance(response, http.client.HTTPResponse)
-            return response.status, response.read(), live
+            opened = response if isinstance(response, http.client.HTTPResponse) else None
+            return response.status, response.read(), opened
     except urllib.error.HTTPError as exc:
-        return exc.code, None, False
+        return exc.code, None, None
     except TimeoutError:
-        return "timeout", None, False
+        return "timeout", None, None
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), TimeoutError):
-            return "timeout", None, False
-        return "status", None, False
+            return "timeout", None, None
+        return "status", None, None
     except Exception:
-        return "status", None, False
+        return "status", None, None
 
 
 def _start_decision() -> None:

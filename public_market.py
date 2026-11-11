@@ -337,9 +337,9 @@ def live_transport(request: dict):
         body = response.json()
     except Exception as exc:
         raise PublicStop("http_status") from exc
-    if isinstance(response, httpx.Response) and isinstance(url, str) and "/swap/v2/order" in url and isinstance(body, dict):
+    if isinstance(url, str) and isinstance(body, dict):
         import live_gate_proof
-        live_gate_proof.consider_jupiter(body)
+        live_gate_proof._from_fetch(response, url, body)
     return {"status": 200, "body": body}
 
 

@@ -20,6 +20,7 @@ The Helius key is ``HELIUS_API_KEY``. It is not written into results.
 
 from __future__ import annotations
 
+import contextvars
 import http.client
 import json
 import os
@@ -37,6 +38,7 @@ RUGGED_FIELD_STATUS = "observed, undocumented"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 _READER = None
+_SUBJECT = contextvars.ContextVar("rug_subject", default="")
 _CACHE: dict[str, tuple[float, dict]] = {}
 _RECORDED: dict[str, dict] = {}
 _REPORTS: dict[str, dict] = {}
@@ -96,6 +98,14 @@ def assess(reading, mint=None) -> dict:
 def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_network: bool = False) -> dict:
     """A clear result reads a Helius page supplied for this call, then RugCheck."""
     moment = time.time() if now is None else now
+    token = _SUBJECT.set(mint if isinstance(mint, str) else "")
+    try:
+        return _read_history(mint, creator, asset, assets, now, allow_network, moment)
+    finally:
+        _SUBJECT.reset(token)
+
+
+def _read_history(mint, creator, asset, assets, now, allow_network: bool, moment) -> dict:
     if not isinstance(moment, (int, float)) or isinstance(moment, bool):
         return _unverified("clock")
     if not isinstance(mint, str) or mint == "" or "/" in mint:
@@ -161,11 +171,11 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
         _cache_rejection(creator, moment, rejected)
         if das_live and reports_live:
             import live_gate_proof
-            live_gate_proof.note_history(past, False)
+            live_gate_proof._seal_history(mint, past, False)
         return rejected
     if das_live and reports_live:
         import live_gate_proof
-        live_gate_proof.note_history(past, True)
+        live_gate_proof._seal_history(mint, past, True)
     return {
         "ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE,
         "source_wired": True, "creator": creator, "creator_source": how, "past_tokens": len(past),
@@ -303,9 +313,9 @@ def _get(request):
     with opener.open(request, timeout=TIMEOUT_S) as response:
         live = isinstance(response, http.client.HTTPResponse)
         status = getattr(response, "status", 200)
-        if status != 200:
-            return status, b"", live
-        return status, response.read(), live
+        raw = b"" if status != 200 else response.read()
+        _note_report(response if live else None, request, raw)
+        return status, raw, live
 
 
 def _post(request):
@@ -314,7 +324,41 @@ def _post(request):
         live = isinstance(response, http.client.HTTPResponse)
         if getattr(response, "status", 200) != 200:
             raise OSError("status")
-        return response.read(), live
+        raw = response.read()
+        _note_page(response if live else None, raw)
+        return raw, live
+
+
+def _note_page(response, raw: bytes) -> None:
+    if response is None:
+        return
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return
+    import live_gate_proof
+    live_gate_proof._from_history(response, _history_subject(), "page", parsed)
+
+
+def _note_report(response, request, raw: bytes) -> None:
+    if response is None:
+        return
+    url = getattr(request, "full_url", "")
+    marker = "/tokens/"
+    if marker not in url:
+        return
+    past = url.split(marker, 1)[1].split("/report", 1)[0]
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return
+    import live_gate_proof
+    live_gate_proof._from_history(response, _history_subject(), "report", parsed, past)
+
+
+def _history_subject() -> str:
+    subject = _SUBJECT.get()
+    return subject if isinstance(subject, str) else ""
 
 
 def _unverified(cause: str, **extra) -> dict:

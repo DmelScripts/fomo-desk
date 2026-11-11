@@ -2574,6 +2574,23 @@ def _signer_quote_and_blockhash(proof, decoded, transport, now: float) -> dict:
     return {"ok": False, "reason": "blockhash_unknown"}
 
 
+def _live_trade_proofs(case, proof, moment) -> str | None:
+    """LIVE signing needs a fresh Hermes price and Jupiter quote for this mint only."""
+    import live_gate_proof
+    import solana_tx
+    traded = None if case is None else case["mint"]
+    native = solana_tx.NATIVE_MINT
+    if isinstance(proof, dict) and proof.get("side") == "exit":
+        input_mint, output_mint = traded, native
+    else:
+        input_mint, output_mint = native, traded
+    if not live_gate_proof.closed("price_freshness_proven", traded, now=moment):
+        return "price_unknown"
+    if not live_gate_proof.closed("quote_expiry", traded, now=moment, input_mint=input_mint, output_mint=output_mint):
+        return "quote_expired"
+    return None
+
+
 def _signer_capital(message_sha256: str, now, transport) -> dict:
     """Price the whole-message outflow. A reduce-only parse does not set the capital flags."""
     import base64
@@ -2607,6 +2624,10 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     expiry = _signer_quote_and_blockhash(proof, decoded, transport, moment)
     if expiry.get("ok") is not True:
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
+    if db.get_setting("mode", "PAPER") == "LIVE":
+        missing = _live_trade_proofs(case, proof, moment)
+        if missing is not None:
+            return refused | {"reason": missing}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
     priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
@@ -5322,12 +5343,12 @@ def public_reader(request: dict) -> dict:
         req = urllib.request.Request(url, headers={"accept": "application/json"})
     with urllib.request.urlopen(req, timeout=8) as response:
         import http.client
-        live = isinstance(response, http.client.HTTPResponse)
+        opened = response if isinstance(response, http.client.HTTPResponse) else None
         status = response.status
         parsed = json.loads(response.read().decode())
-    if live and isinstance(url, str) and url.startswith("https://api.jup.ag/swap/v2/order") and isinstance(parsed, dict):
+    if opened is not None and isinstance(url, str) and isinstance(parsed, dict):
         import live_gate_proof
-        live_gate_proof.consider_jupiter(parsed)
+        live_gate_proof._from_fetch(opened, url, parsed)
     return {"status": status, "body": parsed}
 
 
@@ -5345,20 +5366,20 @@ def _readiness_blocks(pyth: dict) -> list[str]:
     return blocks
 
 
-def remaining_live_gates() -> list[dict]:
+def remaining_live_gates(mint: str | None = None) -> list[dict]:
     """What still sits between this branch and a genuine live send. None of these are armed.
 
     Thành removed stalkchain_rest_envelope on 2026-11-11 at 22:23 Asia/Saigon.
     LP, rug history, holder growth, bundles, and dev holding stay on the
-    RugCheck, Helius, and Solana Tracker gates below.
+    RugCheck, Helius, and Solana Tracker gates below. A proof is for one mint.
     """
     return [
         {
             "gate": "lp_lock_live",
-            "proves": "a fetched RugCheck summary has lpLockedPct exactly 100",
+            "proves": "RugCheck lpBurn is 100, or lpLockedPct is 100, or both are present and sum to exactly 100",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("lp_lock_live"),
+            "closed": _live_gate("lp_lock_live", mint),
         },
         {
             "gate": "rug_history_live",
@@ -5366,7 +5387,7 @@ def remaining_live_gates() -> list[dict]:
             "owner": True,
             "owner_action": "set HELIUS_API_KEY",
             "needs_live_read": True,
-            "closed": _live_gate("rug_history_live"),
+            "closed": _live_gate("rug_history_live", mint),
         },
         {
             "gate": "holder_growth_live",
@@ -5374,28 +5395,28 @@ def remaining_live_gates() -> list[dict]:
             "owner": True,
             "owner_action": "set SOLANA_TRACKER_API_KEY",
             "needs_live_read": True,
-            "closed": _live_gate("holder_growth_live"),
+            "closed": _live_gate("holder_growth_live", mint),
         },
         {
             "gate": "bundle_unique_buyers_smart_wallets_dev_holding",
             "proves": "Solana Tracker totalInitialPercentage at most 10, dev holding at most 3 percent, unique buyers and smart wallets scored 0",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("bundle_unique_buyers_smart_wallets_dev_holding"),
+            "closed": _live_gate("bundle_unique_buyers_smart_wallets_dev_holding", mint),
         },
         {
             "gate": "price_freshness_proven",
-            "proves": "a Hermes SOL/USD observation inside the 30 second window at execution",
+            "proves": "a Hermes SOL/USD observation inside the 30 second window for this mint",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("price_freshness_proven"),
+            "closed": _live_gate("price_freshness_proven", mint),
         },
         {
             "gate": "quote_expiry",
-            "proves": "a Jupiter quote expireAt still in the future, checked again before signing",
+            "proves": "a Jupiter quote expireAt still in the future for this mint's input and output, checked again before signing",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("quote_expiry"),
+            "closed": False,
         },
         {
             "gate": "preflight_ready",
@@ -5505,9 +5526,9 @@ def readiness() -> dict:
     }
 
 
-def _live_gate(name: str) -> bool:
+def _live_gate(name: str, mint: str | None) -> bool:
     import live_gate_proof
-    return live_gate_proof.closed(name)
+    return live_gate_proof.closed(name, mint)
 
 
 def _phantom_server_auth_closed() -> bool:
