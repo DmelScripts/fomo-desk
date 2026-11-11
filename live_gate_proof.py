@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import inspect
+import math
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -37,7 +38,7 @@ def closed(gate: str, mint: str | None, now: float | None = None, *, input_mint:
 
 def _from_fetch(response, url: str, parsed, mint: str | None = None) -> None:
     """Record one response the fetch function just parsed. Other callers are ignored."""
-    if _caller() not in _FETCHERS or not _http(response) or not isinstance(url, str) or not isinstance(parsed, dict):
+    if _caller() not in _FETCHERS or not _http(response, url) or not isinstance(url, str) or not isinstance(parsed, dict):
         return
     now = time.time()
     try:
@@ -151,7 +152,7 @@ def _apply(url: str, body: dict, mint: str | None, now: float) -> None:
 
 
 def _lp_ok(body: dict) -> bool:
-    """100% burned, or 100% locked, or both present and summing to exactly 100."""
+    """Burned or locked, each finite and inside 0..100, covering exactly 100."""
     if not isinstance(body, dict):
         return False
     has_burn = "lpBurn" in body
@@ -159,16 +160,20 @@ def _lp_ok(body: dict) -> bool:
     burn = body.get("lpBurn") if has_burn else None
     locked = body.get("lpLockedPct") if has_lock else None
     if has_burn and has_lock:
-        return _strict(burn) and _strict(locked) and burn + locked == 100
+        return _unit(burn) and _unit(locked) and burn + locked == 100
     if has_burn:
-        return _strict(burn) and burn == 100
+        return _unit(burn) and burn == 100
     if has_lock:
-        return _strict(locked) and locked == 100
+        return _unit(locked) and locked == 100
     return False
 
 
-def _strict(value) -> bool:
-    return type(value) is int or type(value) is float
+def _unit(value) -> bool:
+    if type(value) is int:
+        return 0 <= value <= 100
+    if type(value) is float and math.isfinite(value):
+        return 0 <= value <= 100
+    return False
 
 
 def _try_dev(mint: str | None, now: float) -> None:
@@ -229,14 +234,46 @@ def _fresh(row, now: float) -> bool:
     return True
 
 
-def _http(response) -> bool:
+def _http(response, url: str | None = None) -> bool:
     if isinstance(response, http.client.HTTPResponse):
         return True
+    return _httpx_live(response, url)
+
+
+def _httpx_live(response, url: str | None) -> bool:
+    """An httpx.Response counts only when this process's transport read it off the network."""
     try:
         import httpx
+        from httpcore._backends.sync import SyncStream
     except Exception:
         return False
-    return isinstance(response, httpx.Response)
+    if type(response) is not httpx.Response or not isinstance(url, str):
+        return False
+    extensions = response.extensions if isinstance(getattr(response, "extensions", None), dict) else {}
+    stream = extensions.get("network_stream")
+    if type(stream) is not SyncStream:
+        return False
+    import ssl
+    sock = stream.get_extra_info("socket")
+    if not isinstance(sock, ssl.SSLSocket):
+        return False
+    try:
+        request = response.request
+        seen = str(request.url)
+        host = request.url.host
+        peer = sock.getpeername()
+    except Exception:
+        return False
+    if not isinstance(host, str) or host == "" or seen != url:
+        return False
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != host:
+        return False
+    if host not in {"api.jup.ag", "api.dexscreener.com"}:
+        return False
+    if not isinstance(peer, tuple) or len(peer) < 2 or peer[1] != 443:
+        return False
+    return True
 
 
 def _caller() -> str | None:

@@ -285,9 +285,31 @@ def _swap_bytes(body: dict) -> bytes:
         return b""
 
 
+_HTTPX = None
+_HTTPX_TRANSPORT = None
+
+
+def _http_client():
+    """The one client this module uses. A replacement transport is not this client."""
+    global _HTTPX, _HTTPX_TRANSPORT
+    import httpx
+    if _HTTPX is None:
+        _HTTPX_TRANSPORT = httpx.HTTPTransport(retries=0)
+        _HTTPX = httpx.Client(transport=_HTTPX_TRANSPORT, follow_redirects=False, timeout=8.0)
+    return _HTTPX, _HTTPX_TRANSPORT
+
+
+def _own_read(response, url: str) -> bool:
+    import httpx
+    client, transport = _http_client()
+    if client._transport is not transport or type(transport) is not httpx.HTTPTransport:
+        return False
+    import live_gate_proof
+    return live_gate_proof._httpx_live(response, url)
+
+
 def live_transport(request: dict):
     """One public call. No key, no redirect, no second host."""
-    import httpx
     if request.get("kind") == "rpc":
         if request.get("method") != "getAccountInfo":
             raise PublicStop("method_refused")
@@ -323,8 +345,9 @@ def live_transport(request: dict):
     url = request.get("url")
     if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
         raise PublicStop("host_refused")
+    client, transport = _http_client()
     try:
-        response = httpx.get(url, timeout=8.0, follow_redirects=False, headers={"accept": "application/json"})
+        response = client.get(url, timeout=8.0, follow_redirects=False, headers={"accept": "application/json"})
     except Exception as exc:
         raise PublicStop("transport") from exc
     if response.status_code in {301, 302, 303, 307, 308}:
@@ -337,7 +360,7 @@ def live_transport(request: dict):
         body = response.json()
     except Exception as exc:
         raise PublicStop("http_status") from exc
-    if isinstance(url, str) and isinstance(body, dict):
+    if isinstance(url, str) and isinstance(body, dict) and client._transport is transport and _own_read(response, url):
         import live_gate_proof
         live_gate_proof._from_fetch(response, url, body)
     return {"status": 200, "body": body}

@@ -112,6 +112,7 @@ class LiveGateTests(unittest.TestCase):
             {"lpBurn": 100},
             {"lpBurn": 60, "lpLockedPct": 40},
             {"lpBurn": 100.0, "lpLockedPct": 0},
+            {"lpBurn": 0, "lpLockedPct": 100},
         ):
             urllib.request.urlopen = open_summary(body)
             desk_providers.production_fetch("rugcheck", MINT_A)
@@ -122,6 +123,13 @@ class LiveGateTests(unittest.TestCase):
             {"lpLockedPct": "100"},
             {"lpLockedPct": True},
             {"lpBurn": 100, "lpLockedPct": 100},
+            {"lpBurn": -1, "lpLockedPct": 101},
+            {"lpBurn": 101},
+            {"lpLockedPct": 101},
+            {"lpBurn": -1},
+            {"lpLockedPct": float("nan")},
+            {"lpBurn": float("inf"), "lpLockedPct": float("-inf")},
+            {"lpBurn": float("nan"), "lpLockedPct": float("nan")},
             {"lpBurn": 50},
             {},
         ):
@@ -169,6 +177,53 @@ class LiveGateTests(unittest.TestCase):
         ))
         self.assertIsNone(desk_loop._live_trade_proofs({"mint": MINT_A}, {"side": "entry"}, moment))
         self.assertEqual(desk_loop._live_trade_proofs({"mint": MINT_B}, {"side": "entry"}, moment), "price_unknown")
+
+    def test_a_fabricated_httpx_response_does_not_close_the_quote(self):
+        import httpx
+        import public_market
+        now = int(time.time())
+        quote = {"expireAt": now + 60, "inputMint": solana_tx.NATIVE_MINT, "outputMint": MINT_A}
+        url = "https://api.jup.ag/swap/v2/order?inputMint=%s&outputMint=%s" % (solana_tx.NATIVE_MINT, MINT_A)
+        original_get = httpx.get
+        httpx.get = lambda *args, **kwargs: httpx.Response(200, json=quote)
+        self.addCleanup(lambda: setattr(httpx, "get", original_get))
+        try:
+            public_market.live_transport({"url": url})
+        except public_market.PublicStop:
+            pass
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        client, _transport = public_market._http_client()
+        original_client_get = client.get
+
+        def fabricated(request_url, timeout=8.0, follow_redirects=False, headers=None):
+            return httpx.Response(200, json=quote)
+
+        client.get = fabricated
+        self.addCleanup(lambda: setattr(client, "get", original_client_get))
+        returned = public_market.live_transport({"url": url})
+        self.assertEqual(returned["body"]["expireAt"], quote["expireAt"])
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        saved_client = public_market._HTTPX
+        saved_transport = public_market._HTTPX_TRANSPORT
+
+        def handler(request):
+            return httpx.Response(200, json=quote)
+
+        public_market._HTTPX = httpx.Client(transport=httpx.MockTransport(handler))
+        self.addCleanup(lambda: (
+            setattr(public_market, "_HTTPX", saved_client),
+            setattr(public_market, "_HTTPX_TRANSPORT", saved_transport),
+        ))
+        mocked = public_market.live_transport({"url": url})
+        self.assertEqual(mocked["status"], 200)
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        self.assertFalse(live_gate_proof._httpx_live(httpx.Response(200, json=quote), url))
 
     def test_stale_hermes_price_and_an_expired_quote_stop_before_signing(self):
         now = 1_700_000_000
