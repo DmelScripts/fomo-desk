@@ -30,11 +30,6 @@ _LOCK = threading.Lock()
 _NOTES: dict = {}
 
 
-def closed(gate: str, mint: str | None, now: float | None = None, *, input_mint: str | None = None, output_mint: str | None = None) -> bool:
-    """True only for a fresh proof of this gate for this mint."""
-    return _CLOSED(gate, mint, now, input_mint=input_mint, output_mint=output_mint)
-
-
 def _from_fetch(response, url: str, parsed, mint: str | None = None) -> None:
     """A response object is not a read. Only this module's handshake records a proof."""
     return None
@@ -60,7 +55,7 @@ def _record(url, raw, mint=None, history=None) -> None:
     return None
 
 
-def _plan(url, body, mint, now, history, existing) -> list:
+def _plan(url, body, mint, now, history, existing, lp_ok, mint_at, plan_dev, plan_history, parse_holder, bundle_check, assess_price, split, parse_query) -> list:
     """Describe note updates. This does not write them."""
     if type(url) is not str or type(body) is not dict or isinstance(now, bool) or not isinstance(now, (int, float)):
         return []
@@ -79,38 +74,35 @@ def _plan(url, body, mint, now, history, existing) -> list:
         return data
 
     if url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report/summary"):
-        token = _mint_at(url, "/tokens/", "/report/summary")
+        token = mint_at(url, "/tokens/", "/report/summary")
         if isinstance(token, str):
-            put(("lp_lock_live", token), _lp_ok(body), None)
+            put(("lp_lock_live", token), lp_ok(body), None)
     elif url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report"):
-        token = _mint_at(url, "/tokens/", "/report")
+        token = mint_at(url, "/tokens/", "/report")
         if isinstance(token, str) and "creatorBalance" in body:
             put(("rug_body", token), True, None, body)
-            _plan_dev(token, now, view, put)
+            plan_dev(token, now, view, put)
     elif url.startswith("https://data.solanatracker.io/holders/chart/"):
         token = url.split("/holders/chart/", 1)[1].split("?", 1)[0].strip("/")
         if token != "" and "/" not in token:
-            import public_filter_docs
-            parsed = public_filter_docs.parse_holder_chart(body, token)
+            parsed = parse_holder(body, token)
             grew = parsed.get("ok") is True and type(parsed.get("delta")) is int and parsed["delta"] > 0
             put(("holder_growth_live", token), grew, None)
     elif url.startswith("https://data.solanatracker.io/tokens/"):
         token = url.split("/tokens/", 1)[1].split("?", 1)[0].strip("/")
         if token != "" and "/" not in token:
-            import cross_source
-            checked = cross_source.bundle_check(body, None)
+            checked = bundle_check(body, None)
             put(("bundle", token), checked.get("ok") is True, None)
             put(("tracker_body", token), True, None, body)
-            _plan_dev(token, now, view, put)
+            plan_dev(token, now, view, put)
     elif url.startswith("https://hermes.pyth.network/") and isinstance(mint, str) and mint != "":
-        import pyth_sponsored
         try:
-            priced = pyth_sponsored.assess_signer_price(body, now)
+            priced = assess_price(body, now)
         except (OverflowError, ValueError, ArithmeticError):
             priced = {"ok": False}
         put(("price_freshness_proven", mint), priced.get("ok") is True, None)
     elif url.startswith("https://api.jup.ag/swap/v2/order"):
-        query = parse_qs(urlsplit(url).query)
+        query = parse_query(split(url).query)
         inputs = query.get("inputMint") or []
         outputs = query.get("outputMint") or []
         if len(inputs) == 1 and len(outputs) == 1:
@@ -122,29 +114,28 @@ def _plan(url, body, mint, now, history, existing) -> list:
                 else:
                     put(("quote_expiry", left, right), False, None)
     if type(history) is tuple and len(history) == 3:
-        _plan_history(history, body, now, view, put)
+        plan_history(history, body, now, view, put)
     return updates
 
 
-def _plan_dev(token, now, view, put) -> None:
+def _plan_dev(token, now, view, put, fresh, dev_check, bundle_check) -> None:
     state = view()
     tracker = state.get(("tracker_body", token))
     rug = state.get(("rug_body", token))
-    if not _fresh(tracker, now) or not _fresh(rug, now):
+    if not fresh(tracker, now) or not fresh(rug, now):
         return
-    import cross_source
-    dev = cross_source.dev_check(rug.get("body"), tracker.get("body"))
-    bundle = cross_source.bundle_check(tracker.get("body"), None)
+    dev = dev_check(rug.get("body"), tracker.get("body"))
+    bundle = bundle_check(tracker.get("body"), None)
     put(("dev", token), dev.get("status") == "PASS", None)
     put(("bundle", token), bundle.get("ok") is True, None)
 
 
-def _plan_history(history, body, now, view, put) -> None:
+def _plan_history(history, body, now, view, put, fresh, asset_ids) -> None:
     kind, subject, past_mint = history
     if not isinstance(subject, str) or subject == "":
         return
     if kind == "page":
-        ids = _asset_ids(body)
+        ids = asset_ids(body)
         if ids is None or subject not in ids:
             put(("rug_history_live", subject), False, None)
             return
@@ -160,7 +151,7 @@ def _plan_history(history, body, now, view, put) -> None:
     state = view()
     page = state.get(("rug_page", subject))
     listed = state.get(("rug_ids", subject))
-    if not _fresh(page, now) or not isinstance(listed, dict):
+    if not fresh(page, now) or not isinstance(listed, dict):
         return
     ids = listed.get("body")
     if not isinstance(ids, list) or subject not in ids:
@@ -170,14 +161,14 @@ def _plan_history(history, body, now, view, put) -> None:
     for item in past:
         report = state.get(("rug_report", subject, item))
         saved = report.get("body") if isinstance(report, dict) else None
-        if not _fresh(report, now) or not isinstance(saved, dict) or saved.get("rugged") is not False:
+        if not fresh(report, now) or not isinstance(saved, dict) or saved.get("rugged") is not False:
             if item == past_mint and body.get("rugged") is True:
                 put(("rug_history_live", subject), False, None)
             return
     put(("rug_history_live", subject), True, None)
 
 
-def _lp_ok(body: dict) -> bool:
+def _lp_ok(body: dict, unit) -> bool:
     """Burned or locked, each finite and inside 0..100, covering exactly 100."""
     if not isinstance(body, dict):
         return False
@@ -186,18 +177,18 @@ def _lp_ok(body: dict) -> bool:
     burn = body.get("lpBurn") if has_burn else None
     locked = body.get("lpLockedPct") if has_lock else None
     if has_burn and has_lock:
-        return _unit(burn) and _unit(locked) and burn + locked == 100
+        return unit(burn) and unit(locked) and burn + locked == 100
     if has_burn:
-        return _unit(burn) and burn == 100
+        return unit(burn) and burn == 100
     if has_lock:
-        return _unit(locked) and locked == 100
+        return unit(locked) and locked == 100
     return False
 
 
-def _unit(value) -> bool:
+def _unit(value, finite=math.isfinite) -> bool:
     if type(value) is int:
         return 0 <= value <= 100
-    if type(value) is float and math.isfinite(value):
+    if type(value) is float and finite(value):
         return 0 <= value <= 100
     return False
 
@@ -220,14 +211,14 @@ def _asset_ids(body: dict) -> list | None:
     return ids
 
 
-def _fresh(row, now: float) -> bool:
+def _fresh(row, now: float, limit: float) -> bool:
     if not isinstance(row, dict) or row.get("ok") is not True:
         return False
     stamp = row.get("at")
     if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
         return False
     age = now - stamp
-    if not (0 <= age <= FRESH_S):
+    if not (0 <= age <= limit):
         return False
     until = row.get("until")
     if until is not None and (isinstance(until, bool) or not isinstance(until, (int, float)) or until <= now):
@@ -247,10 +238,6 @@ def _mint_at(url: str, left: str, right: str) -> str | None:
     if token == "" or "/" in token:
         return None
     return token
-
-
-def _reset_for_tests() -> None:
-    _RESET()
 
 
 _SOCKET = socket.socket
@@ -330,26 +317,8 @@ class _OwnedTransport(httpx.BaseTransport):
         return response
 
     def _note(self, response, request) -> None:
-        if self._inner.handle_request.__func__ is not _HTTP_TRANSPORT_HANDLE:
-            return
-        if not _stack_intact() or type(response) is not httpx.Response:
-            return
-        extensions = response.extensions if type(response.extensions) is dict else None
-        stream = None if extensions is None else extensions.get("network_stream")
-        if type(stream) is not _SYNC_STREAM:
-            return
-        host = request.url.host
-        if not _handshake_host(stream._sock, host if type(host) is str else ""):
-            return
-        if str(request.url) == "":
-            return
-        try:
-            parsed = json.loads(response.content.decode("utf-8"))
-        except Exception:
-            return
-        if type(parsed) is not dict:
-            return
-        _commit_verified(stream._sock, str(request.url), parsed, None, None)
+        """Replaced at import by the closure that verified this socket. This body does not write."""
+        return None
 
 
 def http_client():
@@ -360,45 +329,12 @@ def http_client():
     return _CLIENT
 
 
-def exchange(request, timeout: float, mint: str | None = None, history=None):
-    """Read one HTTPS request. A patched urlopen is returned and is not a proof."""
-    return _EXCHANGE(request, timeout, mint, history)
-
-
-def _owned_https(request, timeout: float, mint, history):
-    return _OWNED(request, timeout, mint, history)
-
-
-def _seen() -> dict:
-    return _SEEN()
-
-
-def _CLOSED(gate, mint, now, *, input_mint=None, output_mint=None) -> bool:
-    return False
-
-
-def _RESET() -> None:
-    return None
-
-
-def _EXCHANGE(request, timeout, mint, history):
-    raise RuntimeError("unbound")
-
-
-def _OWNED(request, timeout, mint, history):
-    raise RuntimeError("unbound")
-
-
-def _SEEN() -> dict:
-    return {}
-
-
-def _commit_verified(sock, url, parsed, mint, history) -> None:
-    return None
-
-
 def _wire():
     """Bind the handshake objects and the note store. Later global lookups are not the originals."""
+    global closed, exchange, _owned_https, _reset_for_tests, _seen
+    global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _NOTES
+    global attributes_intact, monitored
+    global _fresh, _lp_ok, _plan, _plan_dev, _plan_history
     secret = os.urandom(32)
     notes = {}
     lock = threading.Lock()
@@ -416,6 +352,54 @@ def _wire():
     transport_handle = _HTTP_TRANSPORT_HANDLE
     client_get = _CLIENT_GET
     sync_stream = _SYNC_STREAM
+    fresh_body = _fresh
+    lp_body = _lp_ok
+    plan_body = _plan
+    dev_body = _plan_dev
+    hist_body = _plan_history
+    unit = _unit
+    mint_at = _mint_at
+    asset_ids = _asset_ids
+    apply_fn = _apply
+    record_fn = _record
+    client_fn = http_client
+    hmac_new = hmac.new
+    digest_new = hashlib.sha256
+    compare_digest = hmac.compare_digest
+    clock = time.time
+    dumps = json.dumps
+    loads = json.loads
+    window = FRESH_S
+    import public_filter_docs
+    import cross_source
+    import pyth_sponsored
+    docs = public_filter_docs
+    markets = cross_source
+    pyth = pyth_sponsored
+    parse_holder = docs.parse_holder_chart
+    bundle_check = markets.bundle_check
+    dev_check = markets.dev_check
+    assess_price = pyth.assess_signer_price
+    split = urlsplit
+    parse_query = parse_qs
+
+    def fresh(row, now) -> bool:
+        return fresh_body(row, now, window)
+
+    def lp_ok(body) -> bool:
+        return lp_body(body, unit)
+
+    def plan_dev(token, now, view, put) -> None:
+        return dev_body(token, now, view, put, fresh, dev_check, bundle_check)
+
+    def plan_history(history, body, now, view, put) -> None:
+        return hist_body(history, body, now, view, put, fresh, asset_ids)
+
+    def plan(url, body, mint, now, history, existing) -> list:
+        return plan_body(
+            url, body, mint, now, history, existing,
+            lp_ok, mint_at, plan_dev, plan_history, parse_holder, bundle_check, assess_price, split, parse_query,
+        )
 
     def canonical(value):
         if type(value) is tuple:
@@ -428,18 +412,18 @@ def _wire():
 
     def mac_for(key, row) -> str:
         gate = key[0] if type(key) is tuple and key else ""
-        digest = hashlib.sha256(json.dumps(canonical({
+        digest = digest_new(dumps(canonical({
             "ok": row.get("ok"),
             "until": row.get("until"),
             "body": row.get("body"),
         }), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        message = json.dumps(canonical({
+        message = dumps(canonical({
             "gate": gate,
             "key": key,
             "timestamp": row.get("at"),
             "digest": digest,
         }), sort_keys=True, separators=(",", ":")).encode()
-        return hmac.new(secret, message, hashlib.sha256).hexdigest()
+        return hmac_new(secret, message, digest_new).hexdigest()
 
     def authentic(key, row) -> bool:
         if type(row) is not dict or type(row.get("mac")) is not str:
@@ -448,7 +432,7 @@ def _wire():
             expect = mac_for(key, row)
         except Exception:
             return False
-        return hmac.compare_digest(expect, row["mac"])
+        return compare_digest(expect, row["mac"])
 
     def sign(key, row) -> dict:
         signed = dict(row)
@@ -501,13 +485,13 @@ def _wire():
         )
 
     def commit(sock, url, parsed, mint, history) -> None:
-        host = urlsplit(url).hostname if type(url) is str else None
+        host = split(url).hostname if type(url) is str else None
         if not handshake(sock, host if type(host) is str else ""):
             return
-        save(_plan(url, parsed, mint, time.time(), history, seen()))
+        save(plan(url, parsed, mint, clock(), history, seen()))
 
-    def owned_https(request, timeout, mint, history):
-        parts = urlsplit(request.full_url)
+    def owned_https(request, timeout, mint=None, history=None):
+        parts = split(request.full_url)
         if parts.scheme != "https" or type(parts.hostname) is not str or parts.hostname == "":
             raise urllib.error.URLError("host")
         conn = connection_cls(parts.hostname, timeout=timeout, context=context)
@@ -525,7 +509,7 @@ def _wire():
             parsed = None
             if status == 200:
                 try:
-                    parsed = json.loads(raw.decode("utf-8"))
+                    parsed = loads(raw.decode("utf-8"))
                 except Exception:
                     parsed = None
             proved = type(parsed) is dict and handshake(sock, parts.hostname)
@@ -535,7 +519,7 @@ def _wire():
         finally:
             conn.close()
 
-    def do_exchange(request, timeout, mint, history):
+    def do_exchange(request, timeout, mint=None, history=None):
         if not stack_intact():
             response = urllib.request.urlopen(request, timeout=timeout)
             try:
@@ -546,26 +530,149 @@ def _wire():
                     closer()
         return owned_https(request, timeout, mint, history)
 
-    def note_ok(gate, mint, now, *, input_mint=None, output_mint=None) -> bool:
-        moment = time.time() if now is None else now
+    def note_ok(gate, mint, now=None, *, input_mint=None, output_mint=None) -> bool:
+        """True only for a fresh proof of this gate for this mint."""
+        moment = clock() if now is None else now
         if isinstance(moment, bool) or not isinstance(moment, (int, float)):
             return False
         if not isinstance(mint, str) or mint == "":
             return False
         current = seen()
         if gate == "bundle_unique_buyers_smart_wallets_dev_holding":
-            return _fresh(current.get(("bundle", mint)), moment) and _fresh(current.get(("dev", mint)), moment)
+            return fresh(current.get(("bundle", mint)), moment) and fresh(current.get(("dev", mint)), moment)
         if gate == "quote_expiry":
             if mint not in {input_mint, output_mint}:
                 return False
-            return _fresh(current.get(("quote_expiry", input_mint, output_mint)), moment)
-        return _fresh(current.get((gate, mint)), moment)
+            return fresh(current.get(("quote_expiry", input_mint, output_mint)), moment)
+        return fresh(current.get((gate, mint)), moment)
 
     def reset() -> None:
         with lock:
             notes.clear()
 
-    global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _owned_https, _NOTES
+    view = types.MappingProxyType(notes)
+
+    def check() -> bool:
+        mod = sys.modules[__name__]
+        expected = (
+            ("closed", note_ok),
+            ("exchange", do_exchange),
+            ("_owned_https", owned_https),
+            ("_commit_verified", commit),
+            ("_handshake_host", handshake),
+            ("_cert_matches", cert_matches),
+            ("_stack_intact", stack_intact),
+            ("_NOTES", view),
+            ("_DeskHTTPSConnection", connection_cls),
+            ("_CONTEXT", context),
+            ("_fresh", fresh),
+            ("_lp_ok", lp_ok),
+            ("_plan", plan),
+            ("_plan_dev", plan_dev),
+            ("_plan_history", plan_history),
+            ("_mint_at", mint_at),
+            ("_asset_ids", asset_ids),
+            ("_unit", unit),
+            ("urlsplit", split),
+            ("parse_qs", parse_query),
+            ("_apply", apply_fn),
+            ("_record", record_fn),
+            ("_CLOSED", note_ok),
+            ("_EXCHANGE", do_exchange),
+            ("_OWNED", owned_https),
+            ("_SEEN", seen),
+            ("_RESET", reset),
+            ("http_client", client_fn),
+            ("_seen", seen),
+            ("attributes_intact", check),
+            ("monitored", names),
+        )
+        for name, original in expected:
+            if getattr(mod, name, None) is not original:
+                return False
+        if mod._OwnedTransport._note is not note:
+            return False
+        if mod.FRESH_S is not window:
+            return False
+        if hmac.new is not hmac_new or hashlib.sha256 is not digest_new or hmac.compare_digest is not compare_digest:
+            return False
+        if time.time is not clock or json.dumps is not dumps or json.loads is not loads:
+            return False
+        if docs.parse_holder_chart is not parse_holder:
+            return False
+        if markets.bundle_check is not bundle_check or markets.dev_check is not dev_check:
+            return False
+        if pyth.assess_signer_price is not assess_price:
+            return False
+        return stack_intact()
+
+    def names():
+        return (
+            "closed",
+            "exchange",
+            "_owned_https",
+            "_commit_verified",
+            "_handshake_host",
+            "_cert_matches",
+            "_stack_intact",
+            "_NOTES",
+            "_DeskHTTPSConnection",
+            "_CONTEXT",
+            "_fresh",
+            "_lp_ok",
+            "_plan",
+            "_plan_dev",
+            "_plan_history",
+            "_mint_at",
+            "_asset_ids",
+            "_unit",
+            "urlsplit",
+            "parse_qs",
+            "_apply",
+            "_record",
+            "_CLOSED",
+            "_EXCHANGE",
+            "_OWNED",
+            "_SEEN",
+            "_RESET",
+            "http_client",
+            "_seen",
+            "attributes_intact",
+            "monitored",
+            "FRESH_S",
+            "_note",
+        )
+
+    def note(self, response, request) -> None:
+        if self._inner.handle_request.__func__ is not transport_handle:
+            return
+        if not stack_intact() or type(response) is not httpx.Response:
+            return
+        extensions = response.extensions if type(response.extensions) is dict else None
+        stream = None if extensions is None else extensions.get("network_stream")
+        if type(stream) is not sync_stream:
+            return
+        host = request.url.host
+        if not handshake(stream._sock, host if type(host) is str else ""):
+            return
+        try:
+            parsed = loads(response.content.decode("utf-8"))
+        except Exception:
+            return
+        if type(parsed) is not dict:
+            return
+        commit(stream._sock, str(request.url), parsed, None, None)
+
+    closed = note_ok
+    exchange = do_exchange
+    _owned_https = owned_https
+    _reset_for_tests = reset
+    _seen = seen
+    _fresh = fresh
+    _lp_ok = lp_ok
+    _plan = plan
+    _plan_dev = plan_dev
+    _plan_history = plan_history
     _CLOSED = note_ok
     _RESET = reset
     _EXCHANGE = do_exchange
@@ -574,8 +681,10 @@ def _wire():
     _commit_verified = commit
     _handshake_host = handshake
     _stack_intact = stack_intact
-    _owned_https = owned_https
-    _NOTES = types.MappingProxyType(notes)
+    _NOTES = view
+    attributes_intact = check
+    monitored = names
+    _OwnedTransport._note = note
 
 
 _wire()

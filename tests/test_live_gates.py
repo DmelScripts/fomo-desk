@@ -141,6 +141,76 @@ class LiveGateTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(live_gate_proof, "_NOTES", view))
         self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
 
+    def test_replacing_each_bound_attribute_leaves_the_live_gates_open(self):
+        import hmac
+        import hashlib
+        live = {
+            "lp_lock_live",
+            "rug_history_live",
+            "holder_growth_live",
+            "bundle_unique_buyers_smart_wallets_dev_holding",
+            "price_freshness_proven",
+            "quote_expiry",
+        }
+        names = live_gate_proof.monitored()
+
+        def gates_open(label):
+            rows = {item["gate"]: item["closed"] for item in desk_loop.remaining_live_gates(MINT_A)}
+            for name in live:
+                self.assertFalse(rows[name], label + ":" + name)
+            self.assertTrue(rows["ticket_limit_proven"], label)
+
+        gates_open("before")
+        for name in names:
+            if name == "_note":
+                owner = live_gate_proof._OwnedTransport
+                original = owner._note
+                owner._note = lambda *args, **kwargs: True
+                try:
+                    self.assertFalse(live_gate_proof.attributes_intact(), name)
+                    gates_open(name)
+                finally:
+                    owner._note = original
+                continue
+            original = getattr(live_gate_proof, name)
+            setattr(live_gate_proof, name, (lambda *args, **kwargs: True) if name != "FRESH_S" else 10**9)
+            try:
+                if name != "attributes_intact":
+                    self.assertFalse(live_gate_proof.attributes_intact(), name)
+                if name != "closed":
+                    self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A), name)
+                gates_open(name)
+            finally:
+                setattr(live_gate_proof, name, original)
+        import json
+        import time
+        import public_filter_docs
+        import cross_source
+        import pyth_sponsored
+        swapped = (
+            (hmac, "new", lambda *args, **kwargs: original_hmac(b"x", b"y")),
+            (hmac, "compare_digest", lambda *args, **kwargs: True),
+            (hashlib, "sha256", lambda *args, **kwargs: original_sha(b"")),
+            (time, "time", lambda: 0),
+            (json, "dumps", lambda *args, **kwargs: "{}"),
+            (json, "loads", lambda *args, **kwargs: {"lpLockedPct": 100}),
+            (public_filter_docs, "parse_holder_chart", lambda *args, **kwargs: {"ok": True, "delta": 5}),
+            (cross_source, "bundle_check", lambda *args, **kwargs: {"ok": True}),
+            (cross_source, "dev_check", lambda *args, **kwargs: {"status": "PASS"}),
+            (pyth_sponsored, "assess_signer_price", lambda *args, **kwargs: {"ok": True}),
+        )
+        original_hmac = hmac.new
+        original_sha = hashlib.sha256
+        for owner, attr, replacement in swapped:
+            original = getattr(owner, attr)
+            setattr(owner, attr, replacement)
+            try:
+                self.assertFalse(live_gate_proof.attributes_intact(), attr)
+                self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A), attr)
+                gates_open(attr)
+            finally:
+                setattr(owner, attr, original)
+
     def test_a_transport_fixture_does_not_close_the_provider_gates(self):
         import desk_providers
         desk_providers.set_transport(lambda spec: {"status": 200, "body": {"lpLockedPct": 100}, "_live": True})

@@ -5361,7 +5361,7 @@ def _readiness_blocks(pyth: dict) -> list[str]:
     return blocks
 
 
-def remaining_live_gates(mint: str | None = None) -> list[dict]:
+def _remaining_live_gates_body(mint, shut) -> list[dict]:
     """What still sits between this branch and a genuine live send. None of these are armed.
 
     Thành removed stalkchain_rest_envelope on 2026-11-11 at 22:23 Asia/Saigon.
@@ -5374,7 +5374,7 @@ def remaining_live_gates(mint: str | None = None) -> list[dict]:
             "proves": "RugCheck lpBurn is 100, or lpLockedPct is 100, or both are present and sum to exactly 100",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("lp_lock_live", mint),
+            "closed": shut("lp_lock_live", mint),
         },
         {
             "gate": "rug_history_live",
@@ -5382,7 +5382,7 @@ def remaining_live_gates(mint: str | None = None) -> list[dict]:
             "owner": True,
             "owner_action": "set HELIUS_API_KEY",
             "needs_live_read": True,
-            "closed": _live_gate("rug_history_live", mint),
+            "closed": shut("rug_history_live", mint),
         },
         {
             "gate": "holder_growth_live",
@@ -5390,21 +5390,21 @@ def remaining_live_gates(mint: str | None = None) -> list[dict]:
             "owner": True,
             "owner_action": "set SOLANA_TRACKER_API_KEY",
             "needs_live_read": True,
-            "closed": _live_gate("holder_growth_live", mint),
+            "closed": shut("holder_growth_live", mint),
         },
         {
             "gate": "bundle_unique_buyers_smart_wallets_dev_holding",
             "proves": "Solana Tracker totalInitialPercentage at most 10, dev holding at most 3 percent, unique buyers and smart wallets scored 0",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("bundle_unique_buyers_smart_wallets_dev_holding", mint),
+            "closed": shut("bundle_unique_buyers_smart_wallets_dev_holding", mint),
         },
         {
             "gate": "price_freshness_proven",
             "proves": "a Hermes SOL/USD observation inside the 30 second window for this mint",
             "owner": False,
             "needs_live_read": True,
-            "closed": _live_gate("price_freshness_proven", mint),
+            "closed": shut("price_freshness_proven", mint),
         },
         {
             "gate": "quote_expiry",
@@ -5459,6 +5459,29 @@ def remaining_live_gates(mint: str | None = None) -> list[dict]:
             "closed": _process_has_env("HELIUS_API_KEY") and _process_has_env("SOLANA_TRACKER_API_KEY"),
         },
     ]
+
+
+def _bind_remaining_live_gates():
+    """Capture the proof objects once. Later lookups of those names are checked, not trusted."""
+    import live_gate_proof as proof
+    check = proof.attributes_intact
+    read = proof.closed
+    mod = proof
+
+    def remaining_live_gates(mint: str | None = None) -> list[dict]:
+        intact = mod.closed is read and mod.attributes_intact is check and check()
+
+        def shut(name, mint_arg):
+            if not intact:
+                return False
+            return read(name, mint_arg)
+
+        return _remaining_live_gates_body(mint, shut)
+
+    return remaining_live_gates
+
+
+remaining_live_gates = _bind_remaining_live_gates()
 
 
 def readiness() -> dict:
