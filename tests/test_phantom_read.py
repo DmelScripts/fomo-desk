@@ -407,6 +407,31 @@ exit 2
         self.assertIsNone(priced["buy_decimals"])
         self.assertFalse(priced["executable"])
 
+    def test_balance_and_quote_evidence_leave_the_auth_gate_open(self):
+        import desk_loop
+        balanced = self.client.post("/api/phantom/balance", headers=AUTH, json={}).json()
+        self.assertEqual(balanced["status"], "observed")
+        after_balance = phantom_auth.account_view()
+        self.assertEqual(after_balance["evidence_source"], "balance")
+        self.assertIsNone(after_balance["observed_wallet_id"])
+        self.assertIsNone(after_balance["observed_wallet"])
+        self.assertIsNone(after_balance["observed_at"])
+        self.assertFalse(after_balance["matches_allowlist"])
+        self.assertFalse(phantom_auth.server_auth_closed())
+        quoted = self.client.post("/api/phantom/quote", headers=AUTH, json={}).json()
+        self.assertEqual(quoted["status"], "observed")
+        after_quote = phantom_auth.account_view()
+        self.assertEqual(after_quote["evidence_source"], "quote")
+        self.assertIsNone(after_quote["observed_wallet_id"])
+        self.assertIsNone(after_quote["observed_wallet"])
+        self.assertFalse(phantom_auth.server_auth_closed())
+        gate = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "phantom_server_auth")
+        self.assertFalse(gate["closed"])
+        phantom_auth.note_evidence("observed", "balance")
+        self.assertIsNone(phantom_auth.account_view()["observed_wallet_id"])
+        self.assertNotEqual(phantom_auth.account_view()["observed_wallet"], WALLET)
+        self.assertFalse(phantom_auth.server_auth_closed())
+
     def _evidence(self) -> dict:
         return json.loads(self._evidence_text())
 

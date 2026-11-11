@@ -44,6 +44,7 @@ _FLOW: dict = {
     "observed_wallet": None,
     "process": None,
     "evidence_fresh": False,
+    "evidence_source": None,
     "observed_at": None,
 }
 
@@ -56,6 +57,7 @@ def account_view() -> dict:
         observed_wallet = _FLOW["observed_wallet"]
         matches = _matches()
         observed_at = _FLOW.get("observed_at")
+        evidence_source = _FLOW.get("evidence_source")
     cached = _cached_evidence() if state == "idle" else None
     if state == "idle" and cached:
         auth_flow = "cached_" + cached["state"]
@@ -65,17 +67,20 @@ def account_view() -> dict:
         observed_id = None
         observed_wallet = None
         observed_at = None
+        evidence_source = None
     elif state == "idle":
         auth_flow = phantom_transport.AUTH
         evidence = "none"
         cached_match = None
         observed_at = None
+        evidence_source = None
     else:
         auth_flow = state
         evidence = "fresh" if state in _IDENTITY else "process"
         cached_match = None
         if evidence != "fresh":
             observed_at = None
+            evidence_source = None
     return {
         "auth_flow": auth_flow,
         "evidence": evidence,
@@ -88,6 +93,7 @@ def account_view() -> dict:
         "observed_wallet_id": observed_id,
         "observed_wallet": observed_wallet,
         "matches_allowlist": matches,
+        "evidence_source": evidence_source,
         "observed_at": observed_at,
         "required_wallet_id": phantom_transport.REQUIRED_WALLET_ID,
         "required_wallet": phantom_transport.REQUIRED_WALLET,
@@ -95,23 +101,19 @@ def account_view() -> dict:
 
 
 def note_evidence(state: str, source: str) -> None:
-    """Remember a read-only identity result. This does not start a login."""
+    """Remember a balance or quote result. This does not identify the wallet."""
     if state not in {"observed", "mismatch", "auth_error"} or source not in {"balance", "quote"}:
         return
     with _LOCK:
         _FLOW["state"] = state
         _FLOW["evidence_fresh"] = True
+        _FLOW["evidence_source"] = source
         _FLOW["approval_url"] = None
         _FLOW["user_code"] = None
         _FLOW["verify"] = None
-        if state == "observed":
-            _FLOW["observed_wallet_id"] = phantom_transport.REQUIRED_WALLET_ID
-            _FLOW["observed_wallet"] = phantom_transport.REQUIRED_WALLET
-            _FLOW["observed_at"] = time.time()
-        else:
-            _FLOW["observed_wallet_id"] = None
-            _FLOW["observed_wallet"] = None
-            _FLOW["observed_at"] = time.time()
+        _FLOW["observed_wallet_id"] = None
+        _FLOW["observed_wallet"] = None
+        _FLOW["observed_at"] = None
     _persist_evidence(state, source)
 
 
@@ -349,7 +351,8 @@ def _apply_classification(result: dict) -> None:
             _FLOW["observed_wallet"] = None
         _FLOW["state"] = result["state"]
         _FLOW["evidence_fresh"] = result["state"] in _IDENTITY
-        _FLOW["observed_at"] = time.time() if result["state"] in _IDENTITY else None
+        _FLOW["evidence_source"] = "addresses" if result["state"] in _IDENTITY else None
+        _FLOW["observed_at"] = time.time() if result["state"] in {"observed", "mismatch"} and result.get("wallet_id") and result.get("address") else None
     if result["state"] in _IDENTITY:
         _persist_evidence(result["state"], "addresses")
     log.info("phantom login %s", result["state"])
@@ -547,6 +550,8 @@ def server_auth_closed(now: float | None = None) -> bool:
         view = account_view()
     except Exception:
         return False
+    if view.get("evidence_source") != "addresses":
+        return False
     if view["auth_flow"] != "observed" or view["evidence"] != "fresh" or view["matches_allowlist"] is not True:
         return False
     if view["cached_match"] is True:
@@ -663,6 +668,7 @@ def reset_for_tests() -> None:
             "process": None,
             "verify": None,
             "evidence_fresh": False,
+            "evidence_source": None,
             "observed_at": None,
         })
     _kill(proc)
