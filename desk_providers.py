@@ -31,6 +31,10 @@ _GAP: float | None = None
 _TRANSPORT = None
 _INSTALLED = False
 _SECRETS: list[str] = []
+_NOW = time.monotonic
+_SLEEP = time.sleep
+_DECISION_TIMEOUT = TIMEOUT_S
+_DEADLINE: float | None = None
 
 
 def configured() -> dict:
@@ -46,15 +50,32 @@ def configured() -> dict:
 
 def set_transport(transport) -> None:
     """A test double. Production uses urllib and does not keep a response."""
-    global _TRANSPORT
+    global _TRANSPORT, _DEADLINE
     _TRANSPORT = transport if callable(transport) else None
     _LAST.clear()
+    _DEADLINE = None
 
 
 def set_gap(seconds: float | None) -> None:
-    global _GAP
+    global _GAP, _DEADLINE
     _GAP = seconds
     _LAST.clear()
+    _DEADLINE = None
+
+
+def set_clock(now, sleep) -> None:
+    """Tests advance time here. Production uses the monotonic clock and time.sleep."""
+    global _NOW, _SLEEP, _DEADLINE
+    _NOW = now if callable(now) else time.monotonic
+    _SLEEP = sleep if callable(sleep) else time.sleep
+    _LAST.clear()
+    _DEADLINE = None
+
+
+def set_decision_timeout(seconds: float | None) -> None:
+    global _DECISION_TIMEOUT, _DEADLINE
+    _DECISION_TIMEOUT = TIMEOUT_S if seconds is None else seconds
+    _DEADLINE = None
 
 
 def install() -> None:
@@ -76,9 +97,14 @@ def shutdown() -> None:
 
 
 def production_fetch(kind, mint, pair_id=None):
+    _start_decision()
     if not _safe_address(mint):
         raise cross_source.FetchFailed("mint")
     if kind == "dex":
+        # token-pairs/v1 returns a JSON array of pair objects. The saved
+        # dex_pair files are the other endpoint, latest/dex/pairs, whose body
+        # is {schemaVersion, pairs}. The live mint read was tokens/v1 and is
+        # that same array. select_pair sees {pairs: array} either way.
         return _json("dexscreener", "GET", dexscreener_public.pairs_url(mint), _plain())
     if kind == "rugcheck":
         return _json("rugcheck", "GET", "https://api.rugcheck.xyz/v1/tokens/" + mint + "/report", _plain())
@@ -97,6 +123,7 @@ def production_fetch(kind, mint, pair_id=None):
 
 def fetch_hermes(now: float) -> dict:
     """One Hermes SOL/USD read. A 401 or 403 is price_unknown. No on-chain substitute."""
+    _start_decision()
     if not _present("PYTH_API_KEY"):
         return {"ok": False, "reason": "price_unknown", "cause": "pyth_api_key_missing", "onchain_substituted": False, "live": False}
     try:
@@ -114,7 +141,11 @@ def _json(provider: str, method: str, url: str, headers: dict, payload=None):
         raise cross_source.FetchFailed(provider + "_rate_limited")
     if status != 200:
         raise cross_source.FetchFailed(provider + "_status")
-    if not isinstance(body, dict):
+    if provider == "dexscreener" and "/token-pairs/v1/" in url and isinstance(body, list):
+        if any(type(item) is not dict for item in body):
+            raise cross_source.FetchFailed("dexscreener_unparsed")
+        return {"pairs": body}
+    if type(body) is not dict:
         raise cross_source.FetchFailed(provider + "_unparsed")
     return body
 
@@ -129,10 +160,10 @@ def _exchange(provider: str, method: str, url: str, headers: dict, payload):
             result = _urllib(spec)
     except cross_source.FetchFailed:
         raise
-    except (TimeoutError, urllib.error.URLError):
-        raise cross_source.FetchFailed(provider + "_timeout")
+    except TimeoutError:
+        raise cross_source.FetchFailed(provider + "_timeout") from None
     except Exception:
-        raise cross_source.FetchFailed(provider + "_status")
+        raise cross_source.FetchFailed(provider + "_status") from None
     if not isinstance(result, dict) or type(result.get("status")) is not int:
         raise cross_source.FetchFailed(provider + "_unparsed")
     return result.get("status"), result.get("body")
@@ -146,29 +177,68 @@ def _urllib(spec: dict) -> dict:
         url = url + "?api-key=" + key
     data = None if spec.get("json") is None else json.dumps(spec["json"]).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            raw = response.read()
-            status = response.status
-    except urllib.error.HTTPError as exc:
-        return {"status": exc.code, "body": None}
+    status, raw = _read(request, _remaining())
+    if status == "timeout":
+        raise cross_source.FetchFailed(spec["provider"] + "_timeout")
+    if type(status) is not int:
+        raise cross_source.FetchFailed(spec["provider"] + "_status")
     parsed = None
-    try:
-        parsed = json.loads(raw.decode("utf-8")) if raw else None
-    except Exception:
-        parsed = None
+    if isinstance(raw, (bytes, bytearray)) and raw:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception:
+            parsed = None
     return {"status": status, "body": parsed}
 
 
+def _read(request, timeout: float):
+    """Open one request. Failures stay in this frame so the URL is not an exception."""
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+    except TimeoutError:
+        return "timeout", None
+    except urllib.error.URLError as exc:
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            return "timeout", None
+        return "status", None
+    except Exception:
+        return "status", None
+
+
+def _start_decision() -> None:
+    global _DEADLINE
+    timeout = _DECISION_TIMEOUT if _DECISION_TIMEOUT is not None else TIMEOUT_S
+    _DEADLINE = _NOW() + timeout
+
+
 def _pace(provider: str) -> None:
+    """Wait out this provider's gap. A 429 is separate. A wait past the deadline fails closed."""
+    global _DEADLINE
     gap = GAPS[provider] if _GAP is None else _GAP
-    if gap <= 0:
-        return
-    now = time.monotonic()
-    last = _LAST.get(provider, 0.0)
-    if now - last < gap:
-        raise cross_source.FetchFailed(provider + "_rate_limited")
+    now = _NOW()
+    if _DEADLINE is None:
+        _DEADLINE = now + (_DECISION_TIMEOUT if _DECISION_TIMEOUT is not None else TIMEOUT_S)
+    if gap > 0:
+        last = _LAST.get(provider)
+        if last is not None:
+            wait = gap - (now - last)
+            if wait > 1e-9:
+                if now + wait > _DEADLINE + 1e-9:
+                    raise cross_source.FetchFailed(provider + "_rate_limited")
+                _SLEEP(wait)
+                now = _NOW()
+                if now > _DEADLINE + 1e-9:
+                    raise cross_source.FetchFailed(provider + "_rate_limited")
     _LAST[provider] = now
+
+
+def _remaining() -> float:
+    if _DEADLINE is None:
+        return TIMEOUT_S
+    return max(0.001, _DEADLINE - _NOW())
 
 
 def _creator(mint: str) -> str:

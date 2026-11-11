@@ -30,9 +30,23 @@ class DeskProviderTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("SOLANA_TRACKER_API_KEY", None))
         self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
         self.addCleanup(lambda: os.environ.pop("PYTH_API_KEY", None))
-        desk_providers.set_gap(0)
+        self.clock = {"t": 0.0}
+        self.slept = []
+
+        def _now():
+            return self.clock["t"]
+
+        def _sleep(seconds):
+            self.slept.append(seconds)
+            self.clock["t"] += seconds
+
+        self._now = _now
+        self._sleep = _sleep
+        desk_providers.set_clock(_now, _sleep)
         desk_providers.set_transport(None)
         self.addCleanup(lambda: desk_providers.set_transport(None))
+        self.addCleanup(lambda: desk_providers.set_clock(None, None))
+        self.addCleanup(lambda: desk_providers.set_decision_timeout(None))
         self.addCleanup(lambda: desk_providers.set_gap(None))
         self.addCleanup(cross_source.clear_fetcher)
 
@@ -57,7 +71,10 @@ class DeskProviderTests(unittest.TestCase):
             self.assertNotIn("test-pyth-not-a-secret", url)
             if "token-pairs" in url:
                 symbol = creators[url.rsplit("/", 1)[-1]]
-                return {"status": 200, "body": _saved(symbol, "dex_pair")}
+                saved = _saved(symbol, "dex_pair")
+                self.assertIsInstance(saved, dict)
+                self.assertIn("pairs", saved)
+                return {"status": 200, "body": list(saved["pairs"])}
             if "rugcheck.xyz" in url:
                 symbol = creators[url.split("/tokens/")[1].split("/")[0]]
                 return {"status": 200, "body": _saved(symbol, "rugcheck")}
@@ -120,7 +137,11 @@ class DeskProviderTests(unittest.TestCase):
         with self.assertRaises(cross_source.FetchFailed) as bad:
             desk_providers.production_fetch("dex", mint)
         self.assertEqual(bad.exception.reason, "dexscreener_unparsed")
-        desk_providers.set_gap(10)
+        desk_providers.set_transport(lambda spec: {"status": 200, "body": ["nope"]})
+        with self.assertRaises(cross_source.FetchFailed) as other:
+            desk_providers.production_fetch("rugcheck", mint)
+        self.assertEqual(other.exception.reason, "rugcheck_unparsed")
+        desk_providers.set_decision_timeout(0.1)
         calls = {"n": 0}
 
         def once(spec):
@@ -133,6 +154,7 @@ class DeskProviderTests(unittest.TestCase):
             desk_providers.production_fetch("dex", mint)
         self.assertEqual(paced.exception.reason, "dexscreener_rate_limited")
         self.assertEqual(calls["n"], 1)
+        desk_providers.set_decision_timeout(None)
         desk_providers.set_transport(lambda spec: {"status": 403, "body": "error code: 1010"})
         hermes = desk_providers.fetch_hermes(NOW)
         self.assertEqual(hermes["reason"], "price_unknown")
@@ -145,13 +167,100 @@ class DeskProviderTests(unittest.TestCase):
             seen.update(spec)
             return {"status": 200, "body": {"parsed": []}}
 
-        desk_providers.set_gap(0)
         desk_providers.set_transport(capture)
         desk_providers.fetch_hermes(NOW)
         self.assertEqual(seen["headers"]["User-Agent"], "fomo-desk/1.0")
         self.assertEqual(seen["headers"]["Accept"], "application/json")
         self.assertTrue(seen["headers"]["Authorization"].startswith("Bearer "))
         self.assertNotIn("test-pyth-not-a-secret", seen["url"])
+
+    def test_default_gap_waits_for_the_second_read(self):
+        mint = TOKENS["X"]
+        seen = []
+
+        def transport(spec):
+            seen.append(spec["url"])
+            url = spec["url"]
+            if "token-pairs" in url:
+                return {"status": 200, "body": list(_saved("X", "dex_pair")["pairs"])}
+            if "rugcheck.xyz" in url:
+                return {"status": 200, "body": _saved("X", "rugcheck")}
+            if "/holders/chart/" in url:
+                return {"status": 200, "body": _saved("X", "st_holders_chart")}
+            if "/deployer/" in url:
+                return {"status": 200, "body": _saved("X", "st_deployer")}
+            if "/tokens/" in url:
+                return {"status": 200, "body": _saved("X", "st_token")}
+            return {"status": 200, "body": _saved("X", "das_byCreator")}
+
+        desk_providers.set_transport(transport)
+        cross_source.set_fetcher(desk_providers.production_fetch)
+        started = self.clock["t"]
+        fetched = cross_source.fetch_bundle(mint, "")
+        self.assertIsNotNone(fetched)
+        self.assertGreater(self.clock["t"], started)
+        tracker = [url for url in seen if "solanatracker.io" in url]
+        self.assertGreaterEqual(len(tracker), 2)
+        self.assertEqual(cross_source.judge(fetched)["overall"], EXPECTED["X"]["overall"])
+        self.assertTrue(all(gap == desk_providers.GAPS["solana_tracker"] for gap in self.slept))
+        seen.clear()
+        self.slept.clear()
+        desk_providers.set_clock(self._now, self._sleep)
+        body = desk_providers.production_fetch("deployer", mint)
+        self.assertEqual(body, _saved("X", "st_deployer"))
+        self.assertEqual(len(seen), 2)
+        self.assertIn("/tokens/" + mint, seen[0])
+        creator = _saved("X", "st_token")["token"]["creation"]["creator"]
+        self.assertTrue(seen[1].endswith("/deployer/" + creator))
+        self.assertEqual(self.slept, [desk_providers.GAPS["solana_tracker"]])
+        self.slept.clear()
+        desk_providers.set_decision_timeout(None)
+        desk_providers.production_fetch("rugcheck", mint)
+        desk_providers.production_fetch("rugcheck", mint)
+        self.assertEqual(self.slept, [desk_providers.GAPS["rugcheck"]])
+        self.slept.clear()
+        desk_providers.production_fetch("dex", mint)
+        desk_providers.production_fetch("dex", mint)
+        self.assertEqual(self.slept, [desk_providers.GAPS["dexscreener"]])
+        self.slept.clear()
+        desk_providers.production_fetch("das", mint)
+        desk_providers.production_fetch("das", mint)
+        self.assertIn(desk_providers.GAPS["helius"], self.slept)
+        self.slept.clear()
+        desk_providers.set_transport(lambda spec: {"status": 200, "body": {"parsed": []}})
+        desk_providers.fetch_hermes(NOW)
+        desk_providers.fetch_hermes(NOW)
+        self.assertEqual(self.slept, [desk_providers.GAPS["hermes"]])
+
+    def test_helius_key_stays_out_of_errors(self):
+        import traceback
+        import urllib.error
+        import urllib.request
+        key = os.environ["HELIUS_API_KEY"]
+        seen = {}
+
+        def boom(request, timeout=None):
+            seen["url"] = request.full_url
+            raise urllib.error.URLError("unreachable")
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = boom
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        desk_providers.set_transport(None)
+        with self.assertRaises(cross_source.FetchFailed) as caught:
+            desk_providers._urllib({
+                "provider": "helius",
+                "method": "POST",
+                "url": "https://mainnet.helius-rpc.com/",
+                "headers": {"Accept": "application/json", "User-Agent": "fomo-desk/1.0", "_helius_key": key},
+                "json": {"method": "getAssetsByCreator"},
+            })
+        text = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn(key, text)
+        self.assertNotIn(key, repr(caught.exception))
+        self.assertNotIn("api-key=", text)
+        self.assertIn(key, seen["url"])
+        self.assertNotIn(key, str(caught.exception))
 
     def test_startup_reports_configured_providers_without_enabling_live(self):
         shown = desk_providers.configured()

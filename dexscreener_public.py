@@ -2,6 +2,9 @@
 
 The documented read is GET
 https://api.dexscreener.com/token-pairs/v1/{chainId}/{tokenAddress}
+and the body is a JSON array of pair objects. The saved dex_pair files came
+from GET /latest/dex/pairs/solana/{pair}, whose body is {schemaVersion, pairs}.
+The live mint read was GET /tokens/v1/solana/{mint} and is the same array.
 and the fields are marketCap, fdv, liquidity.usd, pairCreatedAt, priceChange,
 and txns. marketCap is never replaced with fdv. Transaction counts are not
 unique buyers. A boost is not a smart-wallet fact. This module does not open
