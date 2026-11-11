@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 HELIUS_RPC = "https://mainnet.helius-rpc.com"
 HELIUS_HOST = "mainnet.helius-rpc.com"
 KEY_ENV = "HELIUS_API_KEY"
+# Tests may install a transport. Production leaves this unset.
+TRANSPORT = None
 
 
 class RpcRefused(Exception):
@@ -49,15 +51,23 @@ def describe() -> dict:
 
 def post(payload: dict) -> dict:
     """One JSON-RPC POST. A failure reason does not include the URL."""
-    import urllib.error
-    import urllib.request
+    if callable(TRANSPORT):
+        result = TRANSPORT(payload)
+        if not isinstance(result, dict) or type(result.get("status")) is not int:
+            raise RpcRefused("rpc_transport")
+        return result
     info = describe()
     if info["ok"] is not True:
         raise RpcRefused("helius_api_key_missing")
+    import urllib.error
+    import urllib.request
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         _wire_url(), data=data, headers={"content-type": "application/json", "accept": "application/json"}, method="POST",
     )
+    status = None
+    raw = b""
+    reason = None
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             status = response.status
@@ -68,13 +78,35 @@ def post(payload: dict) -> dict:
             raw = exc.read()
         except Exception:
             raw = b""
+    except TimeoutError:
+        reason = "rpc_timeout"
+    except urllib.error.URLError as exc:
+        reason = "rpc_timeout" if isinstance(getattr(exc, "reason", None), TimeoutError) else "rpc_transport"
     except Exception:
-        raise RpcRefused("transport") from None
+        reason = "rpc_transport"
+    if reason is not None:
+        raise RpcRefused(reason)
     try:
         body = json.loads(raw.decode("utf-8")) if raw else None
     except Exception:
         body = None
     return {"status": status, "body": body}
+
+
+def call(payload: dict) -> dict:
+    """The JSON-RPC object. HTTP failures are reason codes with no request URL."""
+    info = describe()
+    if info["ok"] is not True:
+        raise RpcRefused("helius_api_key_missing")
+    posted = post(payload)
+    status = posted.get("status")
+    if type(status) is not int or status != 200:
+        code = status if type(status) is int else 0
+        raise RpcRefused("rpc_http_%s" % code)
+    body = posted.get("body")
+    if not isinstance(body, dict):
+        raise RpcRefused("rpc_transport")
+    return body
 
 
 def _wire_url() -> str:

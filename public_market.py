@@ -301,10 +301,14 @@ def live_transport(request: dict):
         info = solana_rpc.describe()
         if info["ok"] is not True:
             raise PublicStop("helius_api_key_missing")
+        response = None
+        reason = None
         try:
             response = httpx.post(solana_rpc._wire_url(), json=payload, timeout=8.0, follow_redirects=False)
         except Exception:
-            raise PublicStop("transport") from None
+            reason = "transport"
+        if reason is not None:
+            raise PublicStop(reason)
         if response.status_code in {301, 302, 303, 307, 308}:
             raise PublicStop("redirect", response.status_code)
         if response.status_code != 200:

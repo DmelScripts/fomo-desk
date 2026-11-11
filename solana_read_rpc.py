@@ -110,6 +110,8 @@ def http_transport(payload: dict) -> dict:
     info = solana_rpc.describe()
     if info["ok"] is not True:
         raise RpcError("helius_api_key_missing")
+    response = None
+    reason = None
     try:
         response = httpx.post(
             solana_rpc._wire_url(),
@@ -119,9 +121,11 @@ def http_transport(payload: dict) -> dict:
             headers={"content-type": "application/json", "accept": "application/json"},
         )
     except httpx.TimeoutException:
-        raise RpcError("timeout") from None
+        reason = "timeout"
     except httpx.HTTPError:
-        raise RpcError("transport") from None
+        reason = "transport"
+    if reason is not None:
+        raise RpcError(reason)
     if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
         raise RpcError("redirect")
     if response.status_code != 200:

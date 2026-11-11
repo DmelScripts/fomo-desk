@@ -34,10 +34,22 @@ class HttpxAdapter:
         return response.json()
 
     async def post_json(self, url: str, body: dict, headers: dict | None = None):
-        response = await self.client.post(url, json=body, headers=headers, timeout=30)
+        import httpx
+        import solana_rpc
+        response = None
+        reason = None
+        try:
+            response = await self.client.post(url, json=body, headers=headers, timeout=30)
+        except httpx.TimeoutException:
+            reason = "rpc_timeout"
+        except httpx.HTTPError:
+            reason = "rpc_transport"
+        if reason is not None:
+            raise solana_rpc.RpcRefused(reason)
         if response.status_code == 429:
             return {"error": {"code": 429}}
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise solana_rpc.RpcRefused("rpc_http_%s" % response.status_code)
         return response.json()
 
 

@@ -36,7 +36,9 @@ class FiveRoleTests(unittest.TestCase):
         dex = copy.deepcopy(load("dexscreener_pair.json"))
         dex[0]["liquidity"]["usd"] = 50000
         clock = {"t": 2_000_000.0}
-        desk = Desk(FakeHttp(dex, _largest()), Notifier(mode="PAPER"), now=lambda: clock["t"])
+        http = FakeHttp(dex, _largest())
+        self.addCleanup(http.close)
+        desk = Desk(http, Notifier(mode="PAPER"), now=lambda: clock["t"])
         scanner, auditor, analyst = Scanner(desk), Auditor(desk), Analyst(desk)
         executor, risk = Executor(desk), Risk(desk)
 

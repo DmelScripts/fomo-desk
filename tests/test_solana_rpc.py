@@ -59,7 +59,7 @@ class SolanaRpcTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
         with self.assertRaises(solana_rpc.RpcRefused) as refused:
             solana_rpc.post({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []})
-        self.assertEqual(refused.exception.reason, "transport")
+        self.assertEqual(refused.exception.reason, "rpc_transport")
         self.assertIsNone(refused.exception.__cause__)
         self.assertNotIn("helius-wire-secret", str(refused.exception))
         self.assertEqual(urlparse(seen["url"]).hostname, "mainnet.helius-rpc.com")

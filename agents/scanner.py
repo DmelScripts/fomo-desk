@@ -395,11 +395,7 @@ class Scanner:
 
     async def _rpc(self, method: str, params: list) -> Any:
         import solana_rpc
-        info = solana_rpc.describe()
-        if info["ok"] is not True:
-            return {"error": {"code": -32000, "message": "helius_api_key_missing"}}
-        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        return await self.desk.http.post_json(solana_rpc._wire_url(), body)
+        return solana_rpc.call({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 
 
 async def migration_silence(ws) -> str:
