@@ -2847,6 +2847,27 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
             "signer_reached": False, "reason": simulated.get("cause"), "preflight_ready": False,
             "sign": False, "send": False, "live_ready": False, "execution_eligible": False,
         }
+    import live_submit
+    if live_submit.armed():
+        import phantom_session
+        lived = live_submit.submit(case_id, message_sha256, now, transport, phantom_session.sign)
+        return base | {
+            "fee_estimate_blocked": False,
+            "signer_reached": True,
+            "signer_is_mock": False,
+            "signer": lived,
+            "sender": lived,
+            "reason": lived.get("reason"),
+            "sign": lived.get("sign") is True,
+            "send": lived.get("send") is True,
+            "live_ready": False,
+            "execution_eligible": False,
+            "network_called": lived.get("network_called") is True,
+            "broadcast": lived.get("broadcast") is True,
+            "preflight_ready": True,
+            "simulate": True,
+            "simulation": simulated,
+        }
     signed = mock_phantom_sign(message_sha256, auth, now, transport)
     if signed.get("signed") is not True:
         return base | {
