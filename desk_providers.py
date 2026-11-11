@@ -247,7 +247,7 @@ def _urllib(spec: dict) -> dict:
             return {"_reason": spec["provider"] + "_status"}
         return result
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
-    status, raw, response = _read(request, _remaining())
+    status, raw = _read(request, _remaining(), spec.get("_proof_mint"))
     if status == "timeout":
         return {"_reason": spec["provider"] + "_timeout"}
     if type(status) is not int:
@@ -258,29 +258,25 @@ def _urllib(spec: dict) -> dict:
             parsed = json.loads(raw.decode("utf-8"))
         except Exception:
             parsed = None
-    if response is not None and isinstance(parsed, dict):
-        import live_gate_proof
-        live_gate_proof._from_fetch(response, url, parsed, spec.get("_proof_mint"))
     return {"status": status, "body": parsed}
 
 
-def _read(request, timeout: float):
+def _read(request, timeout: float, mint=None):
     """Open one request. Failures stay in this frame so the URL is not an exception."""
+    import live_gate_proof
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            import http.client
-            opened = response if isinstance(response, http.client.HTTPResponse) else None
-            return response.status, response.read(), opened
+        status, raw, _proved = live_gate_proof.exchange(request, timeout, mint=mint if isinstance(mint, str) else None)
+        return status, raw
     except urllib.error.HTTPError as exc:
-        return exc.code, None, None
+        return exc.code, None
     except TimeoutError:
-        return "timeout", None, None
+        return "timeout", None
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), TimeoutError):
-            return "timeout", None, None
-        return "status", None, None
+            return "timeout", None
+        return "status", None
     except Exception:
-        return "status", None, None
+        return "status", None
 
 
 def _start_decision() -> None:

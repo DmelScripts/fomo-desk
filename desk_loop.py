@@ -5341,14 +5341,9 @@ def public_reader(request: dict) -> dict:
         if url.startswith("https://api.jup.ag/") and ("/execute" in url or "/submit" in url):
             raise RuntimeError("host_refused")
         req = urllib.request.Request(url, headers={"accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=8) as response:
-        import http.client
-        opened = response if isinstance(response, http.client.HTTPResponse) else None
-        status = response.status
-        parsed = json.loads(response.read().decode())
-    if opened is not None and isinstance(url, str) and isinstance(parsed, dict):
-        import live_gate_proof
-        live_gate_proof._from_fetch(opened, url, parsed)
+    import live_gate_proof
+    status, raw, _proved = live_gate_proof.exchange(req, 8)
+    parsed = json.loads(raw.decode())
     return {"status": status, "body": parsed}
 
 

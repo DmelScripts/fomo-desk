@@ -87,37 +87,15 @@ class LiveGateTests(unittest.TestCase):
         desk_providers.production_fetch("rugcheck", MINT_A)
         self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
 
-    def test_lp_burn_or_lock_closes_only_the_fetched_mint(self):
-        import desk_providers
-        previous = desk_providers._GAP
-        desk_providers._GAP = 0
-        self.addCleanup(lambda: setattr(desk_providers, "_GAP", previous))
-        original = urllib.request.urlopen
-
-        def open_summary(body):
-            def urlopen(request, timeout=8):
-                if request.full_url.endswith("/report/summary"):
-                    return _response(json.dumps(body).encode())
-                return _response(b"{}")
-            return urlopen
-
-        urllib.request.urlopen = open_summary({"lpLockedPct": 100})
-        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
-        desk_providers.production_fetch("rugcheck", MINT_A)
-        self.assertTrue(live_gate_proof.closed("lp_lock_live", MINT_A))
-        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_B))
-        self.assertFalse(any(item["closed"] for item in desk_loop.remaining_live_gates() if item["gate"] == "lp_lock_live"))
-        live_gate_proof._reset_for_tests()
+    def test_lp_values_must_cover_exactly_100_inside_the_range(self):
         for body in (
+            {"lpLockedPct": 100},
             {"lpBurn": 100},
             {"lpBurn": 60, "lpLockedPct": 40},
             {"lpBurn": 100.0, "lpLockedPct": 0},
             {"lpBurn": 0, "lpLockedPct": 100},
         ):
-            urllib.request.urlopen = open_summary(body)
-            desk_providers.production_fetch("rugcheck", MINT_A)
-            self.assertTrue(live_gate_proof.closed("lp_lock_live", MINT_A), body)
-            live_gate_proof._reset_for_tests()
+            self.assertTrue(live_gate_proof._lp_ok(body), body)
         for body in (
             {"lpLockedPct": 99},
             {"lpLockedPct": "100"},
@@ -133,10 +111,28 @@ class LiveGateTests(unittest.TestCase):
             {"lpBurn": 50},
             {},
         ):
-            urllib.request.urlopen = open_summary(body)
-            desk_providers.production_fetch("rugcheck", MINT_A)
-            self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A), body)
-            live_gate_proof._reset_for_tests()
+            self.assertFalse(live_gate_proof._lp_ok(body), body)
+
+    def test_a_urlopen_subclass_does_not_close_lp_lock(self):
+        class Opened(http.client.HTTPResponse):
+            def __init__(self):
+                self.status = 200
+                self._body = io.BytesIO(b'{"lpLockedPct": 100, "lpBurn": 0}')
+
+            def read(self, amt=None):
+                return self._body.read() if amt is None else self._body.read(amt)
+
+            def close(self):
+                return None
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = lambda request, timeout=8: Opened()
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        url = "https://api.rugcheck.xyz/v1/tokens/" + MINT_A + "/report/summary"
+        body = desk_loop.public_reader({"method": "GET", "url": url})
+        self.assertEqual(body["body"]["lpLockedPct"], 100)
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_B))
 
     def test_a_quote_and_a_price_belong_to_one_mint(self):
         import desk_providers
@@ -159,23 +155,20 @@ class LiveGateTests(unittest.TestCase):
         urllib.request.urlopen = urlopen
         self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
         desk_providers.fetch_hermes(now, MINT_A)
-        self.assertTrue(live_gate_proof.closed("price_freshness_proven", MINT_A, now=time.time()))
+        self.assertFalse(live_gate_proof.closed("price_freshness_proven", MINT_A, now=time.time()))
         self.assertFalse(live_gate_proof.closed("price_freshness_proven", MINT_B, now=time.time()))
         order = "https://api.jup.ag/swap/v2/order?inputMint=%s&outputMint=%s" % (solana_tx.NATIVE_MINT, MINT_A)
         quote = {"expireAt": int(now) + 30, "inputMint": solana_tx.NATIVE_MINT, "outputMint": MINT_A}
         urllib.request.urlopen = lambda request, timeout=8: _response(json.dumps(quote).encode())
         desk_loop.public_reader({"method": "GET", "url": order})
         moment = time.time()
-        self.assertTrue(live_gate_proof.closed(
+        self.assertFalse(live_gate_proof.closed(
             "quote_expiry", MINT_A, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
         ))
         self.assertFalse(live_gate_proof.closed(
             "quote_expiry", MINT_B, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
         ))
-        self.assertFalse(live_gate_proof.closed(
-            "quote_expiry", MINT_A, now=moment, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_B,
-        ))
-        self.assertIsNone(desk_loop._live_trade_proofs({"mint": MINT_A}, {"side": "entry"}, moment))
+        self.assertEqual(desk_loop._live_trade_proofs({"mint": MINT_A}, {"side": "entry"}, moment), "price_unknown")
         self.assertEqual(desk_loop._live_trade_proofs({"mint": MINT_B}, {"side": "entry"}, moment), "price_unknown")
 
     def test_a_fabricated_httpx_response_does_not_close_the_quote(self):
@@ -195,6 +188,7 @@ class LiveGateTests(unittest.TestCase):
             "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
         ))
         client, _transport = public_market._http_client()
+        self.assertIs(client, live_gate_proof.http_client())
         original_client_get = client.get
 
         def fabricated(request_url, timeout=8.0, follow_redirects=False, headers=None):
@@ -207,23 +201,60 @@ class LiveGateTests(unittest.TestCase):
         self.assertFalse(live_gate_proof.closed(
             "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
         ))
-        saved_client = public_market._HTTPX
-        saved_transport = public_market._HTTPX_TRANSPORT
+        saved_client = live_gate_proof._CLIENT
 
         def handler(request):
             return httpx.Response(200, json=quote)
 
-        public_market._HTTPX = httpx.Client(transport=httpx.MockTransport(handler))
-        self.addCleanup(lambda: (
-            setattr(public_market, "_HTTPX", saved_client),
-            setattr(public_market, "_HTTPX_TRANSPORT", saved_transport),
-        ))
+        live_gate_proof._CLIENT = httpx.Client(transport=httpx.MockTransport(handler))
+        self.addCleanup(lambda: setattr(live_gate_proof, "_CLIENT", saved_client))
         mocked = public_market.live_transport({"url": url})
         self.assertEqual(mocked["status"], 200)
         self.assertFalse(live_gate_proof.closed(
             "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
         ))
-        self.assertFalse(live_gate_proof._httpx_live(httpx.Response(200, json=quote), url))
+        import ssl
+        from httpcore._backends.sync import SyncStream
+
+        class PretendSocket(ssl.SSLSocket):
+            def __new__(cls):
+                import socket
+                raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self = ssl.SSLSocket.__new__(cls, raw)
+                self._raw = raw
+                return self
+
+            def getpeername(self):
+                return ("203.0.113.10", 443)
+
+            def getpeercert(self, binary_form=False):
+                return {"subjectAltName": (("DNS", "api.jup.ag"),)}
+
+        pretend = PretendSocket.__new__(PretendSocket)
+        self.addCleanup(pretend._raw.close)
+        crafted = httpx.Response(
+            200,
+            json=quote,
+            extensions={"network_stream": SyncStream(pretend)},
+            request=httpx.Request("GET", url),
+        )
+        owned = saved_client._transport if saved_client is not None else live_gate_proof.http_client()._transport
+        # The stand-in is what get() returns, so the owned transport's read never runs.
+        live_gate_proof._CLIENT = saved_client if saved_client is not None else live_gate_proof.http_client()
+        current = live_gate_proof.http_client()
+        current.get = lambda *args, **kwargs: crafted
+        self.addCleanup(lambda: current.__dict__.pop("get", None))
+        stood = public_market.live_transport({"url": url})
+        self.assertEqual(stood["body"]["expireAt"], quote["expireAt"])
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
+        # Even if that response is handed to the owned transport, the socket is not ssl.SSLSocket.
+        if type(owned) is live_gate_proof._OwnedTransport:
+            owned._note(crafted, httpx.Request("GET", url))
+        self.assertFalse(live_gate_proof.closed(
+            "quote_expiry", MINT_A, input_mint=solana_tx.NATIVE_MINT, output_mint=MINT_A,
+        ))
 
     def test_stale_hermes_price_and_an_expired_quote_stop_before_signing(self):
         now = 1_700_000_000

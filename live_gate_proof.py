@@ -8,10 +8,18 @@ from __future__ import annotations
 
 import http.client
 import inspect
+import json
 import math
+import socket
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import parse_qs, urlsplit
+
+import httpx
+from httpcore._backends.sync import SyncStream as _SYNC_STREAM
 
 FRESH_S = 30
 _FETCHERS = {"desk_providers", "desk_loop", "public_market", "dev_rug_history"}
@@ -37,18 +45,17 @@ def closed(gate: str, mint: str | None, now: float | None = None, *, input_mint:
 
 
 def _from_fetch(response, url: str, parsed, mint: str | None = None) -> None:
-    """Record one response the fetch function just parsed. Other callers are ignored."""
-    if _caller() not in _FETCHERS or not _http(response, url) or not isinstance(url, str) or not isinstance(parsed, dict):
-        return
-    now = time.time()
-    try:
-        _apply(url, parsed, mint, now)
-    except Exception:
-        return
+    """A response object is not a read. Only this module's handshake records a proof."""
+    return None
 
 
 def _from_history(response, subject: str, kind: str, parsed, past_mint: str | None = None) -> None:
-    if _caller() not in _FETCHERS or not _http(response) or not isinstance(subject, str) or subject == "":
+    """A response object is not a read. Only this module's handshake records a proof."""
+    return None
+
+
+def _remember_history(subject: str, kind: str, parsed, past_mint: str | None) -> None:
+    if not isinstance(subject, str) or subject == "":
         return
     now = time.time()
     if kind == "page" and isinstance(parsed, dict):
@@ -234,46 +241,6 @@ def _fresh(row, now: float) -> bool:
     return True
 
 
-def _http(response, url: str | None = None) -> bool:
-    if isinstance(response, http.client.HTTPResponse):
-        return True
-    return _httpx_live(response, url)
-
-
-def _httpx_live(response, url: str | None) -> bool:
-    """An httpx.Response counts only when this process's transport read it off the network."""
-    try:
-        import httpx
-        from httpcore._backends.sync import SyncStream
-    except Exception:
-        return False
-    if type(response) is not httpx.Response or not isinstance(url, str):
-        return False
-    extensions = response.extensions if isinstance(getattr(response, "extensions", None), dict) else {}
-    stream = extensions.get("network_stream")
-    if type(stream) is not SyncStream:
-        return False
-    import ssl
-    sock = stream.get_extra_info("socket")
-    if not isinstance(sock, ssl.SSLSocket):
-        return False
-    try:
-        request = response.request
-        seen = str(request.url)
-        host = request.url.host
-        peer = sock.getpeername()
-    except Exception:
-        return False
-    if not isinstance(host, str) or host == "" or seen != url:
-        return False
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname != host:
-        return False
-    if host not in {"api.jup.ag", "api.dexscreener.com"}:
-        return False
-    if not isinstance(peer, tuple) or len(peer) < 2 or peer[1] != 443:
-        return False
-    return True
 
 
 def _caller() -> str | None:
@@ -301,3 +268,162 @@ def _mint_at(url: str, left: str, right: str) -> str | None:
 def _reset_for_tests() -> None:
     with _LOCK:
         _NOTES.clear()
+
+
+_SOCKET = socket.socket
+_CONNECT = getattr(socket.socket, "connect")
+_CREATE_CONNECTION = socket.create_connection
+_SSL_SOCKET = ssl.SSLSocket
+_GETPEERCERT = ssl.SSLSocket.getpeercert
+_WRAP = ssl.SSLContext.wrap_socket
+_URLOPEN = urllib.request.urlopen
+_HTTPS_CONNECTION = http.client.HTTPSConnection
+_CONTEXT = ssl.create_default_context()
+_HTTP_TRANSPORT_HANDLE = httpx.HTTPTransport.handle_request
+_CLIENT_GET = httpx.Client.get
+_CLIENT = None
+
+
+def _stack_intact() -> bool:
+    return (
+        socket.socket is _SOCKET
+        and getattr(socket.socket, "connect") is _CONNECT
+        and socket.create_connection is _CREATE_CONNECTION
+        and ssl.SSLSocket is _SSL_SOCKET
+        and ssl.SSLSocket.getpeercert is _GETPEERCERT
+        and ssl.SSLContext.wrap_socket is _WRAP
+        and urllib.request.urlopen is _URLOPEN
+        and http.client.HTTPSConnection is _HTTPS_CONNECTION
+        and httpx.HTTPTransport.handle_request is _HTTP_TRANSPORT_HANDLE
+        and httpx.Client.get is _CLIENT_GET
+    )
+
+
+def _cert_matches(cert, host: str) -> bool:
+    if type(cert) is not dict or type(host) is not str or host == "":
+        return False
+    names = cert.get("subjectAltName")
+    if type(names) is not tuple or not names:
+        return False
+    wanted = host.lower()
+    matched = False
+    for item in names:
+        if type(item) is not tuple or len(item) != 2:
+            return False
+        kind, value = item
+        if kind == "DNS" and type(value) is str and value.lower() == wanted:
+            matched = True
+    return matched
+
+
+def _handshake_host(sock, host: str) -> bool:
+    if not _stack_intact() or type(sock) is not _SSL_SOCKET or type(host) is not str:
+        return False
+    if type(sock).getpeercert is not _GETPEERCERT:
+        return False
+    try:
+        cert = _GETPEERCERT(sock)
+    except Exception:
+        return False
+    return _cert_matches(cert, host)
+
+
+class _DeskHTTPSConnection(_HTTPS_CONNECTION):
+    """One connection this module owns. The proof is the certificate from its handshake."""
+
+    def connect(self):
+        super().connect()
+        self._proof_host = self.host if _handshake_host(self.sock, self.host) else None
+
+
+class _OwnedTransport(httpx.BaseTransport):
+    """The httpx transport this module owns. A replaced get() never enters here."""
+
+    def __init__(self):
+        self._inner = httpx.HTTPTransport(retries=0)
+
+    def handle_request(self, request):
+        response = self._inner.handle_request(request)
+        self._note(response, request)
+        return response
+
+    def _note(self, response, request) -> None:
+        if self._inner.handle_request.__func__ is not _HTTP_TRANSPORT_HANDLE:
+            return
+        if not _stack_intact() or type(response) is not httpx.Response:
+            return
+        extensions = response.extensions if type(response.extensions) is dict else None
+        stream = None if extensions is None else extensions.get("network_stream")
+        if type(stream) is not _SYNC_STREAM:
+            return
+        host = request.url.host
+        if not _handshake_host(stream._sock, host if type(host) is str else ""):
+            return
+        if str(request.url) == "":
+            return
+        try:
+            parsed = json.loads(response.content.decode("utf-8"))
+        except Exception:
+            return
+        if type(parsed) is not dict:
+            return
+        _apply(str(request.url), parsed, None, time.time())
+
+
+def http_client():
+    """The one client. Replacing it, or its get method, does not record a proof."""
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = httpx.Client(transport=_OwnedTransport(), follow_redirects=False, timeout=8.0)
+    return _CLIENT
+
+
+def exchange(request, timeout: float, mint: str | None = None, history=None):
+    """Read one HTTPS request. A patched urlopen is returned and is not a proof."""
+    if not _stack_intact():
+        response = urllib.request.urlopen(request, timeout=timeout)
+        try:
+            return response.status, response.read(), False
+        finally:
+            closer = getattr(response, "close", None)
+            if callable(closer):
+                closer()
+    return _owned_https(request, timeout, mint, history)
+
+
+def _owned_https(request, timeout: float, mint, history):
+    parts = urlsplit(request.full_url)
+    if parts.scheme != "https" or type(parts.hostname) is not str or parts.hostname == "":
+        raise urllib.error.URLError("host")
+    conn = _DeskHTTPSConnection(parts.hostname, timeout=timeout, context=_CONTEXT)
+    path = parts.path or "/"
+    if parts.query:
+        path = path + "?" + parts.query
+    headers = {key: value for key, value in request.header_items()}
+    try:
+        conn.request(request.get_method(), path, body=request.data, headers=headers)
+        response = conn.getresponse()
+        raw = response.read()
+        status = response.status
+    finally:
+        conn.close()
+    proved = status == 200 and getattr(conn, "_proof_host", None) == parts.hostname and _stack_intact()
+    if proved:
+        _record(request.full_url, raw, mint, history)
+    return status, raw, proved
+
+
+def _record(url: str, raw: bytes, mint, history) -> None:
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return
+    if type(parsed) is not dict:
+        return
+    if history is None:
+        _apply(url, parsed, mint, time.time())
+        return
+    if type(history) is not tuple or len(history) != 3:
+        return
+    kind, subject, past = history
+    _remember_history(subject, kind, parsed, past)
