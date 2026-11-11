@@ -251,6 +251,44 @@ class LiveGateTests(unittest.TestCase):
             finally:
                 setattr(owner, attr, original)
 
+    def test_cgnat_is_rejected_and_a_replaced_connect_stays_open(self):
+        import ssl
+        self.assertFalse(live_gate_proof._global_address("100.64.1.1"))
+        self.assertFalse(live_gate_proof._global_address("::ffff:100.64.1.1"))
+        self.assertFalse(live_gate_proof._global_address("10.1.1.1"))
+        self.assertFalse(live_gate_proof._global_address("127.0.0.1"))
+        self.assertTrue(live_gate_proof._global_address("8.8.8.8"))
+        self.assertTrue(live_gate_proof._global_address("2001:4860:4860::8888"))
+        self.assertTrue(live_gate_proof._global_address("::ffff:8.8.8.8"))
+        live = {
+            "lp_lock_live",
+            "rug_history_live",
+            "holder_growth_live",
+            "bundle_unique_buyers_smart_wallets_dev_holding",
+            "price_freshness_proven",
+            "quote_expiry",
+        }
+
+        def gates_open(label):
+            rows = {item["gate"]: item["closed"] for item in desk_loop.remaining_live_gates(MINT_A)}
+            for name in live:
+                self.assertFalse(rows[name], label + ":" + name)
+            self.assertTrue(rows["ticket_limit_proven"], label)
+
+        for owner, attr in (
+            (http.client.HTTPSConnection, "connect"),
+            (http.client.HTTPConnection, "connect"),
+            (ssl.SSLContext, "wrap_socket"),
+            (ssl.SSLContext, "load_verify_locations"),
+        ):
+            original = getattr(owner, attr)
+            setattr(owner, attr, lambda *args, **kwargs: None)
+            try:
+                self.assertFalse(live_gate_proof.attributes_intact(), attr)
+                gates_open(attr)
+            finally:
+                setattr(owner, attr, original)
+
     def test_a_local_certificate_and_redirected_dns_stay_open(self):
         import socket
         import ssl

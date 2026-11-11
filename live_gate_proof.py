@@ -249,6 +249,9 @@ _CREATE_CONNECTION = socket.create_connection
 _SSL_SOCKET = ssl.SSLSocket
 _GETPEERCERT = ssl.SSLSocket.getpeercert
 _WRAP = ssl.SSLContext.wrap_socket
+_LOAD_VERIFY = ssl.SSLContext.load_verify_locations
+_HTTPS_CONNECT = http.client.HTTPSConnection.connect
+_HTTP_CONNECT = http.client.HTTPConnection.connect
 _URLOPEN = urllib.request.urlopen
 _HTTPS_CONNECTION = http.client.HTTPSConnection
 _CA_FILE = certifi.where()
@@ -270,6 +273,18 @@ def _stack_intact() -> bool:
         and httpx.HTTPTransport.handle_request is _HTTP_TRANSPORT_HANDLE
         and httpx.Client.get is _CLIENT_GET
     )
+
+
+def _global_address(value) -> bool:
+    """True only for a globally routable address. CGNAT and mapped CGNAT are not."""
+    try:
+        addr = ipaddress.ip_address(value)
+    except (TypeError, ValueError):
+        return False
+    mapped = addr.ipv4_mapped if type(addr) is ipaddress.IPv6Address else None
+    if mapped is not None:
+        addr = mapped
+    return addr.is_global is True
 
 
 def _cert_matches(cert, host: str) -> bool:
@@ -349,10 +364,12 @@ def _wire():
     ssl_context_cls = ssl.SSLContext
     tls_client = ssl.PROTOCOL_TLS_CLIENT
     cert_required = ssl.CERT_REQUIRED
-    load_verify = ssl.SSLContext.load_verify_locations
+    load_verify = _LOAD_VERIFY
+    https_connect = _HTTPS_CONNECT
+    http_connect = _HTTP_CONNECT
+    global_address = _global_address
     ca_file = _CA_FILE
     getaddrinfo_fn = socket.getaddrinfo
-    ip_address = ipaddress.ip_address
     socket_type = _SOCKET
     connect_fn = _CONNECT
     create_fn = _CREATE_CONNECTION
@@ -471,16 +488,7 @@ def _wire():
             return False
         if type(peer) is not tuple or not peer or type(peer[0]) is not str:
             return False
-        try:
-            addr = ip_address(peer[0])
-        except ValueError:
-            return False
-        mapped = addr.ipv4_mapped if type(addr) is ipaddress.IPv6Address else None
-        if mapped is not None:
-            addr = mapped
-        if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_unspecified:
-            return False
-        return True
+        return global_address(peer[0]) is True
 
     def handshake(sock, host) -> bool:
         if not stack_intact() or type(sock) is not ssl_socket or type(host) is not str:
@@ -512,6 +520,8 @@ def _wire():
             and ssl.CERT_REQUIRED is cert_required
             and urllib.request.urlopen is urlopen
             and http.client.HTTPSConnection is https_base
+            and http.client.HTTPSConnection.connect is https_connect
+            and http.client.HTTPConnection.connect is http_connect
             and httpx.HTTPTransport.handle_request is transport_handle
             and httpx.Client.get is client_get
             and mod._DeskHTTPSConnection is connection_cls
@@ -619,6 +629,7 @@ def _wire():
             ("_NOTES", view),
             ("_DeskHTTPSConnection", connection_cls),
             ("_CA_FILE", ca_file),
+            ("_global_address", global_address),
             ("_fresh", fresh),
             ("_lp_ok", lp_ok),
             ("_plan", plan),
@@ -672,6 +683,7 @@ def _wire():
             "_NOTES",
             "_DeskHTTPSConnection",
             "_CA_FILE",
+            "_global_address",
             "_fresh",
             "_lp_ok",
             "_plan",
