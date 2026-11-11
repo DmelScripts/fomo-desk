@@ -21,13 +21,25 @@ class LiveGateTests(unittest.TestCase):
             "bundle_unique_buyers_smart_wallets_dev_holding",
             "price_freshness_proven",
             "quote_expiry",
-            "stalkchain_rest_envelope",
         ):
             self.assertFalse(gates[name]["closed"], name)
-        stalk = gates["stalkchain_rest_envelope"]["proves"]
-        self.assertIn("has not published", stalk)
-        self.assertIn("scored 0", stalk)
-        self.assertFalse(stalk.__contains__("schemaVersion"))
+        self.assertNotIn("stalkchain_rest_envelope", gates)
+        view = desk_loop.readiness()
+        removed = view["removed_live_gates"]
+        self.assertEqual(removed[0]["gate"], "stalkchain_rest_envelope")
+        self.assertEqual(removed[0]["owner"], "Thành")
+        self.assertEqual(removed[0]["decided_at"], "2026-11-11 22:23 Asia/Saigon")
+        self.assertEqual(
+            removed[0]["facts"],
+            ["lp_lock", "rug_history", "holder_growth", "bundles", "dev_holding"],
+        )
+        self.assertNotIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", view["blocked_because"])
+        self.assertFalse(view["live_ready"])
+        self.assertFalse(view["sign"])
+        self.assertFalse(view["send"])
+        self.assertFalse(view["execution_eligible"])
+        self.assertFalse(view["preflight_ready"])
+        self.assertFalse(view["gate_complete"])
 
     def test_a_fixture_body_does_not_close_a_gate_when_urlopen_is_patched(self):
         original = urllib.request.urlopen

@@ -1,10 +1,11 @@
 """One server-owned pass of the six-role desk. It is not armed and it does not send.
 
 Scout reads DexScreener's documented token-pairs response. Filter reads the
-mint account from the public RPC. LP lock expiry, rug history, holder growth,
-bundles, unique buyers, and smart wallets come only from the documented
-StalkChain tool route. With no owner key, those facts stay unproven and the
-case stops. Caller booleans are not accepted here.
+mint account from the public RPC. LP lock, rug history, holder growth,
+bundles, and dev holding are required only through the RugCheck, Helius, and
+Solana Tracker live gates. Thành removed the StalkChain readiness gate on
+2026-11-11 at 22:23 Asia/Saigon. Unique buyers and smart wallets stay scored 0.
+Caller booleans are not accepted here.
 
 Hermes latest prices require a Pyth API key since 26 August 2026. The keyless
 feed list is metadata, not a price, and this module does not call it.
@@ -5332,7 +5333,7 @@ def public_reader(request: dict) -> dict:
 
 def _readiness_blocks(pyth: dict) -> list[str]:
     import owner_slippage
-    blocks = ["stalkchain_response_fields_for_lp_rug_growth_are_unpublished"]
+    blocks = []
     if owner_slippage.ceiling_bps() != owner_slippage.BPS:
         blocks.append("owner_slippage_unapproved")
     blocks.append(pyth["reason"] or "pyth_sponsored_not_fresh")
@@ -5345,15 +5346,13 @@ def _readiness_blocks(pyth: dict) -> list[str]:
 
 
 def remaining_live_gates() -> list[dict]:
-    """What still sits between this branch and a genuine live send. None of these are armed."""
+    """What still sits between this branch and a genuine live send. None of these are armed.
+
+    Thành removed stalkchain_rest_envelope on 2026-11-11 at 22:23 Asia/Saigon.
+    LP, rug history, holder growth, bundles, and dev holding stay on the
+    RugCheck, Helius, and Solana Tracker gates below.
+    """
     return [
-        {
-            "gate": "stalkchain_rest_envelope",
-            "proves": "StalkChain has not published JSON fields for LP, rug history, holder growth, bundle, unique buyers, or smart wallets. The REST envelope is not those facts. RugCheck, Helius, and Solana Tracker can prove LP, past rugs, holder growth, bundle share, and dev holding; unique buyers and smart wallets stay scored 0. This gate stays open until a published StalkChain schema is approved.",
-            "owner": False,
-            "needs_live_read": True,
-            "closed": False,
-        },
         {
             "gate": "lp_lock_live",
             "proves": "a fetched RugCheck summary has lpLockedPct exactly 100",
@@ -5484,6 +5483,16 @@ def readiness() -> dict:
         "onchain_pyth_usdc_used": False,
         "onchain_pyth_available": pyth["usable"] is True,
         "blocked_because": _readiness_blocks(pyth),
+        "removed_live_gates": [
+            {
+                "gate": "stalkchain_rest_envelope",
+                "owner": "Thành",
+                "decided_at": "2026-11-11 22:23 Asia/Saigon",
+                "decision": "removed from the required LIVE gates",
+                "covered_by": "RugCheck, Helius, and Solana Tracker live gates only",
+                "facts": ["lp_lock", "rug_history", "holder_growth", "bundles", "dev_holding"],
+            }
+        ],
         "slippage_policy": _slippage_policy(),
         "source_fields": stalkchain_adapter.field_requirements(),
         "observation_files_required": list(stalkchain_adapter.OBSERVATION_FILES),
