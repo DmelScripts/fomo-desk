@@ -100,6 +100,47 @@ class LiveGateTests(unittest.TestCase):
         self.assertFalse(live_gate_proof.closed("rug_history_live", MINT_A))
         self.assertFalse(any(isinstance(row, dict) and row.get("ok") is True for row in live_gate_proof._NOTES.values()))
 
+    def test_a_replaced_connection_class_or_a_planted_note_stays_open(self):
+        original = live_gate_proof._DeskHTTPSConnection
+
+        class Fake(original):
+            def connect(self):
+                self._proof_host = self.host
+
+            def request(self, method, path, body=None, headers=None):
+                self._raw = b'{"lpLockedPct": 100}'
+
+            def getresponse(self):
+                raw = self._raw
+
+                class Response:
+                    status = 200
+
+                    def read(self_response):
+                        return raw
+
+                return Response()
+
+            def close(self):
+                return None
+
+        live_gate_proof._DeskHTTPSConnection = Fake
+        self.addCleanup(lambda: setattr(live_gate_proof, "_DeskHTTPSConnection", original))
+        url = "https://api.rugcheck.xyz/v1/tokens/" + MINT_A + "/report/summary"
+        try:
+            desk_loop.public_reader({"method": "GET", "url": url})
+        except Exception:
+            pass
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+        view = live_gate_proof._NOTES
+        with self.assertRaises(TypeError):
+            view[("lp_lock_live", MINT_A)] = {"ok": True, "at": time.time(), "until": None}
+        live_gate_proof._NOTES = {
+            ("lp_lock_live", MINT_A): {"ok": True, "at": time.time(), "until": None, "mac": "0" * 64},
+        }
+        self.addCleanup(lambda: setattr(live_gate_proof, "_NOTES", view))
+        self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+
     def test_a_transport_fixture_does_not_close_the_provider_gates(self):
         import desk_providers
         desk_providers.set_transport(lambda spec: {"status": 200, "body": {"lpLockedPct": 100}, "_live": True})

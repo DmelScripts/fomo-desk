@@ -6,13 +6,18 @@ response is the only caller, and a proof for one mint does not cover another.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.client
 import json
 import math
+import os
 import socket
 import ssl
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
@@ -27,19 +32,7 @@ _NOTES: dict = {}
 
 def closed(gate: str, mint: str | None, now: float | None = None, *, input_mint: str | None = None, output_mint: str | None = None) -> bool:
     """True only for a fresh proof of this gate for this mint."""
-    moment = time.time() if now is None else now
-    if isinstance(moment, bool) or not isinstance(moment, (int, float)):
-        return False
-    if not isinstance(mint, str) or mint == "":
-        return False
-    with _LOCK:
-        if gate == "bundle_unique_buyers_smart_wallets_dev_holding":
-            return _fresh(_NOTES.get(("bundle", mint)), moment) and _fresh(_NOTES.get(("dev", mint)), moment)
-        if gate == "quote_expiry":
-            if mint not in {input_mint, output_mint}:
-                return False
-            return _fresh(_NOTES.get(("quote_expiry", input_mint, output_mint)), moment)
-        return _fresh(_NOTES.get((gate, mint)), moment)
+    return _CLOSED(gate, mint, now, input_mint=input_mint, output_mint=output_mint)
 
 
 def _from_fetch(response, url: str, parsed, mint: str | None = None) -> None:
@@ -257,8 +250,7 @@ def _mint_at(url: str, left: str, right: str) -> str | None:
 
 
 def _reset_for_tests() -> None:
-    with _LOCK:
-        _NOTES.clear()
+    _RESET()
 
 
 _SOCKET = socket.socket
@@ -320,11 +312,10 @@ def _handshake_host(sock, host: str) -> bool:
 
 
 class _DeskHTTPSConnection(_HTTPS_CONNECTION):
-    """One connection this module owns. The proof is the certificate from its handshake."""
+    """Opens the TLS socket. The proof is the certificate read afterwards, not this class."""
 
     def connect(self):
         super().connect()
-        self._proof_host = self.host if _handshake_host(self.sock, self.host) else None
 
 
 class _OwnedTransport(httpx.BaseTransport):
@@ -358,18 +349,7 @@ class _OwnedTransport(httpx.BaseTransport):
             return
         if type(parsed) is not dict:
             return
-        stamp = object()
-        held = [stamp]
-
-        def write(rows, token):
-            if token is not held[0]:
-                return
-            held[0] = None
-            with _LOCK:
-                for key, row in rows:
-                    _NOTES[key] = row
-
-        write(_plan(str(request.url), parsed, None, time.time(), None, _seen()), stamp)
+        _commit_verified(stream._sock, str(request.url), parsed, None, None)
 
 
 def http_client():
@@ -382,55 +362,221 @@ def http_client():
 
 def exchange(request, timeout: float, mint: str | None = None, history=None):
     """Read one HTTPS request. A patched urlopen is returned and is not a proof."""
-    if not _stack_intact():
-        response = urllib.request.urlopen(request, timeout=timeout)
-        try:
-            return response.status, response.read(), False
-        finally:
-            closer = getattr(response, "close", None)
-            if callable(closer):
-                closer()
-    return _owned_https(request, timeout, mint, history)
+    return _EXCHANGE(request, timeout, mint, history)
 
 
 def _owned_https(request, timeout: float, mint, history):
-    parts = urlsplit(request.full_url)
-    if parts.scheme != "https" or type(parts.hostname) is not str or parts.hostname == "":
-        raise urllib.error.URLError("host")
-    conn = _DeskHTTPSConnection(parts.hostname, timeout=timeout, context=_CONTEXT)
-    path = parts.path or "/"
-    if parts.query:
-        path = path + "?" + parts.query
-    headers = {key: value for key, value in request.header_items()}
-    try:
-        conn.request(request.get_method(), path, body=request.data, headers=headers)
-        response = conn.getresponse()
-        raw = response.read()
-        status = response.status
-    finally:
-        conn.close()
-    proved = status == 200 and getattr(conn, "_proof_host", None) == parts.hostname and _stack_intact()
-    if proved:
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except Exception:
-            parsed = None
-        if type(parsed) is dict:
-            stamp = object()
-            held = [stamp]
-
-            def write(rows, token):
-                if token is not held[0]:
-                    return
-                held[0] = None
-                with _LOCK:
-                    for key, row in rows:
-                        _NOTES[key] = row
-
-            write(_plan(request.full_url, parsed, mint, time.time(), history, _seen()), stamp)
-    return status, raw, proved
+    return _OWNED(request, timeout, mint, history)
 
 
 def _seen() -> dict:
-    with _LOCK:
-        return dict(_NOTES)
+    return _SEEN()
+
+
+def _CLOSED(gate, mint, now, *, input_mint=None, output_mint=None) -> bool:
+    return False
+
+
+def _RESET() -> None:
+    return None
+
+
+def _EXCHANGE(request, timeout, mint, history):
+    raise RuntimeError("unbound")
+
+
+def _OWNED(request, timeout, mint, history):
+    raise RuntimeError("unbound")
+
+
+def _SEEN() -> dict:
+    return {}
+
+
+def _commit_verified(sock, url, parsed, mint, history) -> None:
+    return None
+
+
+def _wire():
+    """Bind the handshake objects and the note store. Later global lookups are not the originals."""
+    secret = os.urandom(32)
+    notes = {}
+    lock = threading.Lock()
+    connection_cls = _DeskHTTPSConnection
+    context = _CONTEXT
+    ssl_socket = _SSL_SOCKET
+    getpeercert = _GETPEERCERT
+    cert_matches = _cert_matches
+    socket_type = _SOCKET
+    connect_fn = _CONNECT
+    create_fn = _CREATE_CONNECTION
+    wrap = _WRAP
+    urlopen = _URLOPEN
+    https_base = _HTTPS_CONNECTION
+    transport_handle = _HTTP_TRANSPORT_HANDLE
+    client_get = _CLIENT_GET
+    sync_stream = _SYNC_STREAM
+
+    def canonical(value):
+        if type(value) is tuple:
+            return [canonical(item) for item in value]
+        if type(value) is list:
+            return [canonical(item) for item in value]
+        if type(value) is dict:
+            return {str(key): canonical(item) for key, item in value.items()}
+        return value
+
+    def mac_for(key, row) -> str:
+        gate = key[0] if type(key) is tuple and key else ""
+        digest = hashlib.sha256(json.dumps(canonical({
+            "ok": row.get("ok"),
+            "until": row.get("until"),
+            "body": row.get("body"),
+        }), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        message = json.dumps(canonical({
+            "gate": gate,
+            "key": key,
+            "timestamp": row.get("at"),
+            "digest": digest,
+        }), sort_keys=True, separators=(",", ":")).encode()
+        return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+    def authentic(key, row) -> bool:
+        if type(row) is not dict or type(row.get("mac")) is not str:
+            return False
+        try:
+            expect = mac_for(key, row)
+        except Exception:
+            return False
+        return hmac.compare_digest(expect, row["mac"])
+
+    def sign(key, row) -> dict:
+        signed = dict(row)
+        signed["mac"] = mac_for(key, signed)
+        return signed
+
+    def seen() -> dict:
+        with lock:
+            copy = dict(notes)
+        return {key: row for key, row in copy.items() if authentic(key, row)}
+
+    def save(rows) -> None:
+        stamped = []
+        for key, row in rows:
+            stamped.append((key, sign(key, row)))
+        with lock:
+            for key, row in stamped:
+                notes[key] = row
+
+    def handshake(sock, host) -> bool:
+        if not stack_intact() or type(sock) is not ssl_socket or type(host) is not str:
+            return False
+        if type(sock).getpeercert is not getpeercert:
+            return False
+        try:
+            cert = getpeercert(sock)
+        except Exception:
+            return False
+        return cert_matches(cert, host)
+
+    def stack_intact() -> bool:
+        mod = sys.modules[__name__]
+        return (
+            socket.socket is socket_type
+            and getattr(socket.socket, "connect") is connect_fn
+            and socket.create_connection is create_fn
+            and ssl.SSLSocket is ssl_socket
+            and ssl.SSLSocket.getpeercert is getpeercert
+            and ssl.SSLContext.wrap_socket is wrap
+            and urllib.request.urlopen is urlopen
+            and http.client.HTTPSConnection is https_base
+            and httpx.HTTPTransport.handle_request is transport_handle
+            and httpx.Client.get is client_get
+            and mod._DeskHTTPSConnection is connection_cls
+            and mod._CONTEXT is context
+            and mod._cert_matches is cert_matches
+            and mod._handshake_host is handshake
+            and mod._owned_https is owned_https
+            and mod._commit_verified is commit
+        )
+
+    def commit(sock, url, parsed, mint, history) -> None:
+        host = urlsplit(url).hostname if type(url) is str else None
+        if not handshake(sock, host if type(host) is str else ""):
+            return
+        save(_plan(url, parsed, mint, time.time(), history, seen()))
+
+    def owned_https(request, timeout, mint, history):
+        parts = urlsplit(request.full_url)
+        if parts.scheme != "https" or type(parts.hostname) is not str or parts.hostname == "":
+            raise urllib.error.URLError("host")
+        conn = connection_cls(parts.hostname, timeout=timeout, context=context)
+        path = parts.path or "/"
+        if parts.query:
+            path = path + "?" + parts.query
+        headers = {key: value for key, value in request.header_items()}
+        sock = None
+        try:
+            conn.request(request.get_method(), path, body=request.data, headers=headers)
+            response = conn.getresponse()
+            raw = response.read()
+            status = response.status
+            sock = conn.sock
+            parsed = None
+            if status == 200:
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    parsed = None
+            proved = type(parsed) is dict and handshake(sock, parts.hostname)
+            if proved:
+                commit(sock, request.full_url, parsed, mint, history)
+            return status, raw, proved
+        finally:
+            conn.close()
+
+    def do_exchange(request, timeout, mint, history):
+        if not stack_intact():
+            response = urllib.request.urlopen(request, timeout=timeout)
+            try:
+                return response.status, response.read(), False
+            finally:
+                closer = getattr(response, "close", None)
+                if callable(closer):
+                    closer()
+        return owned_https(request, timeout, mint, history)
+
+    def note_ok(gate, mint, now, *, input_mint=None, output_mint=None) -> bool:
+        moment = time.time() if now is None else now
+        if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+            return False
+        if not isinstance(mint, str) or mint == "":
+            return False
+        current = seen()
+        if gate == "bundle_unique_buyers_smart_wallets_dev_holding":
+            return _fresh(current.get(("bundle", mint)), moment) and _fresh(current.get(("dev", mint)), moment)
+        if gate == "quote_expiry":
+            if mint not in {input_mint, output_mint}:
+                return False
+            return _fresh(current.get(("quote_expiry", input_mint, output_mint)), moment)
+        return _fresh(current.get((gate, mint)), moment)
+
+    def reset() -> None:
+        with lock:
+            notes.clear()
+
+    global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _owned_https, _NOTES
+    _CLOSED = note_ok
+    _RESET = reset
+    _EXCHANGE = do_exchange
+    _OWNED = owned_https
+    _SEEN = seen
+    _commit_verified = commit
+    _handshake_host = handshake
+    _stack_intact = stack_intact
+    _owned_https = owned_https
+    _NOTES = types.MappingProxyType(notes)
+
+
+_wire()
+del _wire
