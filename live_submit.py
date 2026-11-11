@@ -79,27 +79,34 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
     totals = memecoin_desk.loss_totals()
     if totals.get("live_halts_new_entries") is True:
         return refused | {"reason": "stop_new_entries"}
+    if not callable(signer):
+        return refused | {"reason": "phantom_session_missing"}
+    session_ready = getattr(signer, "ready", None)
+    if callable(session_ready) and session_ready() is not True:
+        return refused | {"reason": "phantom_session_missing"}
     owned, signature, status = _claim(message_sha256, case_id, now)
     if not owned:
         if not signature:
             return refused | {"reason": "already_in_flight"}
         return _reconcile(case_id, message_sha256, signature, status, now)
-    if signer is None:
-        return refused | {"reason": "phantom_session_missing"}
     try:
         signed = signer(proof["message_b64"])
     except Exception:
+        _release(message_sha256)
         return refused | {"reason": "signature_refused"}
     signed_tx = None if not isinstance(signed, dict) else signed.get("signed_tx")
     if not isinstance(signed_tx, str) or signed_tx == "":
+        _release(message_sha256)
         return refused | {"reason": "signature_refused"}
     try:
         reserved = solana_tx.message_bytes(proof["message_b64"])
         produced = solana_tx.message_bytes(signed_tx)
         signature = solana_tx.first_signature(signed_tx)
     except Exception:
+        _release(message_sha256)
         return refused | {"reason": "signature_refused"}
     if reserved != produced or signature == "":
+        _release(message_sha256)
         return refused | {"reason": "message_mismatch"}
     _store_signature(message_sha256, signature)
     sent = _rpc({
@@ -220,6 +227,17 @@ def _claim(message_sha256: str, case_id: str, now: float):
             raise
         finally:
             conn.close()
+
+
+def _release(message_sha256: str) -> None:
+    """Drop a claim that never reached a signature. A later call may sign."""
+    try:
+        db.execute(
+            "DELETE FROM live_submit WHERE message_sha256 = ? AND signature IS NULL AND status = 'inflight'",
+            (message_sha256,),
+        )
+    except Exception:
+        return
 
 
 def _store_signature(message_sha256: str, signature: str) -> None:

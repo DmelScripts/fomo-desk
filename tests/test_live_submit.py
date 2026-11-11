@@ -223,6 +223,87 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertTrue(any(item.get("reason") == "already_in_flight" or item.get("reconciled") is True for item in results))
         self.assertEqual(sum(1 for item in results if item.get("reconciled") is True), 1)
 
+    def test_a_missing_signer_does_not_stick_and_the_next_call_signs_once(self):
+        self._arm()
+        case_id, message = self._message(_route(103, 50))
+        digest = live_submit.message_digest(message)
+        raw = bytearray(base64.b64decode(message))
+        raw[1:65] = b"\x55" * 64
+        signed_tx = base64.b64encode(bytes(raw)).decode()
+        signature = solana_tx.first_signature(signed_tx)
+        missing = live_submit.submit(case_id, digest, NOW, self._reader(), None)
+        self.assertEqual(missing["reason"], "phantom_session_missing")
+        self.assertEqual(missing["sign"], False)
+        self.assertEqual(self._rows(), [])
+        wide_id, wide = self._message(_route(104, 80))
+        refused = live_submit.submit(wide_id, live_submit.message_digest(wide), NOW, self._reader(), lambda message_b64: {"signed_tx": message_b64})
+        self.assertEqual(refused["reason"], "slippage_unproven")
+        self.assertEqual(self._rows(), [])
+
+        def boom(message_b64):
+            raise RuntimeError("session")
+
+        broken = live_submit.submit(case_id, digest, NOW, self._reader(), boom)
+        self.assertEqual(broken["reason"], "signature_refused")
+        self.assertEqual(self._rows(), [])
+        signs = []
+
+        def signer(message_b64):
+            signs.append(message_b64)
+            return {"signed_tx": signed_tx}
+
+        solana_rpc.TRANSPORT = lambda payload: {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else {"result": {"value": [{
+                "confirmationStatus": "confirmed", "err": None, "slot": 9,
+            }]}},
+        }
+        done = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self.assertTrue(done["reconciled"], done)
+        self.assertEqual(signs, [message])
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_an_armed_approach_uses_the_session_signer(self):
+        import phantom_session
+        captured = {}
+
+        def submit(case_id, message, now, transport, signer=None):
+            captured["signer"] = signer
+            return {"reason": "phantom_session_missing", "sign": False, "send": False, "network_called": False, "broadcast": False}
+
+        original = (
+            desk_loop.fee_estimate_before_sign, desk_loop._gates_after_fee, desk_loop._server_auth,
+            desk_loop.simulate_before_sign, live_submit.armed, live_submit.submit,
+        )
+        self.addCleanup(lambda: (
+            setattr(desk_loop, "fee_estimate_before_sign", original[0]),
+            setattr(desk_loop, "_gates_after_fee", original[1]),
+            setattr(desk_loop, "_server_auth", original[2]),
+            setattr(desk_loop, "simulate_before_sign", original[3]),
+            setattr(live_submit, "armed", original[4]),
+            setattr(live_submit, "submit", original[5]),
+        ))
+        live_submit.submit = submit
+        quiet = desk_loop.approach_signer("case", "hash", self._reader(), NOW)
+        self.assertNotIn("signer", captured)
+        self.assertNotEqual(quiet.get("signer_is_mock"), False)
+        desk_loop.fee_estimate_before_sign = lambda *args, **kwargs: {"fee_estimate_skip": False}
+        desk_loop._gates_after_fee = lambda *args, **kwargs: {"ok": True}
+        desk_loop._server_auth = lambda *args, **kwargs: {"ok": True}
+        desk_loop.simulate_before_sign = lambda *args, **kwargs: {"ok": True}
+        live_submit.armed = lambda: True
+        armed = desk_loop.approach_signer("case", "hash", self._reader(), NOW)
+        self.assertIs(captured["signer"], phantom_session.sign)
+        self.assertFalse(armed["signer_is_mock"])
+        self.assertFalse(armed["live_ready"])
+        self.assertFalse(phantom_session.ready())
+
+    def _rows(self):
+        try:
+            return db.query("SELECT message_sha256, signature, status FROM live_submit")
+        except Exception:
+            return []
+
     def _arm(self) -> None:
         os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
         self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))

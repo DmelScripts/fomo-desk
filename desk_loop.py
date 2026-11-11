@@ -2849,7 +2849,8 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
         }
     import live_submit
     if live_submit.armed():
-        lived = live_submit.submit(case_id, message_sha256, now, transport)
+        import phantom_session
+        lived = live_submit.submit(case_id, message_sha256, now, transport, phantom_session.sign)
         return base | {
             "fee_estimate_blocked": False,
             "signer_reached": True,
