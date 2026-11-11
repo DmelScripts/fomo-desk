@@ -1,6 +1,8 @@
 """Live sign and send stays behind LIVE, the agents, and every readiness gate."""
 import base64
 import os
+import threading
+import time
 import unittest
 
 import db
@@ -174,6 +176,52 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertNotIn("api-key=", repr(failed))
         self.assertFalse(failed["send"])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
+
+    def test_overlapping_calls_sign_and_send_the_reservation_once(self):
+        self._arm()
+        case_id, message = self._message(_route(102, 50))
+        digest = live_submit.message_digest(message)
+        raw = bytearray(base64.b64decode(message))
+        raw[1:65] = b"\x33" * 64
+        signed_tx = base64.b64encode(bytes(raw)).decode()
+        signature = solana_tx.first_signature(signed_tx)
+        signs = []
+        sends = []
+        gate = threading.Barrier(2)
+        lock = threading.Lock()
+
+        def signer(message_b64):
+            with lock:
+                signs.append(message_b64)
+            time.sleep(0.2)
+            return {"signed_tx": signed_tx}
+
+        def transport(payload):
+            if payload["method"] == "sendTransaction":
+                with lock:
+                    sends.append(payload["method"])
+            return {"status": 200, "body": {"result": {"value": [{
+                "confirmationStatus": "confirmed", "err": None, "slot": 4,
+            }]}}} if payload["method"] == "getSignatureStatuses" else {"status": 200, "body": {"result": signature}}
+
+        solana_rpc.TRANSPORT = transport
+        results = []
+
+        def run():
+            gate.wait()
+            results.append(live_submit.submit(case_id, digest, NOW, self._reader(), signer))
+
+        threads = [threading.Thread(target=run), threading.Thread(target=run)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(signs), 1)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(any(item.get("reason") == "already_in_flight" or item.get("reconciled") is True for item in results))
+        self.assertEqual(sum(1 for item in results if item.get("reconciled") is True), 1)
 
     def _arm(self) -> None:
         os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"

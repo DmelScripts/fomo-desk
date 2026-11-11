@@ -8,6 +8,7 @@ reconciles the signature already recorded. It does not sign or send again.
 from __future__ import annotations
 
 import hashlib
+import threading
 
 import db
 import memecoin_desk
@@ -17,6 +18,7 @@ import solana_tx
 
 SECRET_MARK = "api-key="
 _CONFIRMED = {"confirmed", "finalized"}
+_CLAIM = threading.Lock()
 
 
 def armed() -> bool:
@@ -77,13 +79,11 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
     totals = memecoin_desk.loss_totals()
     if totals.get("live_halts_new_entries") is True:
         return refused | {"reason": "stop_new_entries"}
-    _ensure_table()
-    existing = db.query(
-        "SELECT signature, status FROM live_submit WHERE message_sha256 = ? ORDER BY created_at",
-        (message_sha256,),
-    )
-    if existing:
-        return _reconcile(case_id, message_sha256, existing[0]["signature"], existing[0]["status"], now)
+    owned, signature, status = _claim(message_sha256, case_id, now)
+    if not owned:
+        if not signature:
+            return refused | {"reason": "already_in_flight"}
+        return _reconcile(case_id, message_sha256, signature, status, now)
     if signer is None:
         return refused | {"reason": "phantom_session_missing"}
     try:
@@ -101,8 +101,7 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
         return refused | {"reason": "signature_refused"}
     if reserved != produced or signature == "":
         return refused | {"reason": "message_mismatch"}
-    if not _record_inflight(message_sha256, signature, case_id, now):
-        return _reconcile(case_id, message_sha256, signature, "inflight", now)
+    _store_signature(message_sha256, signature)
     sent = _rpc({
         "jsonrpc": "2.0",
         "id": 1,
@@ -183,30 +182,62 @@ def _confirmed(signature: str) -> dict:
     }
 
 
-def _record_inflight(message_sha256: str, signature: str, case_id: str, now: float) -> bool:
-    try:
-        db.execute(
-            """
-            INSERT INTO live_submit (message_sha256, signature, case_id, status, created_at)
-            VALUES (?, ?, ?, 'inflight', ?)
-            """,
-            (message_sha256, signature, case_id, float(now)),
-        )
-    except Exception:
-        return False
-    return True
+def _claim(message_sha256: str, case_id: str, now: float):
+    """One row per reservation. The caller that inserts it is the only signer."""
+    with _CLAIM:
+        conn = db.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_table(conn)
+            row = conn.execute(
+                "SELECT signature, status FROM live_submit WHERE message_sha256 = ?",
+                (message_sha256,),
+            ).fetchone()
+            if row is not None:
+                conn.commit()
+                return False, row["signature"], row["status"]
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO live_submit (message_sha256, signature, case_id, status, created_at)
+                    VALUES (?, NULL, ?, 'inflight', ?)
+                    """,
+                    (message_sha256, case_id, float(now)),
+                )
+            except Exception:
+                lost = conn.execute(
+                    "SELECT signature, status FROM live_submit WHERE message_sha256 = ?",
+                    (message_sha256,),
+                ).fetchone()
+                conn.commit()
+                if lost is None:
+                    raise
+                return False, lost["signature"], lost["status"]
+            conn.commit()
+            return True, None, "inflight"
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
-def _ensure_table() -> None:
+def _store_signature(message_sha256: str, signature: str) -> None:
     db.execute(
+        "UPDATE live_submit SET signature = ? WHERE message_sha256 = ? AND signature IS NULL",
+        (signature, message_sha256),
+    )
+
+
+def _ensure_table(conn) -> None:
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS live_submit (
-            message_sha256 TEXT NOT NULL,
-            signature TEXT NOT NULL,
+            message_sha256 TEXT PRIMARY KEY,
+            signature TEXT,
             case_id TEXT NOT NULL,
             status TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            PRIMARY KEY (message_sha256, signature)
+            created_at REAL NOT NULL
         )
         """
     )
