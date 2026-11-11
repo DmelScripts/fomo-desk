@@ -120,10 +120,11 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if fetched is None or clock is None or abs(clock - fetched) > FRESH_S:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
     import cross_source
+    cross_source.take_failure()
     selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
     if not isinstance(pair_address, str) or pair_address == "":
-        return _kill(None, mint, "scout", why or "pool_missing", "dexscreener")
+        return _kill(None, mint, "scout", cross_source.take_failure() or why or "pool_missing", "dexscreener")
     created_ms = selected.get("pairCreatedAt") if isinstance(selected, dict) else None
     if type(created_ms) is not int or created_ms < 10**12:
         return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
@@ -136,7 +137,9 @@ def scout(pair: dict, now: float | None = None) -> dict:
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
         return _kill(None, mint, "scout", "market_cap", "dexscreener")
     other = cross_source.fetch_market_cap(mint, pair_address)
-    if other is None or other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
+    if other is None:
+        return _kill(None, mint, "scout", cross_source.take_failure() or "market_cap_unconfirmed", "dexscreener")
+    if other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
         return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
     liquidity = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
     if not isinstance(liquidity, dict) or "usd" not in liquidity:
@@ -206,9 +209,10 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     import dev_rug_history
     import cross_source
     stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    cross_source.take_failure()
     bundle = cross_source.fetch_bundle(row["mint"], stored_pair) if stored_pair else None
     if bundle is None:
-        return refuse("liquidity_source_missing")
+        return refuse(cross_source.take_failure() or "liquidity_source_missing")
     judged = cross_source.judge(bundle)
     checks = judged["checks"]
     liq_row = checks["liq_ge_25pct"]

@@ -46,10 +46,37 @@ def quote_is_sol(quote) -> bool:
 _FETCHER = None
 
 
+class FetchFailed(Exception):
+    """A provider failed closed. The reason is a code, never a secret or a URL."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 def set_fetcher(fetcher) -> None:
     """Install the desk's RugCheck and Solana Tracker reader. A caller body is not this."""
     global _FETCHER
     _FETCHER = fetcher if callable(fetcher) else None
+
+
+def fetcher_installed() -> bool:
+    return callable(_FETCHER)
+
+
+_LAST_FAILURE: str | None = None
+
+
+def note_failure(reason: str) -> None:
+    global _LAST_FAILURE
+    _LAST_FAILURE = reason
+
+
+def take_failure() -> str | None:
+    global _LAST_FAILURE
+    reason = _LAST_FAILURE
+    _LAST_FAILURE = None
+    return reason
 
 
 def clear_fetcher() -> None:
@@ -92,7 +119,7 @@ def note_clock(moment) -> None:
 
 
 def arm_test_fetcher() -> None:
-    """A fixture reader for tests. Production leaves the fetcher unset."""
+    """A fixture reader for tests. Desk startup installs the production reader only when this is unset."""
 
     def fetch(kind, mint, pair_id=None):
         if mint in _TEST_BUNDLES:
@@ -166,7 +193,11 @@ def _fetch(kind: str, mint: str, pair_id: str | None = None):
         return None
     try:
         return _FETCHER(kind, mint, pair_id)
+    except FetchFailed as exc:
+        note_failure(exc.reason)
+        return None
     except Exception:
+        note_failure("provider_unparsed")
         return None
 
 

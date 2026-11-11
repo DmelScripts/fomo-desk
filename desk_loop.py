@@ -5326,7 +5326,17 @@ def readiness() -> dict:
         "observation_files_required": list(stalkchain_adapter.OBSERVATION_FILES),
         "analyst_formula": memecoin_desk.analyst_decision(),
         "fixture_is_mainnet_proof": False,
+        "providers": _provider_status(),
+        "execution_eligible": False,
+        "preflight_ready": False,
+        "gate_complete": False,
     }
+
+
+def _provider_status() -> dict:
+    """Which readers this process can call. Booleans only. Never a key."""
+    import desk_providers
+    return desk_providers.configured()
 
 
 def _slippage_policy() -> dict:

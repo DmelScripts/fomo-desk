@@ -87,6 +87,8 @@ async def lifespan(_app: FastAPI):
     ensure_data_dir()
     init_db()
     install_secret_redaction()
+    import desk_providers
+    desk_providers.install()
     agent_task = None
     price_stop = asyncio.Event()
     price_task = None
@@ -110,6 +112,8 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        import desk_providers
+        desk_providers.shutdown()
         price_stop.set()
         if price_task is not None:
             price_task.cancel()
