@@ -1,5 +1,6 @@
 """Guards around the read-only RPC adapter. No socket and no CLI."""
 import base64
+import os
 import hashlib
 import threading
 import time
@@ -36,24 +37,42 @@ class ReadRpcTests(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertEqual(rpc.methods, [])
 
-        import httpx
+        import urllib.request
 
         class Redirected:
-            status_code = 302
-            is_redirect = True
-            content = b""
+            status = 302
 
-            def json(self):
-                return {"result": "no"}
+            def read(self):
+                return b""
 
-        original = httpx.post
-        httpx.post = lambda *args, **kwargs: Redirected()
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        calls = {"n": 0}
+
+        def opened(request, timeout=8):
+            calls["n"] += 1
+            return Redirected()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = opened
+        os.environ.pop("HELIUS_API_KEY", None)
         try:
+            with self.assertRaises(solana_read_rpc.RpcError) as missing:
+                solana_read_rpc.http_transport({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash", "params": []})
+            self.assertEqual(missing.exception.reason, "helius_api_key_missing")
+            self.assertEqual(calls["n"], 0)
+            os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+            self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
             with self.assertRaises(solana_read_rpc.RpcError) as redirected:
                 solana_read_rpc.http_transport({"jsonrpc": "2.0", "id": 1, "method": "getGenesisHash", "params": []})
         finally:
-            httpx.post = original
+            urllib.request.urlopen = original
         self.assertEqual(redirected.exception.reason, "redirect")
+        self.assertEqual(calls["n"], 1)
         self.assertFalse(solana_read_rpc.reads_enabled())
         solana_read_rpc.enable_reads()
         db.set_setting("rpc_url", "https://other.example", "test")

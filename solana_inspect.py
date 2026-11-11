@@ -67,12 +67,16 @@ class RpcClient:
 
 
 def mainnet_rpc() -> RpcClient:
-    """Fixed public mainnet endpoint. The URL is not taken from the request."""
+    """The configured RPC. Helius needs HELIUS_API_KEY. There is no public fallback."""
     def transport(payload):
-        import httpx
-        response = httpx.post(MAINNET_RPC, json=payload, timeout=20.0)
-        response.raise_for_status()
-        return response.json()
+        import solana_rpc
+        try:
+            posted = solana_rpc.post(payload)
+        except solana_rpc.RpcRefused as exc:
+            raise RpcError(exc.reason) from None
+        if posted.get("status") != 200 or not isinstance(posted.get("body"), dict):
+            raise RpcError("rpc result is not usable")
+        return posted["body"]
     return RpcClient(transport)
 
 

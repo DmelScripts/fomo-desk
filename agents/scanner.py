@@ -394,8 +394,8 @@ class Scanner:
         return _num(fields.get(payload, fields.RPC_GET_TOKEN_SUPPLY["uiAmount"]))
 
     async def _rpc(self, method: str, params: list) -> Any:
-        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        return await self.desk.http.post_json(db.get_setting("rpc_url"), body)
+        import solana_rpc
+        return solana_rpc.call({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 
 
 async def migration_silence(ws) -> str:

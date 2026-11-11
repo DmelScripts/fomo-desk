@@ -297,19 +297,29 @@ def live_transport(request: dict):
             "method": "getAccountInfo",
             "params": [request["mint"], {"encoding": "base64", "commitment": "confirmed"}],
         }
+        import solana_rpc
+        posted = None
+        reason = None
         try:
-            response = httpx.post(solana_inspect.MAINNET_RPC, json=payload, timeout=8.0, follow_redirects=False)
-        except Exception as exc:
-            raise PublicStop("transport") from exc
-        if response.status_code in {301, 302, 303, 307, 308}:
-            raise PublicStop("redirect", response.status_code)
-        if response.status_code != 200:
-            raise PublicStop("rpc_status", response.status_code)
-        try:
-            body = response.json()
-        except Exception as exc:
-            raise PublicStop("rpc_status") from exc
-        return {"status": 200, "body": body}
+            posted = solana_rpc.post(payload)
+        except solana_rpc.RpcRefused as exc:
+            reason = exc.reason
+        if reason == "helius_api_key_missing":
+            raise PublicStop("helius_api_key_missing")
+        if reason == "rpc_bad_json":
+            raise PublicStop("rpc_bad_json")
+        if reason == "redirect":
+            raise PublicStop("redirect")
+        if reason is not None:
+            raise PublicStop("transport")
+        status = posted.get("status")
+        if status in {301, 302, 303, 307, 308}:
+            raise PublicStop("redirect", status if type(status) is int else None)
+        if status != 200:
+            raise PublicStop("rpc_status", status if type(status) is int else None)
+        if not isinstance(posted.get("body"), dict):
+            raise PublicStop("rpc_bad_json")
+        return posted
     url = request.get("url")
     if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
         raise PublicStop("host_refused")

@@ -34,11 +34,34 @@ class HttpxAdapter:
         return response.json()
 
     async def post_json(self, url: str, body: dict, headers: dict | None = None):
-        response = await self.client.post(url, json=body, headers=headers, timeout=30)
-        if response.status_code == 429:
-            return {"error": {"code": 429}}
-        response.raise_for_status()
-        return response.json()
+        import solana_rpc
+        ok, reason, data = await _post_json(self.client, url, body, headers)
+        del url, body, headers
+        if not ok:
+            solana_rpc._refuse(reason)
+        return data
+
+
+async def _post_json(client, url, body, headers):
+    """One POST. Returns a reason code. This frame is gone before the caller raises."""
+    import httpx
+    response = None
+    try:
+        response = await client.post(url, json=body, headers=headers, timeout=30)
+    except httpx.TimeoutException:
+        return False, "rpc_timeout", None
+    except httpx.HTTPError:
+        return False, "rpc_transport", None
+    code = response.status_code
+    if code == 429:
+        return True, None, {"error": {"code": 429}}
+    if code != 200:
+        return False, "rpc_http_%s" % code, None
+    try:
+        parsed = response.json()
+    except Exception:
+        return False, "rpc_bad_json", None
+    return True, None, parsed
 
 
 def _attach_log(name: str) -> None:

@@ -78,7 +78,7 @@ def pull(signature: str, transport) -> dict:
             "method": "getTransaction",
             "signature": signature,
             "commitment": "confirmed",
-            "url": "https://api.mainnet-beta.solana.com",
+            "url": __import__("solana_rpc").configured_url(),
         })
     except Exception:
         return refused | {"reason": "receipt_unknown"}

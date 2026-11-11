@@ -88,13 +88,20 @@ class TestScanner(unittest.TestCase):
         self.addCleanup(lambda: setattr(scanner_mod, "sleep", original))
 
         calls = {"n": 0}
+        import solana_rpc
+
+        def transport(payload):
+            if payload.get("method") == "getTokenLargestAccounts":
+                calls["n"] += 1
+                return {"status": 200, "body": load("rpc_getTokenLargestAccounts.json")}
+            return {"status": 200, "body": load("rpc_getTokenSupply.json")}
+
+        solana_rpc.TRANSPORT = transport
+        self.addCleanup(lambda: setattr(solana_rpc, "TRANSPORT", None))
 
         class Http:
             async def post_json(self, url, body, headers=None):
-                if body.get("method") == "getTokenLargestAccounts":
-                    calls["n"] += 1
-                    return load("rpc_getTokenLargestAccounts.json")
-                return load("rpc_getTokenSupply.json")
+                raise AssertionError("scanner rpc must use solana_rpc")
 
             async def get_json(self, url):
                 raise AssertionError(url)
@@ -107,3 +114,96 @@ class TestScanner(unittest.TestCase):
         self.assertIsNone(asyncio.run(run()))
         self.assertEqual(calls["n"], 3)
         self.assertEqual(sleeps, [2, 2])
+
+    def test_rpc_errors_do_not_carry_the_helius_key(self):
+        import io
+        import logging
+        import os
+        import traceback
+        import urllib.error
+        import urllib.request
+        import db
+        import solana_rpc
+        from agents.scanner import Scanner
+        from bus import Desk
+        from notifier import Notifier
+        from config import install_secret_redaction
+        from tests.support import temp_desk_env
+
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        key = "helius-scanner-secret"
+        os.environ["HELIUS_API_KEY"] = key
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        install_secret_redaction()
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("desk.scanner.rpc.test")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        self.addCleanup(lambda: logger.removeHandler(handler))
+        solana_rpc.TRANSPORT = None
+        self.addCleanup(lambda: setattr(solana_rpc, "TRANSPORT", None))
+
+        class Http:
+            async def post_json(self, url, body, headers=None):
+                raise AssertionError("keyed url must not reach post_json")
+
+            async def get_json(self, url):
+                raise AssertionError("get")
+
+        scanner = Scanner(Desk(Http(), Notifier(mode="PAPER")))
+        seen = {}
+
+        def check(exc):
+            try:
+                raise exc
+            except solana_rpc.RpcRefused:
+                logger.exception("rpc failed")
+            text = stream.getvalue()
+            stream.seek(0)
+            stream.truncate(0)
+            chained = "".join(traceback.format_exception(exc))
+            blob = " ".join([str(exc), repr(exc), str(exc.args), text, chained, str(exc.__cause__), str(exc.__context__)])
+            self.assertNotIn(key, blob)
+            self.assertNotIn("api-key=", blob)
+            self.assertIsNone(exc.__cause__)
+            self.assertIsNone(exc.__context__)
+
+        def run(opener):
+            original = urllib.request.urlopen
+            urllib.request.urlopen = opener
+            try:
+                async def go():
+                    return await scanner._rpc("getSlot", [])
+
+                with self.assertRaises(solana_rpc.RpcRefused) as caught:
+                    asyncio.run(go())
+            finally:
+                urllib.request.urlopen = original
+            return caught.exception
+
+        def status(code):
+            def opener(request, timeout=8):
+                host = request.full_url.split("/")[2].split("?")[0]
+                seen["host"] = host
+                seen["keyed"] = "api-key=" in request.full_url and key in request.full_url
+                raise urllib.error.HTTPError(request.full_url, code, "no", None, None)
+            return opener
+
+        refused = run(status(403))
+        self.assertEqual(refused.reason, "rpc_http_403")
+        self.assertEqual(seen["host"], "mainnet.helius-rpc.com")
+        self.assertTrue(seen["keyed"])
+        check(refused)
+        refused = run(status(500))
+        self.assertEqual(refused.reason, "rpc_http_500")
+        check(refused)
+
+        def timed_out(request, timeout=8):
+            raise TimeoutError("timed out")
+
+        refused = run(timed_out)
+        self.assertEqual(refused.reason, "rpc_timeout")
+        check(refused)

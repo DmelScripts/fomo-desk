@@ -419,14 +419,14 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps(_pair()).encode())
             if url.endswith("/report/summary"):
                 return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
-            if "api.mainnet-beta.solana.com" in url:
+            if "mainnet.helius-rpc.com" in url or "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
                 raw[45] = 1
                 import base64
                 body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
                 return _Response(200, json.dumps(body).encode())
-            raise AssertionError(url)
+            raise AssertionError(url.split("/")[2].split("?")[0])
 
         def build_opener(*handlers):
             self.assertTrue(any(item is stalkchain_adapter._NoRedirect or isinstance(item, stalkchain_adapter._NoRedirect) for item in handlers))
@@ -470,14 +470,14 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps(body).encode())
             if url.endswith("/report/summary"):
                 return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
-            if "api.mainnet-beta.solana.com" in url:
+            if "mainnet.helius-rpc.com" in url or "api.mainnet-beta.solana.com" in url:
                 raw = bytearray(82)
                 raw[44] = 6
                 raw[45] = 1
                 import base64
                 body = {"jsonrpc": "2.0", "result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode(), "base64"]}}}
                 return _Response(200, json.dumps(body).encode())
-            raise AssertionError(url)
+            raise AssertionError(url.split("/")[2].split("?")[0])
         urllib.request.urlopen = urlopen
         found = desk_loop.run_discovery(desk_loop.public_reader, NOW)
         self.assertEqual(len(posts), 4)
@@ -2066,6 +2066,18 @@ conn.close()
                 else:
                     value = 5000
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": value}, "message": echoed}}
+            if method == "simulateTransaction" and request.get("purpose") == "pre_sign":
+                decoded_pre = solana_tx.decode_transaction(base64.b64decode(request["transaction"]))
+                width = len(decoded_pre.static_keys)
+                out_mint = request.get("output_mint")
+                decimals = 9 if out_mint == solana_tx.NATIVE_MINT else 6
+                return {"status": 200, "body": {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": 2_000_028}, "value": {
+                    "err": None, "unitsConsumed": 1000, "fee": 5000, "innerInstructions": [],
+                    "preTokenBalances": [{"mint": out_mint, "owner": decoded_pre.fee_payer, "uiTokenAmount": {"amount": "0", "decimals": decimals, "uiAmountString": "0"}}],
+                    "postTokenBalances": [{"mint": out_mint, "owner": decoded_pre.fee_payer, "uiTokenAmount": {"amount": "1000000000000", "decimals": decimals, "uiAmountString": "1000000000000"}}],
+                    "preBalances": [1_000_000_000] + [0] * (width - 1),
+                    "postBalances": [999_995_000] + [0] * (width - 1),
+                }}}}
             if method == "simulateTransaction":
                 mode = chain.get("preflight_mode")
                 if not mode:

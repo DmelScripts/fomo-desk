@@ -44,8 +44,35 @@ def _largest():
 
 class FakeHttp:
     def __init__(self, dex, largest):
+        import solana_rpc
         self.dex = dex
         self.largest = largest
+        self._prior_rpc = solana_rpc.TRANSPORT
+        solana_rpc.TRANSPORT = self._rpc
+
+    def close(self):
+        import solana_rpc
+        solana_rpc.TRANSPORT = self._prior_rpc
+
+    def _rpc(self, payload):
+        method = payload.get("method")
+        if method == "getTokenSupply":
+            return {"status": 200, "body": load("rpc_getTokenSupply.json")}
+        if method == "getTokenLargestAccounts":
+            return {"status": 200, "body": self.largest}
+        if method == "getAccountInfo":
+            return {"status": 200, "body": load("rpc_getAccountInfo.json")}
+        if method == "getTokenAccountsByOwner":
+            return {"status": 200, "body": {"result": {"value": []}}}
+        if method == "getProgramAccounts":
+            program = payload["params"][0]
+            name = (
+                "rpc_getProgramAccounts_token2022.json"
+                if str(program).endswith("uEb")
+                else "rpc_getProgramAccounts_token.json"
+            )
+            return {"status": 200, "body": load(name)}
+        raise AssertionError(method)
 
     async def get_json(self, url):
         if "dexscreener" in url:
@@ -94,6 +121,7 @@ class TestReplay(unittest.TestCase):
         self.addCleanup(restore)
         db.init_db()
         http = FakeHttp(load("dexscreener_pair.json"), load("rpc_getTokenLargestAccounts.json"))
+        self.addCleanup(http.close)
         desk = Desk(http, Notifier(mode="PAPER"), now=lambda: 1_000_000.0)
         scanned = asyncio.run(Scanner(desk).ingest(load("pumpportal_migration.json")))
         self.assertEqual(scanned["verdict"], "kill")
@@ -109,6 +137,7 @@ class TestReplay(unittest.TestCase):
         dex[0]["liquidity"]["usd"] = 50000
         clock = {"t": 2_000_000.0}
         http = FakeHttp(dex, _largest())
+        self.addCleanup(http.close)
         notifier = Notifier(mode="PAPER")
         desk = Desk(http, notifier, now=lambda: clock["t"])
         scanner = Scanner(desk)

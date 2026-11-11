@@ -159,9 +159,32 @@ class TestAuditor(unittest.TestCase):
         auditor_mod.sleep = fake_sleep
         self.addCleanup(lambda: setattr(auditor_mod, "sleep", original))
 
+        import solana_rpc
+
         class Http:
             def __init__(self):
                 self.account_calls = 0
+                self._prior_rpc = solana_rpc.TRANSPORT
+                solana_rpc.TRANSPORT = self._rpc
+
+            def close(self):
+                solana_rpc.TRANSPORT = self._prior_rpc
+
+            def _rpc(self, payload):
+                method = payload.get("method")
+                if method == "getAccountInfo":
+                    self.account_calls += 1
+                    return {"status": 200, "body": {"error": {"code": 429, "message": "Too many requests for a specific RPC call"}}}
+                if method == "getTokenSupply":
+                    return {"status": 200, "body": load("rpc_getTokenSupply.json")}
+                if method in ("getTokenLargestAccounts", "getTokenAccountsByOwner"):
+                    return {"status": 200, "body": {"result": {"value": []}}}
+                if method == "getProgramAccounts":
+                    program = payload["params"][0]
+                    if program.endswith("uEb"):
+                        return {"status": 200, "body": load("rpc_getProgramAccounts_token2022.json")}
+                    return {"status": 200, "body": load("rpc_getProgramAccounts_token.json")}
+                raise AssertionError(method)
 
             async def get_json(self, url):
                 if url.endswith("/report"):
@@ -187,6 +210,7 @@ class TestAuditor(unittest.TestCase):
                 raise AssertionError(method)
 
         http = Http()
+        self.addCleanup(http.close)
         auditor = Auditor(Desk(http, Notifier(mode="PAPER")))
         created = load("dexscreener_pair.json")[0]["pairCreatedAt"]
         result = asyncio.run(auditor.audit(
@@ -199,3 +223,34 @@ class TestAuditor(unittest.TestCase):
         self.assertEqual(result["layers"][0]["value"], "no data: mint authority")
         self.assertFalse(result["layers"][0]["pass"])
         self.assertFalse(result["passed"])
+
+    def test_auditor_rpc_uses_the_shared_resolver(self):
+        import os
+        import solana_rpc
+        from agents.auditor import Auditor
+        tmp, restore = temp_desk_env()
+        self.addCleanup(restore)
+        db.init_db()
+        os.environ.pop("HELIUS_API_KEY", None)
+        auditor = Auditor(Desk(object(), Notifier(mode="PAPER")))
+        with self.assertRaises(solana_rpc.RpcRefused) as missing:
+            asyncio.run(auditor._rpc("getSlot", []))
+        self.assertEqual(missing.exception.reason, "helius_api_key_missing")
+        self.assertNotIn("api-key", str(missing.exception))
+        db.set_setting("rpc_url", "https://override.example/solana", "test")
+        seen = {}
+
+        def transport(payload):
+            seen["method"] = payload.get("method")
+            return {"status": 200, "body": {"result": "ok"}}
+
+        solana_rpc.TRANSPORT = transport
+        self.addCleanup(lambda: setattr(solana_rpc, "TRANSPORT", None))
+        os.environ["HELIUS_API_KEY"] = "helius-auditor-secret"
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        result = asyncio.run(auditor._rpc("getHealth", []))
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(seen["method"], "getHealth")
+        self.assertEqual(solana_rpc.describe()["host"], "override.example")
+        self.assertEqual(solana_rpc.describe()["provider"], "configured_rpc")
+        self.assertNotIn("helius-auditor-secret", str(result))

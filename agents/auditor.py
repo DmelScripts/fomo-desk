@@ -220,10 +220,8 @@ class Auditor:
         return accounts
 
     async def _rpc(self, method: str, params: list) -> Any:
-        return await self.desk.http.post_json(
-            db.get_setting("rpc_url"),
-            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-        )
+        import solana_rpc
+        return solana_rpc.call({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 
 
 def _settings() -> dict[str, float]:
