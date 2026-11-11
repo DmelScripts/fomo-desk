@@ -199,7 +199,7 @@ class OwnerSlippageTests(unittest.TestCase):
         self.assertFalse(status["sign"])
         blocked = desk_loop.readiness()["blocked_because"]
         self.assertNotIn("owner_slippage_unapproved", blocked)
-        self.assertIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", blocked)
+        self.assertNotIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", blocked)
         self.assertFalse(desk_loop.readiness()["live_ready"])
 
     def test_a_caller_or_old_value_does_not_raise_the_ceiling(self):

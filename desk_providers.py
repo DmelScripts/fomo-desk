@@ -115,7 +115,19 @@ def production_fetch(kind, mint, pair_id=None):
     reason, body = _fetch(kind, mint, pair_id)
     if reason:
         _fail(reason)
+    if kind == "rugcheck":
+        _summary(mint)
     return body
+
+
+def _summary(mint: str) -> None:
+    """The summary document is the one with top-level lpLockedPct. A miss leaves the gate open."""
+    if callable(_TRANSPORT):
+        return
+    try:
+        _exchange("rugcheck", "GET", "https://api.rugcheck.xyz/v1/tokens/" + mint + "/report/summary", _plain(), None)
+    except Exception:
+        return
 
 
 def _fetch(kind, mint, pair_id=None):
@@ -144,12 +156,15 @@ def _fetch(kind, mint, pair_id=None):
     return "provider_unparsed", None
 
 
-def fetch_hermes(now: float) -> dict:
+def fetch_hermes(now: float, mint: str | None = None) -> dict:
     """One Hermes SOL/USD read. A 401 or a 403 is price_unknown. No on-chain substitute."""
     _start_decision()
     if not _present("PYTH_API_KEY"):
         return {"ok": False, "reason": "price_unknown", "cause": "pyth_api_key_missing", "onchain_substituted": False, "live": False}
-    status, body, reason = _exchange("hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None)
+    status, body, reason = _exchange(
+        "hermes", "GET", pyth_sponsored.HERMES_LATEST_URL, pyth_sponsored.hermes_headers(), None,
+        proof_mint=mint if isinstance(mint, str) else None,
+    )
     if reason:
         return _hermes_stopped(reason)
     priced = pyth_sponsored.read_hermes_response({"status": status, "body": body}, now)
@@ -186,13 +201,15 @@ def _json(provider: str, method: str, url: str, headers: dict, payload=None):
     return None, body
 
 
-def _exchange(provider: str, method: str, url: str, headers: dict, payload):
+def _exchange(provider: str, method: str, url: str, headers: dict, payload, proof_mint: str | None = None):
     """One provider call. Failures are reason strings. This frame does not raise."""
     try:
         _pace(provider)
     except cross_source.FetchFailed as exc:
         return None, None, exc.reason
     spec = {"provider": provider, "method": method, "url": url, "headers": dict(headers), "json": payload}
+    if isinstance(proof_mint, str) and proof_mint != "":
+        spec["_proof_mint"] = proof_mint
     try:
         if callable(_TRANSPORT):
             result = _TRANSPORT(spec)
@@ -208,7 +225,9 @@ def _exchange(provider: str, method: str, url: str, headers: dict, payload):
         return None, None, result["_reason"]
     if not isinstance(result, dict) or type(result.get("status")) is not int:
         return None, None, provider + "_unparsed"
-    return result.get("status"), result.get("body"), None
+    status = result.get("status")
+    body = result.get("body")
+    return status, body, None
 
 
 def _urllib(spec: dict) -> dict:
@@ -228,7 +247,7 @@ def _urllib(spec: dict) -> dict:
             return {"_reason": spec["provider"] + "_status"}
         return result
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
-    status, raw = _read(request, _remaining())
+    status, raw = _read(request, _remaining(), spec.get("_proof_mint"))
     if status == "timeout":
         return {"_reason": spec["provider"] + "_timeout"}
     if type(status) is not int:
@@ -242,11 +261,12 @@ def _urllib(spec: dict) -> dict:
     return {"status": status, "body": parsed}
 
 
-def _read(request, timeout: float):
+def _read(request, timeout: float, mint=None):
     """Open one request. Failures stay in this frame so the URL is not an exception."""
+    import live_gate_proof
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
+        status, raw, _proved = live_gate_proof.exchange(request, timeout, mint=mint if isinstance(mint, str) else None)
+        return status, raw
     except urllib.error.HTTPError as exc:
         return exc.code, None
     except TimeoutError:

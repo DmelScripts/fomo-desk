@@ -285,9 +285,14 @@ def _swap_bytes(body: dict) -> bytes:
         return b""
 
 
+def _http_client():
+    """The client owned by the proof module. Its get() is not a proof."""
+    import live_gate_proof
+    return live_gate_proof.http_client(), live_gate_proof.http_client()._transport
+
+
 def live_transport(request: dict):
     """One public call. No key, no redirect, no second host."""
-    import httpx
     if request.get("kind") == "rpc":
         if request.get("method") != "getAccountInfo":
             raise PublicStop("method_refused")
@@ -323,8 +328,9 @@ def live_transport(request: dict):
     url = request.get("url")
     if not isinstance(url, str) or not (url.startswith("https://api.dexscreener.com/") or url.startswith("https://api.jup.ag/swap/v2/")):
         raise PublicStop("host_refused")
+    client, _transport = _http_client()
     try:
-        response = httpx.get(url, timeout=8.0, follow_redirects=False, headers={"accept": "application/json"})
+        response = client.get(url, timeout=8.0, follow_redirects=False, headers={"accept": "application/json"})
     except Exception as exc:
         raise PublicStop("transport") from exc
     if response.status_code in {301, 302, 303, 307, 308}:

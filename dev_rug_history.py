@@ -20,6 +20,8 @@ The Helius key is ``HELIUS_API_KEY``. It is not written into results.
 
 from __future__ import annotations
 
+import contextvars
+import http.client
 import json
 import os
 import time
@@ -36,6 +38,7 @@ RUGGED_FIELD_STATUS = "observed, undocumented"
 RUGCHECK_REPORT = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 _READER = None
+_SUBJECT = contextvars.ContextVar("rug_subject", default="")
 _CACHE: dict[str, tuple[float, dict]] = {}
 _RECORDED: dict[str, dict] = {}
 _REPORTS: dict[str, dict] = {}
@@ -95,6 +98,14 @@ def assess(reading, mint=None) -> dict:
 def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_network: bool = False) -> dict:
     """A clear result reads a Helius page supplied for this call, then RugCheck."""
     moment = time.time() if now is None else now
+    token = _SUBJECT.set(mint if isinstance(mint, str) else "")
+    try:
+        return _read_history(mint, creator, asset, assets, now, allow_network, moment)
+    finally:
+        _SUBJECT.reset(token)
+
+
+def _read_history(mint, creator, asset, assets, now, allow_network: bool, moment) -> dict:
     if not isinstance(moment, (int, float)) or isinstance(moment, bool):
         return _unverified("clock")
     if not isinstance(mint, str) or mint == "" or "/" in mint:
@@ -119,6 +130,7 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
             return _unverified(how or "creator")
     else:
         how = "caller"
+    das_live = False
     if assets is None:
         cached = _CACHE.get(creator)
         if cached is not None and cached[0] >= moment:
@@ -130,6 +142,7 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
         if fetched.get("ok") is not True:
             return fetched
         assets = fetched["body"]
+        das_live = fetched.get("network") is True
     parsed = _asset_ids(assets)
     if parsed.get("ok") is not True:
         if parsed.get("cause") == "truncated":
@@ -139,10 +152,13 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
         return _unverified("creator_not_in_index", creator=creator, creator_source=how)
     past = [item.get("id") for item in parsed["items"] if isinstance(item, dict) and item.get("id") != mint]
     rugs = 0
+    reports_live = True
     for past_mint in past:
         report = _rugcheck(past_mint, creator, allow_network)
+        reports_live = reports_live and report.get("network") is True
         if report.get("ok") is not True:
-            return report | {"creator": creator, "creator_source": how, "past_tokens": len(past), "cached": False}
+            published = {key: value for key, value in report.items() if key != "network"}
+            return published | {"creator": creator, "creator_source": how, "past_tokens": len(past), "cached": False}
         if report.get("rugged") is True:
             rugs += 1
     if rugs > 0:
@@ -153,7 +169,13 @@ def read_history(mint, creator=None, asset=None, assets=None, now=None, allow_ne
             "rugged_field": RUGGED_FIELD, "rugged_field_status": RUGGED_FIELD_STATUS,
         }
         _cache_rejection(creator, moment, rejected)
+        if das_live and reports_live:
+            import live_gate_proof
+            live_gate_proof._seal_history(mint, past, False)
         return rejected
+    if das_live and reports_live:
+        import live_gate_proof
+        live_gate_proof._seal_history(mint, past, True)
     return {
         "ok": True, "verified": True, "reason": None, "rugs": 0, "source": SOURCE,
         "source_wired": True, "creator": creator, "creator_source": how, "past_tokens": len(past),
@@ -246,21 +268,22 @@ def _rugcheck(mint: str, helius_creator: str, allow_network: bool) -> dict:
             method="GET",
         )
         try:
-            status, raw = _get(request)
+            status, raw, network = _get(request)
             body = json.loads(raw.decode("utf-8")) if status == 200 else None
         except Exception:
             return _unverified("rugcheck_fetch")
     else:
         status = recorded.get("status")
         body = recorded.get("body")
+        network = False
     if status != 200 or not isinstance(body, dict) or not isinstance(body.get(RUGGED_FIELD), bool):
         return _unverified("rugged_not_bool" if status == 200 else "rugcheck_status")
     creator = body.get("creator")
     if not isinstance(creator, str) or creator == "":
         return _unverified("creator_missing")
     if creator != helius_creator:
-        return _unverified("creator_mismatch")
-    return {"ok": True, "rugged": body[RUGGED_FIELD]}
+        return _unverified("creator_mismatch") | {"network": network}
+    return {"ok": True, "rugged": body[RUGGED_FIELD], "network": network}
 
 
 def _helius(payload: dict, allow_network: bool) -> dict:
@@ -276,30 +299,36 @@ def _helius(payload: dict, allow_network: bool) -> dict:
         method="POST",
     )
     try:
-        raw = _post(request)
+        raw, network = _post(request)
         body = json.loads(raw.decode("utf-8"))
     except Exception:
         return _unverified("fetch", key_present=True)
     if not isinstance(body, dict) or body.get("error") is not None:
         return _unverified("fetch", key_present=True)
-    return {"ok": True, "body": body}
+    return {"ok": True, "body": body, "network": network is True}
 
 
 def _get(request):
-    opener = urllib.request.build_opener(_RefuseRedirect)
-    with opener.open(request, timeout=TIMEOUT_S) as response:
-        status = getattr(response, "status", 200)
-        if status != 200:
-            return status, b""
-        return status, response.read()
+    import live_gate_proof
+    past = ""
+    url = getattr(request, "full_url", "")
+    if "/tokens/" in url:
+        past = url.split("/tokens/", 1)[1].split("/report", 1)[0]
+    status, raw, proved = live_gate_proof.exchange(request, TIMEOUT_S, history=("report", _history_subject(), past))
+    return status, raw, proved
 
 
 def _post(request):
-    opener = urllib.request.build_opener(_RefuseRedirect)
-    with opener.open(request, timeout=TIMEOUT_S) as response:
-        if getattr(response, "status", 200) != 200:
-            raise OSError("status")
-        return response.read()
+    import live_gate_proof
+    status, raw, proved = live_gate_proof.exchange(request, TIMEOUT_S, history=("page", _history_subject(), None))
+    if status != 200:
+        raise OSError("status")
+    return raw, proved
+
+
+def _history_subject() -> str:
+    subject = _SUBJECT.get()
+    return subject if isinstance(subject, str) else ""
 
 
 def _unverified(cause: str, **extra) -> dict:

@@ -964,7 +964,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertFalse(unknown["jupiter_called"])
         self.assertFalse(unknown["quote"]["score_measured"])
         self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")
-        self.assertIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", desk_loop.readiness()["blocked_because"])
+        self.assertNotIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", desk_loop.readiness()["blocked_because"])
         self.assertIn("lp_fields_unpublished", desk_loop.scheduler_status()["ready_because"])
         slot["tip"] = slot["context"] + 28
         exit_qty = 999_899

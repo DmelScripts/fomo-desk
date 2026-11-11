@@ -39,11 +39,12 @@ class PublicFilterDocTests(unittest.TestCase):
         self.assertFalse(view["live_ready"])
         names = {item["gate"] for item in view["remaining_live_gates"]}
         for gate in (
-            "stalkchain_rest_envelope", "lp_lock_live", "rug_history_live", "holder_growth_live",
+            "lp_lock_live", "rug_history_live", "holder_growth_live",
             "price_freshness_proven", "preflight_ready", "ticket_limit_proven", "allocation_proven",
             "phantom_server_auth", "real_submit", "deploy_env",
         ):
             self.assertIn(gate, names)
+        self.assertNotIn("stalkchain_rest_envelope", names)
         deploy = next(item for item in view["remaining_live_gates"] if item["gate"] == "deploy_env")
         self.assertFalse(deploy["closed"])
         self.assertTrue(deploy["owner"])

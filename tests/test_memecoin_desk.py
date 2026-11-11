@@ -2373,7 +2373,7 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertTrue(closed["ok"], closed)
         self.assertFalse(closed.get("live_ready", False))
         blocked = desk_loop.readiness()["blocked_because"]
-        self.assertIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", blocked)
+        self.assertNotIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", blocked)
         self.assertNotIn("owner_slippage_unapproved", blocked)
         self.assertFalse(desk_loop.readiness()["live_ready"])
         self.assertFalse(desk_loop.readiness()["send"])

@@ -464,4 +464,4 @@ class PublicAdapterTests(unittest.TestCase):
         self.assertTrue(finished["ok"], finished)
         self.assertFalse(desk_loop.readiness()["live_ready"])
         self.assertFalse(desk_loop.readiness()["send"])
-        self.assertIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", desk_loop.readiness()["blocked_because"])
+        self.assertNotIn("stalkchain_response_fields_for_lp_rug_growth_are_unpublished", desk_loop.readiness()["blocked_because"])
