@@ -7,7 +7,6 @@ response is the only caller, and a proof for one mint does not cover another.
 from __future__ import annotations
 
 import http.client
-import inspect
 import json
 import math
 import socket
@@ -22,7 +21,6 @@ import httpx
 from httpcore._backends.sync import SyncStream as _SYNC_STREAM
 
 FRESH_S = 30
-_FETCHERS = {"desk_providers", "desk_loop", "public_market", "dev_rug_history"}
 _LOCK = threading.Lock()
 _NOTES: dict = {}
 
@@ -54,108 +52,136 @@ def _from_history(response, subject: str, kind: str, parsed, past_mint: str | No
     return None
 
 
-def _remember_history(subject: str, kind: str, parsed, past_mint: str | None) -> None:
-    if not isinstance(subject, str) or subject == "":
-        return
-    now = time.time()
-    if kind == "page" and isinstance(parsed, dict):
-        ids = _asset_ids(parsed)
-        if ids is None or subject not in ids:
-            _put(("rug_history_live", subject), False, now, None)
-            return
-        _put(("rug_page", subject), True, now, None)
-        _put_body(("rug_ids", subject), ids, now)
-        return
-    if kind == "report" and isinstance(past_mint, str) and isinstance(parsed, dict) and type(parsed.get("rugged")) is bool:
-        _put_body(("rug_report", subject, past_mint), {"rugged": parsed["rugged"]}, now)
+def _seal_history(subject, past, clean) -> None:
+    """History is closed by the fetch that read it. This name does not write."""
+    return None
 
 
-def _seal_history(subject: str, past: list, clean: bool) -> None:
-    """Promote a page and its reports that were read in this process. A bare bool is not a page."""
-    if _caller() not in _FETCHERS or not isinstance(subject, str) or subject == "" or not isinstance(past, list):
-        return
-    now = time.time()
-    with _LOCK:
-        page = _NOTES.get(("rug_page", subject))
-        listed = _NOTES.get(("rug_ids", subject))
-    if not _fresh(page, now) or not isinstance(listed, dict):
-        return
-    ids = listed.get("body")
-    if not isinstance(ids, list) or subject not in ids:
-        _put(("rug_history_live", subject), False, now, None)
-        return
-    expected = [item for item in ids if item != subject]
-    if expected != list(past):
-        _put(("rug_history_live", subject), False, now, None)
-        return
-    if clean is not True:
-        _put(("rug_history_live", subject), False, now, None)
-        return
-    for item in past:
-        report = _NOTES.get(("rug_report", subject, item))
-        body = report.get("body") if isinstance(report, dict) else None
-        if not _fresh(report, now) or not isinstance(body, dict) or body.get("rugged") is not False:
-            _put(("rug_history_live", subject), False, now, None)
-            return
-    _put(("rug_history_live", subject), True, now, None)
+def _apply(url, body, mint=None, now=None) -> None:
+    """A URL and a body are not a read. This name does not write."""
+    return None
 
 
-def _apply(url: str, body: dict, mint: str | None, now: float) -> None:
+def _record(url, raw, mint=None, history=None) -> None:
+    """Raw bytes are not a read. This name does not write."""
+    return None
+
+
+def _plan(url, body, mint, now, history, existing) -> list:
+    """Describe note updates. This does not write them."""
+    if type(url) is not str or type(body) is not dict or isinstance(now, bool) or not isinstance(now, (int, float)):
+        return []
+    updates = []
+
+    def put(key, ok, until=None, stored=None):
+        row = {"at": now, "ok": ok is True, "until": until}
+        if stored is not None:
+            row["body"] = stored
+        updates.append((key, row))
+
+    def view():
+        data = dict(existing)
+        for key, row in updates:
+            data[key] = row
+        return data
+
     if url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report/summary"):
         token = _mint_at(url, "/tokens/", "/report/summary")
-        _put(("lp_lock_live", token), _lp_ok(body), now, None)
-        return
-    if url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report"):
+        if isinstance(token, str):
+            put(("lp_lock_live", token), _lp_ok(body), None)
+    elif url.startswith("https://api.rugcheck.xyz/v1/tokens/") and url.endswith("/report"):
         token = _mint_at(url, "/tokens/", "/report")
         if isinstance(token, str) and "creatorBalance" in body:
-            _put_body(("rug_body", token), body, now)
-            _try_dev(token, now)
-        return
-    if url.startswith("https://data.solanatracker.io/holders/chart/"):
+            put(("rug_body", token), True, None, body)
+            _plan_dev(token, now, view, put)
+    elif url.startswith("https://data.solanatracker.io/holders/chart/"):
         token = url.split("/holders/chart/", 1)[1].split("?", 1)[0].strip("/")
-        if token == "" or "/" in token:
-            return
-        import public_filter_docs
-        parsed = public_filter_docs.parse_holder_chart(body, token)
-        grew = parsed.get("ok") is True and type(parsed.get("delta")) is int and parsed["delta"] > 0
-        _put(("holder_growth_live", token), grew, now, None)
-        return
-    if url.startswith("https://data.solanatracker.io/tokens/"):
+        if token != "" and "/" not in token:
+            import public_filter_docs
+            parsed = public_filter_docs.parse_holder_chart(body, token)
+            grew = parsed.get("ok") is True and type(parsed.get("delta")) is int and parsed["delta"] > 0
+            put(("holder_growth_live", token), grew, None)
+    elif url.startswith("https://data.solanatracker.io/tokens/"):
         token = url.split("/tokens/", 1)[1].split("?", 1)[0].strip("/")
-        if token == "" or "/" in token:
-            return
-        import cross_source
-        checked = cross_source.bundle_check(body, None)
-        _put(("bundle", token), checked.get("ok") is True, now, None)
-        _put_body(("tracker_body", token), body, now)
-        _try_dev(token, now)
-        return
-    if url.startswith("https://hermes.pyth.network/") and isinstance(mint, str) and mint != "":
+        if token != "" and "/" not in token:
+            import cross_source
+            checked = cross_source.bundle_check(body, None)
+            put(("bundle", token), checked.get("ok") is True, None)
+            put(("tracker_body", token), True, None, body)
+            _plan_dev(token, now, view, put)
+    elif url.startswith("https://hermes.pyth.network/") and isinstance(mint, str) and mint != "":
         import pyth_sponsored
         try:
             priced = pyth_sponsored.assess_signer_price(body, now)
         except (OverflowError, ValueError, ArithmeticError):
             priced = {"ok": False}
-        _put(("price_freshness_proven", mint), priced.get("ok") is True, now, None)
-        return
-    if url.startswith("https://api.jup.ag/swap/v2/order"):
+        put(("price_freshness_proven", mint), priced.get("ok") is True, None)
+    elif url.startswith("https://api.jup.ag/swap/v2/order"):
         query = parse_qs(urlsplit(url).query)
         inputs = query.get("inputMint") or []
         outputs = query.get("outputMint") or []
-        if len(inputs) != 1 or len(outputs) != 1:
+        if len(inputs) == 1 and len(outputs) == 1:
+            left, right = inputs[0], outputs[0]
+            if isinstance(left, str) and isinstance(right, str) and left != "" and right != "" and body.get("inputMint", left) == left and body.get("outputMint", right) == right:
+                expire = body.get("expireAt")
+                if type(expire) is int and expire > now:
+                    put(("quote_expiry", left, right), True, expire)
+                else:
+                    put(("quote_expiry", left, right), False, None)
+    if type(history) is tuple and len(history) == 3:
+        _plan_history(history, body, now, view, put)
+    return updates
+
+
+def _plan_dev(token, now, view, put) -> None:
+    state = view()
+    tracker = state.get(("tracker_body", token))
+    rug = state.get(("rug_body", token))
+    if not _fresh(tracker, now) or not _fresh(rug, now):
+        return
+    import cross_source
+    dev = cross_source.dev_check(rug.get("body"), tracker.get("body"))
+    bundle = cross_source.bundle_check(tracker.get("body"), None)
+    put(("dev", token), dev.get("status") == "PASS", None)
+    put(("bundle", token), bundle.get("ok") is True, None)
+
+
+def _plan_history(history, body, now, view, put) -> None:
+    kind, subject, past_mint = history
+    if not isinstance(subject, str) or subject == "":
+        return
+    if kind == "page":
+        ids = _asset_ids(body)
+        if ids is None or subject not in ids:
+            put(("rug_history_live", subject), False, None)
             return
-        left, right = inputs[0], outputs[0]
-        if not isinstance(left, str) or not isinstance(right, str) or left == "" or right == "":
+        put(("rug_page", subject), True, None)
+        put(("rug_ids", subject), True, None, ids)
+        past = [item for item in ids if item != subject]
+        if not past:
+            put(("rug_history_live", subject), True, None)
+        return
+    if kind != "report" or not isinstance(past_mint, str) or type(body.get("rugged")) is not bool:
+        return
+    put(("rug_report", subject, past_mint), True, None, {"rugged": body["rugged"]})
+    state = view()
+    page = state.get(("rug_page", subject))
+    listed = state.get(("rug_ids", subject))
+    if not _fresh(page, now) or not isinstance(listed, dict):
+        return
+    ids = listed.get("body")
+    if not isinstance(ids, list) or subject not in ids:
+        put(("rug_history_live", subject), False, None)
+        return
+    past = [item for item in ids if item != subject]
+    for item in past:
+        report = state.get(("rug_report", subject, item))
+        saved = report.get("body") if isinstance(report, dict) else None
+        if not _fresh(report, now) or not isinstance(saved, dict) or saved.get("rugged") is not False:
+            if item == past_mint and body.get("rugged") is True:
+                put(("rug_history_live", subject), False, None)
             return
-        if "inputMint" in body and body.get("inputMint") != left:
-            return
-        if "outputMint" in body and body.get("outputMint") != right:
-            return
-        expire = body.get("expireAt")
-        if type(expire) is not int or expire <= now:
-            _put(("quote_expiry", left, right), False, now, None)
-            return
-        _put(("quote_expiry", left, right), True, now, expire)
+    put(("rug_history_live", subject), True, None)
 
 
 def _lp_ok(body: dict) -> bool:
@@ -183,21 +209,6 @@ def _unit(value) -> bool:
     return False
 
 
-def _try_dev(mint: str | None, now: float) -> None:
-    if not isinstance(mint, str):
-        return
-    with _LOCK:
-        tracker = _NOTES.get(("tracker_body", mint))
-        rug = _NOTES.get(("rug_body", mint))
-    if not _fresh(tracker, now) or not _fresh(rug, now):
-        return
-    import cross_source
-    dev = cross_source.dev_check(rug.get("body"), tracker.get("body"))
-    bundle = cross_source.bundle_check(tracker.get("body"), None)
-    _put(("dev", mint), dev.get("status") == "PASS", now, None)
-    _put(("bundle", mint), bundle.get("ok") is True, now, None)
-
-
 def _asset_ids(body: dict) -> list | None:
     result = body.get("result") if isinstance(body.get("result"), dict) else None
     if not isinstance(result, dict):
@@ -216,16 +227,6 @@ def _asset_ids(body: dict) -> list | None:
     return ids
 
 
-def _put(key, ok: bool, now: float, until) -> None:
-    with _LOCK:
-        _NOTES[key] = {"at": now, "ok": ok is True, "until": until}
-
-
-def _put_body(key, body, now: float) -> None:
-    with _LOCK:
-        _NOTES[key] = {"at": now, "ok": True, "until": None, "body": body}
-
-
 def _fresh(row, now: float) -> bool:
     if not isinstance(row, dict) or row.get("ok") is not True:
         return False
@@ -241,16 +242,6 @@ def _fresh(row, now: float) -> bool:
     return True
 
 
-
-
-def _caller() -> str | None:
-    frame = inspect.currentframe()
-    caller = None if frame is None else frame.f_back
-    outer = None if caller is None else caller.f_back
-    if outer is None:
-        return None
-    name = outer.f_globals.get("__name__")
-    return name if isinstance(name, str) else None
 
 
 def _mint_at(url: str, left: str, right: str) -> str | None:
@@ -367,7 +358,18 @@ class _OwnedTransport(httpx.BaseTransport):
             return
         if type(parsed) is not dict:
             return
-        _apply(str(request.url), parsed, None, time.time())
+        stamp = object()
+        held = [stamp]
+
+        def write(rows, token):
+            if token is not held[0]:
+                return
+            held[0] = None
+            with _LOCK:
+                for key, row in rows:
+                    _NOTES[key] = row
+
+        write(_plan(str(request.url), parsed, None, time.time(), None, _seen()), stamp)
 
 
 def http_client():
@@ -409,21 +411,26 @@ def _owned_https(request, timeout: float, mint, history):
         conn.close()
     proved = status == 200 and getattr(conn, "_proof_host", None) == parts.hostname and _stack_intact()
     if proved:
-        _record(request.full_url, raw, mint, history)
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception:
+            parsed = None
+        if type(parsed) is dict:
+            stamp = object()
+            held = [stamp]
+
+            def write(rows, token):
+                if token is not held[0]:
+                    return
+                held[0] = None
+                with _LOCK:
+                    for key, row in rows:
+                        _NOTES[key] = row
+
+            write(_plan(request.full_url, parsed, mint, time.time(), history, _seen()), stamp)
     return status, raw, proved
 
 
-def _record(url: str, raw: bytes, mint, history) -> None:
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return
-    if type(parsed) is not dict:
-        return
-    if history is None:
-        _apply(url, parsed, mint, time.time())
-        return
-    if type(history) is not tuple or len(history) != 3:
-        return
-    kind, subject, past = history
-    _remember_history(subject, kind, parsed, past)
+def _seen() -> dict:
+    with _LOCK:
+        return dict(_NOTES)

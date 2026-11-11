@@ -77,8 +77,28 @@ class LiveGateTests(unittest.TestCase):
             {"lpLockedPct": 100},
         )
         live_gate_proof._seal_history(MINT_A, [], True)
+        url = "https://api.rugcheck.xyz/v1/tokens/" + MINT_A + "/report/summary"
+        body = {"lpLockedPct": 100}
+        raw = b'{"lpLockedPct": 100}'
+        live_gate_proof._apply(url, body)
+        live_gate_proof._apply(url, body, None, time.time())
+        live_gate_proof._record(url, raw, None, None)
+        live_gate_proof._plan(url, body, None, time.time(), None, {})
+        skip = {"exchange", "_owned_https", "http_client"}
+        for name in dir(live_gate_proof):
+            if name.startswith("__") or name in skip:
+                continue
+            helper = getattr(live_gate_proof, name)
+            if not callable(helper) or isinstance(helper, type):
+                continue
+            for args in ((url, body), (url, body, None, time.time()), (url, raw, None, None)):
+                try:
+                    helper(*args)
+                except Exception:
+                    pass
         self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
         self.assertFalse(live_gate_proof.closed("rug_history_live", MINT_A))
+        self.assertFalse(any(isinstance(row, dict) and row.get("ok") is True for row in live_gate_proof._NOTES.values()))
 
     def test_a_transport_fixture_does_not_close_the_provider_gates(self):
         import desk_providers
