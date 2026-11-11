@@ -5320,7 +5320,14 @@ def public_reader(request: dict) -> dict:
             raise RuntimeError("host_refused")
         req = urllib.request.Request(url, headers={"accept": "application/json"})
     with urllib.request.urlopen(req, timeout=8) as response:
-        return {"status": response.status, "body": json.loads(response.read().decode())}
+        import http.client
+        live = isinstance(response, http.client.HTTPResponse)
+        status = response.status
+        parsed = json.loads(response.read().decode())
+    if live and isinstance(url, str) and url.startswith("https://api.jup.ag/swap/v2/order") and isinstance(parsed, dict):
+        import live_gate_proof
+        live_gate_proof.consider_jupiter(parsed)
+    return {"status": status, "body": parsed}
 
 
 def _readiness_blocks(pyth: dict) -> list[str]:
@@ -5342,7 +5349,7 @@ def remaining_live_gates() -> list[dict]:
     return [
         {
             "gate": "stalkchain_rest_envelope",
-            "proves": "a live 200 body matches a published response schema, not only the {data, notes?, credits, meta} envelope",
+            "proves": "StalkChain has not published JSON fields for LP, rug history, holder growth, bundle, unique buyers, or smart wallets. The REST envelope is not those facts. RugCheck, Helius, and Solana Tracker can prove LP, past rugs, holder growth, bundle share, and dev holding; unique buyers and smart wallets stay scored 0. This gate stays open until a published StalkChain schema is approved.",
             "owner": False,
             "needs_live_read": True,
             "closed": False,
@@ -5352,7 +5359,7 @@ def remaining_live_gates() -> list[dict]:
             "proves": "a fetched RugCheck summary has lpLockedPct exactly 100",
             "owner": False,
             "needs_live_read": True,
-            "closed": False,
+            "closed": _live_gate("lp_lock_live"),
         },
         {
             "gate": "rug_history_live",
@@ -5360,7 +5367,7 @@ def remaining_live_gates() -> list[dict]:
             "owner": True,
             "owner_action": "set HELIUS_API_KEY",
             "needs_live_read": True,
-            "closed": False,
+            "closed": _live_gate("rug_history_live"),
         },
         {
             "gate": "holder_growth_live",
@@ -5368,28 +5375,28 @@ def remaining_live_gates() -> list[dict]:
             "owner": True,
             "owner_action": "set SOLANA_TRACKER_API_KEY",
             "needs_live_read": True,
-            "closed": False,
+            "closed": _live_gate("holder_growth_live"),
         },
         {
             "gate": "bundle_unique_buyers_smart_wallets_dev_holding",
-            "proves": "documented fields for bundle percent, unique buyers, smart wallets, and dev holding",
+            "proves": "Solana Tracker totalInitialPercentage at most 10, dev holding at most 3 percent, unique buyers and smart wallets scored 0",
             "owner": False,
-            "needs_live_read": False,
-            "closed": False,
+            "needs_live_read": True,
+            "closed": _live_gate("bundle_unique_buyers_smart_wallets_dev_holding"),
         },
         {
             "gate": "price_freshness_proven",
-            "proves": "a Pyth SOL/USD observation inside the 30 second window at execution",
+            "proves": "a Hermes SOL/USD observation inside the 30 second window at execution",
             "owner": False,
             "needs_live_read": True,
-            "closed": False,
+            "closed": _live_gate("price_freshness_proven"),
         },
         {
             "gate": "quote_expiry",
-            "proves": "isBlockhashValid and block height still inside the reserved window",
+            "proves": "a Jupiter quote expireAt still in the future, checked again before signing",
             "owner": False,
             "needs_live_read": True,
-            "closed": False,
+            "closed": _live_gate("quote_expiry"),
         },
         {
             "gate": "preflight_ready",
@@ -5487,6 +5494,11 @@ def readiness() -> dict:
         "preflight_ready": False,
         "gate_complete": False,
     }
+
+
+def _live_gate(name: str) -> bool:
+    import live_gate_proof
+    return live_gate_proof.closed(name)
 
 
 def _phantom_server_auth_closed() -> bool:

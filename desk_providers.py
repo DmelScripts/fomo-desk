@@ -115,7 +115,19 @@ def production_fetch(kind, mint, pair_id=None):
     reason, body = _fetch(kind, mint, pair_id)
     if reason:
         _fail(reason)
+    if kind == "rugcheck":
+        _summary(mint)
     return body
+
+
+def _summary(mint: str) -> None:
+    """The summary document is the one with top-level lpLockedPct. A miss leaves the gate open."""
+    if callable(_TRANSPORT):
+        return
+    try:
+        _exchange("rugcheck", "GET", "https://api.rugcheck.xyz/v1/tokens/" + mint + "/report/summary", _plain(), None)
+    except Exception:
+        return
 
 
 def _fetch(kind, mint, pair_id=None):
@@ -208,7 +220,12 @@ def _exchange(provider: str, method: str, url: str, headers: dict, payload):
         return None, None, result["_reason"]
     if not isinstance(result, dict) or type(result.get("status")) is not int:
         return None, None, provider + "_unparsed"
-    return result.get("status"), result.get("body"), None
+    status = result.get("status")
+    body = result.get("body")
+    if not callable(_TRANSPORT) and result.get("_live") is True and status == 200 and isinstance(body, dict):
+        import live_gate_proof
+        live_gate_proof.consider(provider, url, body)
+    return status, body, None
 
 
 def _urllib(spec: dict) -> dict:
@@ -228,7 +245,7 @@ def _urllib(spec: dict) -> dict:
             return {"_reason": spec["provider"] + "_status"}
         return result
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
-    status, raw = _read(request, _remaining())
+    status, raw, live = _read(request, _remaining())
     if status == "timeout":
         return {"_reason": spec["provider"] + "_timeout"}
     if type(status) is not int:
@@ -239,24 +256,26 @@ def _urllib(spec: dict) -> dict:
             parsed = json.loads(raw.decode("utf-8"))
         except Exception:
             parsed = None
-    return {"status": status, "body": parsed}
+    return {"status": status, "body": parsed, "_live": live is True}
 
 
 def _read(request, timeout: float):
     """Open one request. Failures stay in this frame so the URL is not an exception."""
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
+            import http.client
+            live = isinstance(response, http.client.HTTPResponse)
+            return response.status, response.read(), live
     except urllib.error.HTTPError as exc:
-        return exc.code, None
+        return exc.code, None, False
     except TimeoutError:
-        return "timeout", None
+        return "timeout", None, False
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), TimeoutError):
-            return "timeout", None
-        return "status", None
+            return "timeout", None, False
+        return "status", None, False
     except Exception:
-        return "status", None
+        return "status", None, False
 
 
 def _start_decision() -> None:
