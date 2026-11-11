@@ -1,13 +1,12 @@
 """Live sign and send. Unreachable unless every readiness gate is closed.
 
 The signer is the server Phantom session for the allowlisted wallet. The send
-is a Helius JSON-RPC call. Tests pass both in. This module does not open a
-socket by itself, and a paper run never reaches it.
+and the status check go through the configured Helius RPC client. A timeout
+reconciles the signature already recorded. It does not sign or send again.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 
 import db
@@ -17,6 +16,7 @@ import phantom_transport
 import solana_tx
 
 SECRET_MARK = "api-key="
+_CONFIRMED = {"confirmed", "finalized"}
 
 
 def armed() -> bool:
@@ -32,16 +32,25 @@ def armed() -> bool:
     return all(isinstance(item, dict) and item.get("closed") is True for item in gates)
 
 
-def submit(case_id: str, message_sha256: str, now: float, transport=None, signer=None, sender=None) -> dict:
+def submit(case_id: str, message_sha256: str, now: float, transport=None, signer=None) -> dict:
     """Sign, send, and confirm one reserved message. Refuses while any gate is open."""
+    return _exchange(case_id, message_sha256, now, transport, signer)
+
+
+def _exchange(case_id: str, message_sha256: str, now: float, transport, signer) -> dict:
+    if not armed():
+        return _blank() | {"reason": "live_unreachable"}
+    return _sign_send_confirm(case_id, message_sha256, now, transport, signer)
+
+
+def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport, signer) -> dict:
+    """Limits, the allowlisted fee payer, then one sign and one Helius send."""
     refused = _blank()
     if not armed():
         return refused | {"reason": "live_unreachable"}
-    return _exchange(case_id, message_sha256, now, transport, signer, sender)
-
-
-def _exchange(case_id: str, message_sha256: str, now: float, transport, signer, sender) -> dict:
-    refused = _blank()
+    helius = _helius_reason()
+    if helius is not None:
+        return refused | {"reason": helius}
     if not isinstance(case_id, str) or not isinstance(message_sha256, str) or message_sha256 == "":
         return refused | {"reason": "message_refused"}
     rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
@@ -49,8 +58,7 @@ def _exchange(case_id: str, message_sha256: str, now: float, transport, signer, 
         return refused | {"reason": "message_refused"}
     proof = rows[0]
     try:
-        raw = base64.b64decode(proof["message_b64"], validate=True)
-        decoded = solana_tx.decode_transaction(raw)
+        decoded = solana_tx.decode_transaction(__import__("base64").b64decode(proof["message_b64"], validate=True))
     except Exception:
         return refused | {"reason": "message_refused"}
     if decoded.fee_payer != phantom_transport.REQUIRED_WALLET or decoded.required_signatures != 1:
@@ -62,59 +70,71 @@ def _exchange(case_id: str, message_sha256: str, now: float, transport, signer, 
     capital = desk_loop._signer_capital(message_sha256, now, transport)
     if capital.get("ok") is not True:
         return refused | {"reason": capital.get("reason") or "exposure_unknown"}
-    if capital.get("ticket_limit_proven") is not True or capital.get("allocation_proven") is not True:
+    if capital.get("ticket_limit_proven") is not True:
         return refused | {"reason": "ticket"}
+    if capital.get("allocation_proven") is not True:
+        return refused | {"reason": "allocation"}
     totals = memecoin_desk.loss_totals()
     if totals.get("live_halts_new_entries") is True:
         return refused | {"reason": "stop_new_entries"}
-    if signer is None or sender is None:
+    _ensure_table()
+    existing = db.query(
+        "SELECT signature, status FROM live_submit WHERE message_sha256 = ? ORDER BY created_at",
+        (message_sha256,),
+    )
+    if existing:
+        return _reconcile(case_id, message_sha256, existing[0]["signature"], existing[0]["status"], now)
+    if signer is None:
         return refused | {"reason": "phantom_session_missing"}
-    return _sign_send_confirm(case_id, proof["message_b64"], message_sha256, now, signer, sender)
-
-
-def _sign_send_confirm(case_id: str, message_b64: str, message_sha256: str, now: float, signer, sender) -> dict:
-    refused = _blank()
     try:
-        signed = signer(message_b64)
+        signed = signer(proof["message_b64"])
     except Exception:
         return refused | {"reason": "signature_refused"}
     signed_tx = None if not isinstance(signed, dict) else signed.get("signed_tx")
     if not isinstance(signed_tx, str) or signed_tx == "":
         return refused | {"reason": "signature_refused"}
     try:
-        reserved = solana_tx.message_bytes(message_b64)
+        reserved = solana_tx.message_bytes(proof["message_b64"])
         produced = solana_tx.message_bytes(signed_tx)
         signature = solana_tx.first_signature(signed_tx)
     except Exception:
         return refused | {"reason": "signature_refused"}
     if reserved != produced or signature == "":
         return refused | {"reason": "message_mismatch"}
-    send_body = {
+    if not _record_inflight(message_sha256, signature, case_id, now):
+        return _reconcile(case_id, message_sha256, signature, "inflight", now)
+    sent = _rpc({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "sendTransaction",
         "params": [signed_tx, {"encoding": "base64", "skipPreflight": False}],
-    }
-    posted = _post(sender, send_body)
-    if posted.get("ok") is not True:
-        return refused | {"reason": posted.get("reason") or "send_refused", "sign": True}
-    result = posted["body"].get("result")
-    if result != signature:
-        return refused | {"reason": "send_refused", "sign": True}
-    status_body = {
+    })
+    if sent.get("ok") is not True:
+        if sent.get("reason") in {"rpc_timeout", "rpc_transport"}:
+            return _reconcile(case_id, message_sha256, signature, "inflight", now, fallback=sent.get("reason"))
+        return refused | {"reason": sent.get("reason") or "send_refused", "sign": True, "signature": signature}
+    if sent["body"].get("result") != signature:
+        return refused | {"reason": "send_refused", "sign": True, "signature": signature}
+    return _reconcile(case_id, message_sha256, signature, "inflight", now)
+
+
+def _reconcile(case_id: str, message_sha256: str, signature: str, status: str, now: float, fallback: str | None = None) -> dict:
+    refused = _blank() | {"sign": True, "signature": signature}
+    if status == "confirmed":
+        return _confirmed(signature)
+    posted = _rpc({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getSignatureStatuses",
         "params": [[signature], {"searchTransactionHistory": True}],
-    }
-    confirmed = _post(sender, status_body)
-    if confirmed.get("ok") is not True:
-        return refused | {"reason": confirmed.get("reason") or "confirmation_pending", "sign": True, "signature": signature}
-    value = ((confirmed["body"].get("result") or {}).get("value") or [None])[0]
+    })
+    if posted.get("ok") is not True:
+        return refused | {"reason": posted.get("reason") or fallback or "rpc_transport"}
+    value = ((posted["body"].get("result") or {}).get("value") or [None])[0]
     if not isinstance(value, dict) or value.get("err") is not None:
-        return refused | {"reason": "confirmation_err", "sign": True, "signature": signature}
-    if value.get("confirmationStatus") not in {"processed", "confirmed", "finalized"}:
-        return refused | {"reason": "confirmation_pending", "sign": True, "signature": signature}
+        return refused | {"reason": "confirmation_err"}
+    if value.get("confirmationStatus") not in _CONFIRMED:
+        return refused | {"reason": "confirmation_pending"}
     evidence = {
         "message_sha256": message_sha256,
         "signature": signature,
@@ -124,16 +144,30 @@ def _sign_send_confirm(case_id: str, message_b64: str, message_sha256: str, now:
         "wallet": phantom_transport.REQUIRED_WALLET,
     }
     if _leaks(evidence):
-        return refused | {"reason": "receipt_unrecorded", "sign": True, "signature": signature}
+        return refused | {"reason": "receipt_unrecorded"}
+    case = memecoin_desk._case(case_id)
+    mint = None if case is None else case["mint"]
     try:
-        memecoin_desk._ensure()
-        case = memecoin_desk._case(case_id)
-        mint = None if case is None else case["mint"]
-        db.exclusive(lambda conn: memecoin_desk._log(
-            conn, case_id, mint, "live_submit", "pass", None, "sendTransaction", evidence, float(now),
-        ))
+        wrote = db.exclusive(lambda conn: _finish(conn, case_id, mint, message_sha256, signature, evidence, now))
     except Exception:
-        return refused | {"reason": "receipt_unrecorded", "sign": True, "signature": signature}
+        return refused | {"reason": "receipt_unrecorded"}
+    if wrote is False:
+        return _confirmed(signature)
+    return _confirmed(signature)
+
+
+def _finish(conn, case_id: str, mint, message_sha256: str, signature: str, evidence: dict, now: float) -> bool:
+    cursor = conn.execute(
+        "UPDATE live_submit SET status = 'confirmed' WHERE message_sha256 = ? AND signature = ? AND status = 'inflight'",
+        (message_sha256, signature),
+    )
+    if cursor.rowcount != 1:
+        return False
+    memecoin_desk._log(conn, case_id, mint, "live_submit", "pass", None, "sendTransaction", evidence, float(now))
+    return True
+
+
+def _confirmed(signature: str) -> dict:
     return {
         "ok": True,
         "sign": True,
@@ -149,16 +183,59 @@ def _sign_send_confirm(case_id: str, message_b64: str, message_sha256: str, now:
     }
 
 
-def _post(sender, body: dict) -> dict:
+def _record_inflight(message_sha256: str, signature: str, case_id: str, now: float) -> bool:
     try:
-        posted = sender(body)
+        db.execute(
+            """
+            INSERT INTO live_submit (message_sha256, signature, case_id, status, created_at)
+            VALUES (?, ?, ?, 'inflight', ?)
+            """,
+            (message_sha256, signature, case_id, float(now)),
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_table() -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_submit (
+            message_sha256 TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (message_sha256, signature)
+        )
+        """
+    )
+
+
+def _helius_reason() -> str | None:
+    import solana_rpc
+    info = solana_rpc.describe()
+    if info.get("provider") != "helius" or info.get("ok") is not True:
+        return info.get("reason") or "rpc_refused"
+    return None
+
+
+def _rpc(payload: dict) -> dict:
+    reason = _helius_reason()
+    if reason is not None:
+        return {"ok": False, "reason": reason}
+    import solana_rpc
+    try:
+        posted = solana_rpc.post(payload)
+    except solana_rpc.RpcRefused as exc:
+        return {"ok": False, "reason": exc.reason if exc.reason in {"rpc_timeout", "rpc_transport"} else "rpc_transport"}
+    except TimeoutError:
+        return {"ok": False, "reason": "rpc_timeout"}
     except Exception:
         return {"ok": False, "reason": "rpc_transport"}
     if not isinstance(posted, dict) or posted.get("status") != 200 or not isinstance(posted.get("body"), dict):
         return {"ok": False, "reason": "send_refused"}
-    if posted["body"].get("error"):
-        return {"ok": False, "reason": "send_refused"}
-    if _leaks(posted["body"]):
+    if posted["body"].get("error") or _leaks(posted["body"]):
         return {"ok": False, "reason": "send_refused"}
     return {"ok": True, "body": posted["body"]}
 

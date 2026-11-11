@@ -1,12 +1,14 @@
-"""Live sign and send stays unreachable until every gate is closed."""
+"""Live sign and send stays behind LIVE, the agents, and every readiness gate."""
 import base64
 import os
 import unittest
 
 import db
+import desk_loop
 import live_submit
 import memecoin_desk
 import phantom_transport
+import solana_rpc
 import solana_tx
 from tests.support import temp_desk_env
 from tests.test_fee_estimate import _pool
@@ -14,6 +16,8 @@ from tests.test_jupiter_route_v2 import _metas, _route, _tx
 
 SECRET = "helius-live-path-secret"
 MINT = solana_tx.b58encode(b"\x73" * 32)
+NOW = 1_700_000_000
+BLOCK = solana_tx.b58encode(b"\x44" * 32)
 
 
 class LiveSubmitTests(unittest.TestCase):
@@ -24,115 +28,231 @@ class LiveSubmitTests(unittest.TestCase):
         db.set_setting("mode", "PAPER", "test")
         db.set_setting("agents_enabled", "0", "test")
         memecoin_desk._ensure()
+        self._gates = desk_loop.remaining_live_gates
+        self.addCleanup(lambda: setattr(desk_loop, "remaining_live_gates", self._gates))
+        self._transport = solana_rpc.TRANSPORT
+        self.addCleanup(lambda: setattr(solana_rpc, "TRANSPORT", self._transport))
 
-    def test_paper_and_an_open_gate_never_call_the_wallet_or_helius(self):
+    def test_the_sign_and_send_functions_refuse_unless_live_and_every_gate_is_closed(self):
         calls = []
 
         def signer(message):
-            calls.append(message)
-            raise AssertionError("signed")
+            calls.append(("sign", message))
 
-        def sender(body):
-            calls.append(body)
-            raise AssertionError("sent")
-
-        paper = live_submit.submit("case", "hash", 1, signer=signer, sender=sender)
+        paper = live_submit._exchange("case", "hash", NOW, None, signer)
+        direct = live_submit._sign_send_confirm("case", "hash", NOW, None, signer)
         self.assertEqual(paper["reason"], "live_unreachable")
-        self.assertFalse(paper["sign"])
-        self.assertFalse(paper["send"])
-        self.assertFalse(paper["network_called"])
+        self.assertEqual(direct["reason"], "live_unreachable")
         self.assertEqual(calls, [])
         db.set_setting("mode", "LIVE", "test")
         db.set_setting("agents_enabled", "1", "test")
         self.assertFalse(live_submit.armed())
-        opened = live_submit.submit("case", "hash", 1, signer=signer, sender=sender)
+        opened = live_submit._sign_send_confirm("case", "hash", NOW, None, signer)
         self.assertEqual(opened["reason"], "live_unreachable")
+        self.assertFalse(opened["sign"])
+        self.assertFalse(opened["send"])
         self.assertEqual(calls, [])
-        self.assertEqual(db.get_setting("agents_enabled"), "1")
-        self.assertFalse(live_submit.submit("case", "hash", 1)["live_ready"])
 
-    def test_a_wrong_slippage_does_not_sign(self):
-        values, _accounts = _pool(solana_tx.NATIVE_MINT, MINT)
-        message = _tx(_metas(solana_tx.NATIVE_MINT, MINT, values), _route(100, 80))
-        digest = live_submit.message_digest(message)
-        self._store(digest, message)
+    def test_limits_and_the_fee_payer_are_checked_before_signing(self):
+        self._arm()
         calls = []
-        result = live_submit._exchange("case", digest, 1, None, lambda message_b64: calls.append(message_b64), lambda body: calls.append(body))
-        self.assertEqual(result["reason"], "slippage_unproven")
-        self.assertEqual(calls, [])
-        self.assertFalse(result["sign"])
 
-    def test_the_signed_message_matches_and_a_keyed_error_is_not_kept(self):
-        values, _accounts = _pool(solana_tx.NATIVE_MINT, MINT)
-        message = _tx(_metas(solana_tx.NATIVE_MINT, MINT, values), _route(100, 50))
+        def signer(message):
+            calls.append(message)
+
+        wide_id, wide = self._message(_route(100, 80))
+        refused = live_submit._sign_send_confirm(wide_id, live_submit.message_digest(wide), NOW, self._reader(), signer)
+        self.assertEqual(refused["reason"], "slippage_unproven")
+        self.assertEqual(calls, [])
+        foreign = solana_tx.encode_legacy_transfer(solana_tx.b58encode(b"\x22" * 32), phantom_transport.REQUIRED_WALLET, 1, BLOCK)
+        self._store("foreign", foreign, "foreign")
+        payer = live_submit._sign_send_confirm("foreign", "foreign", NOW, self._reader(), signer)
+        self.assertEqual(payer["reason"], "wallet_mismatch")
+        self.assertEqual(calls, [])
+        fee_id, costly = self._message(_route(100, 50), price=10**12)
+        capped = live_submit._sign_send_confirm(fee_id, live_submit.message_digest(costly), NOW, self._reader(), signer)
+        self.assertEqual(capped["reason"], "fee_cap", capped)
+        self.assertEqual(calls, [])
+        ticket_id, huge = self._message(_route(100, 50), reserved="9.00")
+        ticket = live_submit._sign_send_confirm(ticket_id, live_submit.message_digest(huge), NOW, self._reader(), signer)
+        self.assertEqual(ticket["reason"], "ticket", ticket)
+        self.assertEqual(calls, [])
+        self._lose()
+        loss_id, halted_message = self._message(_route(101, 50))
+        halted = live_submit._sign_send_confirm(loss_id, live_submit.message_digest(halted_message), NOW, self._reader(), signer)
+        self.assertEqual(halted["reason"], "stop_new_entries")
+        self.assertEqual(calls, [])
+
+    def test_only_the_configured_helius_transport_can_send(self):
+        self._arm()
+        calls = []
+        solana_rpc.TRANSPORT = lambda payload: calls.append(payload) or {"status": 200, "body": {"result": None}}
+        os.environ.pop("HELIUS_API_KEY", None)
+        missing = live_submit._sign_send_confirm("case", "hash", NOW, self._reader(), lambda message: {"signed_tx": message})
+        self.assertEqual(missing["reason"], "helius_api_key_missing")
+        self.assertEqual(calls, [])
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+        db.set_setting("rpc_url", "https://override.example/solana", "test")
+        other = live_submit._sign_send_confirm("case", "hash", NOW, self._reader(), lambda message: {"signed_tx": message})
+        self.assertEqual(other["reason"], "rpc_refused")
+        self.assertEqual(calls, [])
+
+    def test_a_retry_reconciles_the_same_signature_and_processed_stays_pending(self):
+        self._arm()
+        case_id, message = self._message(_route(100, 50))
+        digest = live_submit.message_digest(message)
         raw = bytearray(base64.b64decode(message))
         raw[1:65] = b"\x11" * 64
         signed_tx = base64.b64encode(bytes(raw)).decode()
         signature = solana_tx.first_signature(signed_tx)
-        seen = []
+        signs = []
+        methods = []
+        state = {"status": "processed", "send_timeouts": 1}
 
         def signer(message_b64):
             self.assertEqual(message_b64, message)
-            seen.append("sign")
+            signs.append(message_b64)
             return {"signed_tx": signed_tx}
 
-        def sender(body):
-            seen.append(body["method"])
-            if SECRET in repr(body):
+        def transport(payload):
+            methods.append(payload["method"])
+            if SECRET in repr(payload):
                 raise AssertionError("key in request")
-            if body["method"] == "sendTransaction":
-                self.assertEqual(body["params"][0], signed_tx)
+            if payload["method"] == "sendTransaction":
+                if state["send_timeouts"]:
+                    state["send_timeouts"] -= 1
+                    raise TimeoutError("timed out api-key=" + SECRET)
                 return {"status": 200, "body": {"result": signature}}
-            self.assertEqual(body["params"][0], [signature])
-            return {"status": 200, "body": {"result": {"value": [{"confirmationStatus": "confirmed", "err": None, "slot": 9}]}}}
+            return {"status": 200, "body": {"result": {"value": [{
+                "confirmationStatus": state["status"], "err": None, "slot": 9,
+            }]}}}
 
-        result = live_submit._sign_send_confirm("case-live", message, live_submit.message_digest(message), 1_700_000_000, signer, sender)
-        self.assertTrue(result["reconciled"], result)
-        self.assertTrue(result["sign"])
-        self.assertTrue(result["send"])
-        self.assertFalse(result["live_ready"])
-        self.assertFalse(result["execution_eligible"])
-        self.assertEqual(result["signature"], signature)
-        self.assertEqual(seen, ["sign", "sendTransaction", "getSignatureStatuses"])
-        logged = db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = 'case-live' AND stage = 'live_submit'")
+        solana_rpc.TRANSPORT = transport
+        pending = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self.assertEqual(pending["reason"], "confirmation_pending", pending)
+        self.assertFalse(pending["reconciled"])
+        self.assertEqual(signs, [message])
+        self.assertEqual(methods, ["sendTransaction", "getSignatureStatuses"])
+        again = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self.assertEqual(again["reason"], "confirmation_pending")
+        self.assertEqual(signs, [message])
+        self.assertEqual(methods, ["sendTransaction", "getSignatureStatuses", "getSignatureStatuses"])
+        state["status"] = "confirmed"
+        done = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self.assertTrue(done["reconciled"], done)
+        self.assertEqual(done["signature"], signature)
+        self.assertFalse(done["live_ready"])
+        self.assertEqual(signs, [message])
+        self.assertEqual(methods.count("sendTransaction"), 1)
+        logged = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'live_submit'")
         self.assertEqual(len(logged), 1)
         self.assertNotIn(SECRET, logged[0]["evidence_json"])
+        repeat = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self.assertTrue(repeat["reconciled"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE stage = 'live_submit'")[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
+        self.assertEqual(methods.count("sendTransaction"), 1)
 
-        def leak(_body):
+    def test_a_keyed_transport_error_is_a_reason_code(self):
+        self._arm()
+        case_id, message = self._message(_route(100, 50))
+        digest = live_submit.message_digest(message)
+        raw = bytearray(base64.b64decode(message))
+        raw[1:65] = b"\x22" * 64
+        signed_tx = base64.b64encode(bytes(raw)).decode()
+
+        def signer(message_b64):
+            return {"signed_tx": signed_tx}
+
+        def transport(payload):
             raise RuntimeError("https://mainnet.helius-rpc.com/?api-key=" + SECRET)
 
-        failed = live_submit._sign_send_confirm("case-live", message, live_submit.message_digest(message), 1_700_000_000, signer, leak)
+        solana_rpc.TRANSPORT = transport
+        failed = live_submit._sign_send_confirm(case_id, digest, NOW, self._reader(), signer)
         self.assertEqual(failed["reason"], "rpc_transport")
         self.assertNotIn(SECRET, repr(failed))
         self.assertNotIn("api-key=", repr(failed))
         self.assertFalse(failed["send"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
 
-        def mismatch(_message):
-            return {"signed_tx": base64.b64encode(b"\x01" + b"\x22" * 80).decode()}
+    def _arm(self) -> None:
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        db.set_setting("mode", "LIVE", "test")
+        db.set_setting("agents_enabled", "1", "test")
+        desk_loop.remaining_live_gates = lambda: [{"gate": "all", "closed": True}]
+        self.assertTrue(live_submit.armed())
 
-        sent = []
-        refused = live_submit._sign_send_confirm("case-live", message, "hash", 1, mismatch, lambda body: sent.append(body))
-        self.assertEqual(refused["reason"], "message_mismatch")
-        self.assertEqual(sent, [])
+    def _message(self, swap: bytes, price: int = 1_000, reserved: str = "1.00"):
+        values, accounts = _pool(solana_tx.NATIVE_MINT, MINT)
+        message = _tx(_metas(solana_tx.NATIVE_MINT, MINT, values), swap, price=price, blockhash=BLOCK)
+        digest = live_submit.message_digest(message)
+        case_id = "case-%s-%s" % (digest[:8], reserved.replace(".", ""))
+        self._store(digest, message, case_id, reserved)
+        self._accounts = accounts
+        return case_id, message
 
-    def _store(self, digest: str, message: str) -> None:
+    def _store(self, digest: str, message: str, case_id: str, reserved: str = "1.00") -> None:
         db.execute(
             """
             INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
-            VALUES ('case', ?, 'protected', '{}', 'paper', 'server', 1, 1)
+            VALUES (?, ?, 'protected', ?, 'paper', 'server', ?, ?)
             """,
-            (MINT,),
+            (case_id, MINT, '{"reserved_usd": "%s"}' % reserved, NOW, NOW),
         )
         db.execute(
             """
             INSERT INTO memecoin_reservations (
-                message_sha256, case_id, side, message_b64, router, blockhash, expire_at, ledger, ledger_provenance, created_at
-            ) VALUES (?, 'case', 'entry', ?, 'jupiterz', ?, 1, 'paper', 'server', 1)
+                message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height,
+                expire_at, ledger, ledger_provenance, created_at
+            ) VALUES (?, ?, 'entry', ?, 'jupiterz', ?, 200, ?, 'paper', 'server', ?)
             """,
-            (digest, message, solana_tx.b58encode(b"\x11" * 32)),
+            (digest, case_id, message, BLOCK, NOW + 60, NOW),
         )
 
+    def _reader(self):
+        accounts = getattr(self, "_accounts", {})
 
-if __name__ == "__main__":
-    os.environ.setdefault("DESK_DATA_DIR", "/tmp/empty-desk")
-    unittest.main()
+        def transport(request):
+            if request.get("method") == "getSlot":
+                return {"status": 200, "body": {"result": 12}}
+            if request.get("method") == "getBlockHeight":
+                return {"status": 200, "body": {"result": 90}}
+            if request.get("method") == "isBlockhashValid":
+                return {"status": 200, "body": {"result": {"value": True}}}
+            if request.get("method") == "hermes_price":
+                return {"status": 200, "body": {
+                    "parsed": [{
+                        "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+                        "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": NOW},
+                        "status": "trading",
+                    }],
+                }}
+            if request.get("method") == "getMinimumBalanceForRentExemption":
+                return {"status": 200, "body": {"result": solana_tx.TOKEN_ACCOUNT_RENT}}
+            if request.get("method") == "getAccountInfo":
+                item = accounts.get(request.get("account"))
+                if item is None:
+                    return {"status": 200, "body": {"result": {"value": None}}}
+                owner, raw = item
+                encoded = base64.b64encode(bytes(raw)).decode()
+                return {"status": 200, "body": {"result": {"value": {"owner": owner, "data": [encoded, "base64"]}}}}
+            return {"status": 200, "body": {"result": None}}
+        return transport
+
+    def _lose(self) -> None:
+        db.execute(
+            """
+            INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
+            VALUES ('loss-case', ?, 'entry_failed', ?, 'live', 'server', ?, ?)
+            """,
+            (MINT, '{"entry_funding": {"signature": "loss-sig"}, "realized_pnl": "-20.00", "pnl_live": true}', NOW, NOW),
+        )
+        db.execute(
+            """
+            INSERT INTO memecoin_entry_receipts (
+                signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports,
+                dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance
+            ) VALUES ('loss-sig', 'loss-case', 'loss', 1, 1, 1, 1, 1, '0.01', 1, 'live', 'server')
+            """
+        )
