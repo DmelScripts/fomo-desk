@@ -1,6 +1,8 @@
 """The production reader uses stubbed HTTP. It does not open a socket."""
 import json
 import os
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -202,7 +204,7 @@ class DeskProviderTests(unittest.TestCase):
         tracker = [url for url in seen if "solanatracker.io" in url]
         self.assertGreaterEqual(len(tracker), 2)
         self.assertEqual(cross_source.judge(fetched)["overall"], EXPECTED["X"]["overall"])
-        self.assertTrue(all(gap == desk_providers.GAPS["solana_tracker"] for gap in self.slept))
+        self._slept_about(self.slept, [desk_providers.GAPS["solana_tracker"]] * len(self.slept))
         seen.clear()
         self.slept.clear()
         desk_providers.set_clock(self._now, self._sleep)
@@ -212,25 +214,25 @@ class DeskProviderTests(unittest.TestCase):
         self.assertIn("/tokens/" + mint, seen[0])
         creator = _saved("X", "st_token")["token"]["creation"]["creator"]
         self.assertTrue(seen[1].endswith("/deployer/" + creator))
-        self.assertEqual(self.slept, [desk_providers.GAPS["solana_tracker"]])
+        self._slept_about(self.slept, [desk_providers.GAPS["solana_tracker"]])
         self.slept.clear()
         desk_providers.set_decision_timeout(None)
         desk_providers.production_fetch("rugcheck", mint)
         desk_providers.production_fetch("rugcheck", mint)
-        self.assertEqual(self.slept, [desk_providers.GAPS["rugcheck"]])
+        self._slept_about(self.slept, [desk_providers.GAPS["rugcheck"]])
         self.slept.clear()
         desk_providers.production_fetch("dex", mint)
         desk_providers.production_fetch("dex", mint)
-        self.assertEqual(self.slept, [desk_providers.GAPS["dexscreener"]])
+        self._slept_about(self.slept, [desk_providers.GAPS["dexscreener"]])
         self.slept.clear()
         desk_providers.production_fetch("das", mint)
         desk_providers.production_fetch("das", mint)
-        self.assertIn(desk_providers.GAPS["helius"], self.slept)
+        self.assertTrue(any(abs(item - desk_providers.GAPS["helius"]) < 1e-6 for item in self.slept))
         self.slept.clear()
         desk_providers.set_transport(lambda spec: {"status": 200, "body": {"parsed": []}})
         desk_providers.fetch_hermes(NOW)
         desk_providers.fetch_hermes(NOW)
-        self.assertEqual(self.slept, [desk_providers.GAPS["hermes"]])
+        self._slept_about(self.slept, [desk_providers.GAPS["hermes"]])
 
     def test_helius_key_stays_out_of_errors(self):
         import traceback
@@ -280,3 +282,66 @@ class DeskProviderTests(unittest.TestCase):
         self.assertTrue(ready["providers"]["dexscreener"])
         self.assertFalse(ready["providers"]["helius"])
         self.assertEqual(db.get_setting("agents_enabled", "0"), "0")
+
+    def test_concurrent_callers_take_distinct_slots(self):
+        mint = TOKENS["X"]
+        gap = desk_providers.GAPS["dexscreener"]
+        desk_providers.set_clock(None, None)
+        desk_providers.set_decision_timeout(None)
+        sent = []
+        guard = threading.Lock()
+
+        def transport(spec):
+            with guard:
+                sent.append(time.monotonic())
+            return {"status": 200, "body": {"pairs": []}}
+
+        desk_providers.set_transport(transport)
+        barrier = threading.Barrier(3)
+        errors = []
+
+        def run():
+            try:
+                barrier.wait()
+                desk_providers.production_fetch("dex", mint)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(sent), 3)
+        sent.sort()
+        for earlier, later in zip(sent, sent[1:]):
+            self.assertGreaterEqual(later - earlier, gap - 0.05)
+
+    def test_a_slot_past_the_deadline_is_not_reserved(self):
+        mint = TOKENS["X"]
+        calls = {"n": 0}
+
+        def transport(spec):
+            calls["n"] += 1
+            return {"status": 200, "body": {"pairs": []}}
+
+        desk_providers.set_transport(transport)
+        desk_providers.production_fetch("dex", mint)
+        before = list(self.slept)
+        desk_providers.set_decision_timeout(0.1)
+        with self.assertRaises(cross_source.FetchFailed) as missed:
+            desk_providers.production_fetch("dex", mint)
+        self.assertEqual(missed.exception.reason, "dexscreener_rate_limited")
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(self.slept, before)
+        desk_providers.set_decision_timeout(None)
+        desk_providers.production_fetch("dex", mint)
+        self.assertEqual(calls["n"], 2)
+        self._slept_about(self.slept[len(before):], [desk_providers.GAPS["dexscreener"]])
+
+    def _slept_about(self, actual, expected):
+        self.assertEqual(len(actual), len(expected))
+        for left, right in zip(actual, expected):
+            self.assertAlmostEqual(left, right, delta=1e-6)

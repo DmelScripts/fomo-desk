@@ -9,6 +9,7 @@ PYTH_API_KEY. Nothing here signs, simulates, or sends.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,7 +35,8 @@ _SECRETS: list[str] = []
 _NOW = time.monotonic
 _SLEEP = time.sleep
 _DECISION_TIMEOUT = TIMEOUT_S
-_DEADLINE: float | None = None
+_LOCKS = {name: threading.Lock() for name in GAPS}
+_CALL = threading.local()
 
 
 def configured() -> dict:
@@ -50,32 +52,37 @@ def configured() -> dict:
 
 def set_transport(transport) -> None:
     """A test double. Production uses urllib and does not keep a response."""
-    global _TRANSPORT, _DEADLINE
+    global _TRANSPORT
     _TRANSPORT = transport if callable(transport) else None
     _LAST.clear()
-    _DEADLINE = None
+    _reset_deadline()
 
 
 def set_gap(seconds: float | None) -> None:
-    global _GAP, _DEADLINE
+    global _GAP
     _GAP = seconds
     _LAST.clear()
-    _DEADLINE = None
+    _reset_deadline()
 
 
 def set_clock(now, sleep) -> None:
     """Tests advance time here. Production uses the monotonic clock and time.sleep."""
-    global _NOW, _SLEEP, _DEADLINE
+    global _NOW, _SLEEP
     _NOW = now if callable(now) else time.monotonic
     _SLEEP = sleep if callable(sleep) else time.sleep
     _LAST.clear()
-    _DEADLINE = None
+    _reset_deadline()
 
 
 def set_decision_timeout(seconds: float | None) -> None:
-    global _DECISION_TIMEOUT, _DEADLINE
+    global _DECISION_TIMEOUT
     _DECISION_TIMEOUT = TIMEOUT_S if seconds is None else seconds
-    _DEADLINE = None
+    _reset_deadline()
+
+
+def _reset_deadline() -> None:
+    if hasattr(_CALL, "deadline"):
+        del _CALL.deadline
 
 
 def install() -> None:
@@ -209,36 +216,35 @@ def _read(request, timeout: float):
 
 
 def _start_decision() -> None:
-    global _DEADLINE
     timeout = _DECISION_TIMEOUT if _DECISION_TIMEOUT is not None else TIMEOUT_S
-    _DEADLINE = _NOW() + timeout
+    _CALL.deadline = _NOW() + timeout
 
 
 def _pace(provider: str) -> None:
-    """Wait out this provider's gap. A 429 is separate. A wait past the deadline fails closed."""
-    global _DEADLINE
+    """Reserve the next slot, then sleep outside the lock. A 429 is separate."""
     gap = GAPS[provider] if _GAP is None else _GAP
-    now = _NOW()
-    if _DEADLINE is None:
-        _DEADLINE = now + (_DECISION_TIMEOUT if _DECISION_TIMEOUT is not None else TIMEOUT_S)
-    if gap > 0:
+    with _LOCKS[provider]:
+        now = _NOW()
+        deadline = getattr(_CALL, "deadline", None)
+        if deadline is None:
+            timeout = _DECISION_TIMEOUT if _DECISION_TIMEOUT is not None else TIMEOUT_S
+            deadline = now + timeout
+            _CALL.deadline = deadline
         last = _LAST.get(provider)
-        if last is not None:
-            wait = gap - (now - last)
-            if wait > 1e-9:
-                if now + wait > _DEADLINE + 1e-9:
-                    raise cross_source.FetchFailed(provider + "_rate_limited")
-                _SLEEP(wait)
-                now = _NOW()
-                if now > _DEADLINE + 1e-9:
-                    raise cross_source.FetchFailed(provider + "_rate_limited")
-    _LAST[provider] = now
+        slot = now if last is None or gap <= 0 else max(now, last + gap)
+        if slot > deadline + 1e-9:
+            raise cross_source.FetchFailed(provider + "_rate_limited")
+        _LAST[provider] = slot
+    wait = slot - _NOW()
+    if wait > 1e-9:
+        _SLEEP(wait)
 
 
 def _remaining() -> float:
-    if _DEADLINE is None:
+    deadline = getattr(_CALL, "deadline", None)
+    if deadline is None:
         return TIMEOUT_S
-    return max(0.001, _DEADLINE - _NOW())
+    return max(0.001, deadline - _NOW())
 
 
 def _creator(mint: str) -> str:
