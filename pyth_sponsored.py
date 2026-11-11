@@ -350,8 +350,9 @@ def sol_leg(now: float) -> dict:
 
 
 # The signer accepts a Pyth price only when publish_time is within 30 seconds
-# and not more than 5 seconds ahead of the check, the status is trading, and
-# confidence is at most 1% of the price. A wider band is not a usable dollar rate.
+# and not more than 5 seconds ahead of the check, and confidence is at most 1%
+# of the price. Hermes v2 omits status; a status that is present must be trading.
+# A wider band is not a usable dollar rate.
 SIGNER_PRICE_FRESH_S = 30
 SIGNER_PRICE_FUTURE_SKEW_S = 5
 SIGNER_PRICE_CONF_RATIO = Decimal("0.01")
@@ -473,15 +474,21 @@ def assess_signer_price(payload, now: float) -> dict:
     clock = finite_clock(now)
     if clock is None or not isinstance(payload, dict):
         return unknown
-    status_name = payload.get("status")
+    status_present = "status" in payload
+    status_name = payload.get("status") if status_present else None
     price_obj = payload.get("price") if isinstance(payload.get("price"), dict) else None
     if "parsed" in payload:
         parsed = payload.get("parsed")
         if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
             return unknown
-        status_name = parsed[0].get("status", status_name)
-        price_obj = parsed[0].get("price")
-    if not isinstance(price_obj, dict) or status_name != "trading":
+        item = parsed[0]
+        if "status" in item:
+            status_present = True
+            status_name = item.get("status")
+        price_obj = item.get("price")
+    if not isinstance(price_obj, dict):
+        return unknown
+    if status_present and status_name != "trading":
         return unknown
     price = _signer_int(price_obj.get("price"))
     conf = _signer_int(price_obj.get("conf"))

@@ -409,3 +409,45 @@ class LiveReadonlyTests(unittest.TestCase):
         self.assertFalse(refused["onchain_substituted"])
         self.assertNotIn("test-pyth-not-a-secret", json.dumps(refused))
         self.assertNotIn("test-pyth-not-a-secret", json.dumps({key: value for key, value in headers.items() if key != "Authorization"}))
+
+    def test_hermes_v2_without_status_is_a_price_when_the_print_is_fresh(self):
+        from decimal import Decimal
+        fresh = json.loads((Path(__file__).resolve().parent / "fixtures" / "hermes_sol_usd_200.json").read_text(encoding="utf-8"))
+        item = fresh["parsed"][0]
+        self.assertIn("status", item)
+        del item["status"]
+        self.assertNotIn("status", item)
+        item["price"]["price"] = "8305775049"
+        item["price"]["conf"] = "7800000"
+        item["price"]["expo"] = -8
+        item["price"]["publish_time"] = int(NOW)
+        os.environ["PYTH_API_KEY"] = "test-pyth-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("PYTH_API_KEY", None))
+        priced = pyth_sponsored.read_hermes_response({"status": 200, "body": fresh}, NOW)
+        self.assertTrue(priced["ok"], priced)
+        self.assertIsNone(priced["reason"])
+        self.assertEqual(Decimal(priced["price"]) * (Decimal(10) ** priced["expo"]), Decimal("83.05775049"))
+        self.assertFalse(priced["onchain_substituted"])
+
+        stale = json.loads(json.dumps(fresh))
+        stale["parsed"][0]["price"]["publish_time"] = int(NOW) - 31
+        self.assertEqual(pyth_sponsored.assess_signer_price(stale, NOW)["reason"], "price_stale")
+
+        wide = json.loads(json.dumps(fresh))
+        wide["parsed"][0]["price"]["conf"] = "83057751"
+        self.assertEqual(pyth_sponsored.assess_signer_price(wide, NOW)["reason"], "price_conf")
+
+        halted = json.loads(json.dumps(fresh))
+        halted["parsed"][0]["status"] = "halted"
+        self.assertEqual(pyth_sponsored.assess_signer_price(halted, NOW)["reason"], "price_unknown")
+        blank = json.loads(json.dumps(fresh))
+        blank["parsed"][0]["status"] = None
+        self.assertEqual(pyth_sponsored.assess_signer_price(blank, NOW)["reason"], "price_unknown")
+
+        for field in ("price", "conf", "publish_time"):
+            missing = json.loads(json.dumps(fresh))
+            del missing["parsed"][0]["price"][field]
+            self.assertEqual(pyth_sponsored.assess_signer_price(missing, NOW)["reason"], "price_unknown", field)
+        invalid = json.loads(json.dumps(fresh))
+        invalid["parsed"][0]["price"]["price"] = "nope"
+        self.assertEqual(pyth_sponsored.assess_signer_price(invalid, NOW)["reason"], "price_unknown")
