@@ -16,6 +16,44 @@ MINT_A = "JEH7cJxAKdprFG5AvdsY2c4ZqojxLBjFmw19zADV6oK5"
 MINT_B = "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump"
 
 
+def _redirected_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Runs with the socket module's globals. A redirect tuple replaces the peer."""
+    redir = globals().get("_proof_redirect")
+    if redir is not None:
+        host, port = redir
+    addrlist = []
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+        af, socktype, proto, canonname, sa = res
+        addrlist.append((_intenum_converter(af, AddressFamily), _intenum_converter(socktype, SocketKind), proto, canonname, sa))
+    return addrlist
+
+
+def _open_blocked_socket(*args, **kwargs):
+    """Same function object as the suite's blocked opener, with a real TCP connect."""
+    import _socket
+    import socket
+    if args and isinstance(args[0], socket.socket):
+        return getattr(_socket.socket, "connect")(args[0], args[1])
+    address = args[0]
+    timeout = args[1] if len(args) > 1 else kwargs.get("timeout", None)
+    host, port = address
+    infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    err = None
+    for family, typ, proto, _canon, sockaddr in infos:
+        raw = socket.socket(family, typ, proto)
+        try:
+            if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+                raw.settimeout(timeout)
+            getattr(_socket.socket, "connect")(raw, sockaddr)
+            return raw
+        except OSError as exc:
+            err = exc
+            raw.close()
+    if err is not None:
+        raise err
+    raise OSError("connect failed")
+
+
 def _response(body: bytes):
     raw = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body
 
@@ -162,15 +200,15 @@ class LiveGateTests(unittest.TestCase):
 
         gates_open("before")
         for name in names:
-            if name == "_note":
+            if name in {"_note", "handle_request"}:
                 owner = live_gate_proof._OwnedTransport
-                original = owner._note
-                owner._note = lambda *args, **kwargs: True
+                original = getattr(owner, name)
+                setattr(owner, name, lambda *args, **kwargs: True)
                 try:
                     self.assertFalse(live_gate_proof.attributes_intact(), name)
                     gates_open(name)
                 finally:
-                    owner._note = original
+                    setattr(owner, name, original)
                 continue
             original = getattr(live_gate_proof, name)
             setattr(live_gate_proof, name, (lambda *args, **kwargs: True) if name != "FRESH_S" else 10**9)
@@ -183,6 +221,7 @@ class LiveGateTests(unittest.TestCase):
             finally:
                 setattr(live_gate_proof, name, original)
         import json
+        import socket
         import time
         import public_filter_docs
         import cross_source
@@ -198,6 +237,7 @@ class LiveGateTests(unittest.TestCase):
             (cross_source, "bundle_check", lambda *args, **kwargs: {"ok": True}),
             (cross_source, "dev_check", lambda *args, **kwargs: {"status": "PASS"}),
             (pyth_sponsored, "assess_signer_price", lambda *args, **kwargs: {"ok": True}),
+            (socket, "getaddrinfo", lambda *args, **kwargs: ()),
         )
         original_hmac = hmac.new
         original_sha = hashlib.sha256
@@ -210,6 +250,103 @@ class LiveGateTests(unittest.TestCase):
                 gates_open(attr)
             finally:
                 setattr(owner, attr, original)
+
+    def test_a_local_certificate_and_redirected_dns_stay_open(self):
+        import socket
+        import ssl
+        import subprocess
+        import tempfile
+        import threading
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(root / "ca.key"), "-out", str(root / "ca.pem"), "-days", "1", "-nodes", "-subj", "/CN=Desk Test CA"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["openssl", "req", "-newkey", "rsa:2048", "-keyout", str(root / "server.key"), "-out", str(root / "server.csr"), "-nodes", "-subj", "/CN=api.rugcheck.xyz"],
+                check=True, capture_output=True,
+            )
+            ext = root / "ext.cnf"
+            ext.write_text("subjectAltName=DNS:api.rugcheck.xyz\n")
+            subprocess.run(
+                ["openssl", "x509", "-req", "-in", str(root / "server.csr"), "-CA", str(root / "ca.pem"), "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-out", str(root / "server.pem"), "-days", "1", "-extfile", str(ext)],
+                check=True, capture_output=True,
+            )
+            body = b'{"lpLockedPct": 100}'
+            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_ctx.load_cert_chain(root / "server.pem", root / "server.key")
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(5)
+            self.addCleanup(listener.close)
+            port = listener.getsockname()[1]
+            served = threading.Event()
+            finished = threading.Event()
+
+            def serve():
+                try:
+                    raw, _addr = listener.accept()
+                except OSError:
+                    return
+                try:
+                    wrapped = server_ctx.wrap_socket(raw, server_side=True)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = wrapped.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    payload = (
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                        + str(len(body)).encode()
+                        + b"\r\nConnection: keep-alive\r\n\r\n"
+                        + body
+                    )
+                    wrapped.sendall(payload)
+                    served.set()
+                    finished.wait(5)
+                    wrapped.close()
+                except Exception:
+                    return
+
+            threading.Thread(target=serve, daemon=True).start()
+            bundle = Path(live_gate_proof._CA_FILE)
+            original_bundle = bundle.read_bytes()
+            bundle.write_bytes(original_bundle + b"\n" + (root / "ca.pem").read_bytes())
+            self.addCleanup(lambda: bundle.write_bytes(original_bundle))
+            for value in vars(live_gate_proof).values():
+                if isinstance(value, ssl.SSLContext):
+                    value.load_verify_locations(cafile=str(root / "ca.pem"))
+            original_lookup = socket.getaddrinfo.__code__
+            opener = socket.create_connection
+            original_open = opener.__code__
+            socket._proof_redirect = ("127.0.0.1", port)
+            socket.getaddrinfo.__code__ = _redirected_getaddrinfo.__code__
+            opener.__code__ = _open_blocked_socket.__code__
+            try:
+                self.assertTrue(live_gate_proof.attributes_intact())
+                try:
+                    desk_loop.public_reader({
+                        "method": "GET",
+                        "url": "https://api.rugcheck.xyz/v1/tokens/%s/report/summary" % MINT_A,
+                    })
+                except Exception:
+                    pass
+                self.assertTrue(served.wait(3))
+                self.assertTrue(live_gate_proof.attributes_intact())
+                self.assertFalse(live_gate_proof.closed("lp_lock_live", MINT_A))
+                rows = {item["gate"]: item["closed"] for item in desk_loop.remaining_live_gates(MINT_A)}
+                self.assertFalse(rows["lp_lock_live"])
+            finally:
+                finished.set()
+                socket.getaddrinfo.__code__ = original_lookup
+                opener.__code__ = original_open
+                socket._proof_redirect = None
 
     def test_a_transport_fixture_does_not_close_the_provider_gates(self):
         import desk_providers

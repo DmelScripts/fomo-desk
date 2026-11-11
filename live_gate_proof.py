@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import math
 import os
@@ -20,6 +21,8 @@ import time
 import types
 import urllib.error
 import urllib.request
+
+import certifi
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -248,7 +251,7 @@ _GETPEERCERT = ssl.SSLSocket.getpeercert
 _WRAP = ssl.SSLContext.wrap_socket
 _URLOPEN = urllib.request.urlopen
 _HTTPS_CONNECTION = http.client.HTTPSConnection
-_CONTEXT = ssl.create_default_context()
+_CA_FILE = certifi.where()
 _HTTP_TRANSPORT_HANDLE = httpx.HTTPTransport.handle_request
 _CLIENT_GET = httpx.Client.get
 _CLIENT = None
@@ -339,10 +342,17 @@ def _wire():
     notes = {}
     lock = threading.Lock()
     connection_cls = _DeskHTTPSConnection
-    context = _CONTEXT
     ssl_socket = _SSL_SOCKET
     getpeercert = _GETPEERCERT
+    getpeername = ssl.SSLSocket.getpeername
     cert_matches = _cert_matches
+    ssl_context_cls = ssl.SSLContext
+    tls_client = ssl.PROTOCOL_TLS_CLIENT
+    cert_required = ssl.CERT_REQUIRED
+    load_verify = ssl.SSLContext.load_verify_locations
+    ca_file = _CA_FILE
+    getaddrinfo_fn = socket.getaddrinfo
+    ip_address = ipaddress.ip_address
     socket_type = _SOCKET
     connect_fn = _CONNECT
     create_fn = _CREATE_CONNECTION
@@ -452,10 +462,32 @@ def _wire():
             for key, row in stamped:
                 notes[key] = row
 
+    def public_peer(sock) -> bool:
+        if ssl.SSLSocket.getpeername is not getpeername:
+            return False
+        try:
+            peer = getpeername(sock)
+        except Exception:
+            return False
+        if type(peer) is not tuple or not peer or type(peer[0]) is not str:
+            return False
+        try:
+            addr = ip_address(peer[0])
+        except ValueError:
+            return False
+        mapped = addr.ipv4_mapped if type(addr) is ipaddress.IPv6Address else None
+        if mapped is not None:
+            addr = mapped
+        if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_unspecified:
+            return False
+        return True
+
     def handshake(sock, host) -> bool:
         if not stack_intact() or type(sock) is not ssl_socket or type(host) is not str:
             return False
         if type(sock).getpeercert is not getpeercert:
+            return False
+        if not public_peer(sock):
             return False
         try:
             cert = getpeercert(sock)
@@ -469,52 +501,74 @@ def _wire():
             socket.socket is socket_type
             and getattr(socket.socket, "connect") is connect_fn
             and socket.create_connection is create_fn
+            and socket.getaddrinfo is getaddrinfo_fn
             and ssl.SSLSocket is ssl_socket
             and ssl.SSLSocket.getpeercert is getpeercert
+            and ssl.SSLSocket.getpeername is getpeername
+            and ssl.SSLContext is ssl_context_cls
             and ssl.SSLContext.wrap_socket is wrap
+            and ssl.SSLContext.load_verify_locations is load_verify
+            and ssl.PROTOCOL_TLS_CLIENT is tls_client
+            and ssl.CERT_REQUIRED is cert_required
             and urllib.request.urlopen is urlopen
             and http.client.HTTPSConnection is https_base
             and httpx.HTTPTransport.handle_request is transport_handle
             and httpx.Client.get is client_get
             and mod._DeskHTTPSConnection is connection_cls
-            and mod._CONTEXT is context
+            and mod._CA_FILE is ca_file
             and mod._cert_matches is cert_matches
             and mod._handshake_host is handshake
             and mod._owned_https is owned_https
             and mod._commit_verified is commit
+            and mod._OwnedTransport.handle_request is handle
         )
+
+    def client_context():
+        ctx = ssl_context_cls(tls_client)
+        ctx.verify_mode = cert_required
+        ctx.check_hostname = True
+        load_verify(ctx, cafile=ca_file)
+        return ctx
+
+    def seal(url, parsed, mint, history) -> None:
+        if not stack_intact():
+            return
+        save(plan(url, parsed, mint, clock(), history, seen()))
 
     def commit(sock, url, parsed, mint, history) -> None:
         host = split(url).hostname if type(url) is str else None
         if not handshake(sock, host if type(host) is str else ""):
             return
-        save(plan(url, parsed, mint, clock(), history, seen()))
+        seal(url, parsed, mint, history)
 
     def owned_https(request, timeout, mint=None, history=None):
         parts = split(request.full_url)
         if parts.scheme != "https" or type(parts.hostname) is not str or parts.hostname == "":
             raise urllib.error.URLError("host")
-        conn = connection_cls(parts.hostname, timeout=timeout, context=context)
+        conn = connection_cls(parts.hostname, timeout=timeout, context=client_context())
         path = parts.path or "/"
         if parts.query:
             path = path + "?" + parts.query
         headers = {key: value for key, value in request.header_items()}
-        sock = None
         try:
+            conn.connect()
+            sock = conn.sock
+            accepted = handshake(sock, parts.hostname)
             conn.request(request.get_method(), path, body=request.data, headers=headers)
             response = conn.getresponse()
             raw = response.read()
             status = response.status
-            sock = conn.sock
             parsed = None
             if status == 200:
                 try:
                     parsed = loads(raw.decode("utf-8"))
                 except Exception:
                     parsed = None
-            proved = type(parsed) is dict and handshake(sock, parts.hostname)
+            if conn.sock is not sock:
+                accepted = False
+            proved = accepted and type(parsed) is dict
             if proved:
-                commit(sock, request.full_url, parsed, mint, history)
+                seal(request.full_url, parsed, mint, history)
             return status, raw, proved
         finally:
             conn.close()
@@ -564,7 +618,7 @@ def _wire():
             ("_stack_intact", stack_intact),
             ("_NOTES", view),
             ("_DeskHTTPSConnection", connection_cls),
-            ("_CONTEXT", context),
+            ("_CA_FILE", ca_file),
             ("_fresh", fresh),
             ("_lp_ok", lp_ok),
             ("_plan", plan),
@@ -590,7 +644,7 @@ def _wire():
         for name, original in expected:
             if getattr(mod, name, None) is not original:
                 return False
-        if mod._OwnedTransport._note is not note:
+        if mod._OwnedTransport._note is not note or mod._OwnedTransport.handle_request is not handle:
             return False
         if mod.FRESH_S is not window:
             return False
@@ -617,7 +671,7 @@ def _wire():
             "_stack_intact",
             "_NOTES",
             "_DeskHTTPSConnection",
-            "_CONTEXT",
+            "_CA_FILE",
             "_fresh",
             "_lp_ok",
             "_plan",
@@ -641,6 +695,7 @@ def _wire():
             "monitored",
             "FRESH_S",
             "_note",
+            "handle_request",
         )
 
     def note(self, response, request) -> None:
@@ -662,6 +717,19 @@ def _wire():
         if type(parsed) is not dict:
             return
         commit(stream._sock, str(request.url), parsed, None, None)
+
+    def handle(self, request):
+        ctx = client_context()
+        inner = httpx.HTTPTransport(verify=ctx, retries=0)
+        previous = self._inner
+        self._inner = inner
+        try:
+            response = inner.handle_request(request)
+            note(self, response, request)
+            return response
+        finally:
+            self._inner = previous
+            inner.close()
 
     closed = note_ok
     exchange = do_exchange
@@ -685,6 +753,7 @@ def _wire():
     attributes_intact = check
     monitored = names
     _OwnedTransport._note = note
+    _OwnedTransport.handle_request = handle
 
 
 _wire()
