@@ -33,6 +33,39 @@ def _sol_price(now: int, slot: int) -> bytes:
     return bytes(raw)
 
 
+def _sim_result(mint: str, amount: str, fee: int, *, err=None, balances=None, units: int = 85000):
+    """A simulateTransaction result in the RPC shape. The mint is the output."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "context": {"apiVersion": "2.1.0", "slot": 280000000},
+            "value": {
+                "err": err,
+                "logs": ["Program log: Instruction: Swap"],
+                "unitsConsumed": units,
+                "fee": fee,
+                "innerInstructions": [],
+                "preTokenBalances": [{
+                    "accountIndex": 2, "mint": mint, "owner": "WALLET",
+                    "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "uiTokenAmount": {"amount": "0", "decimals": 6, "uiAmount": 0, "uiAmountString": "0"},
+                }],
+                "postTokenBalances": [{
+                    "accountIndex": 2, "mint": mint, "owner": "WALLET",
+                    "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    "uiTokenAmount": {"amount": amount, "decimals": 6, "uiAmount": None, "uiAmountString": amount},
+                }],
+                "accounts": None,
+            },
+        },
+    }
+    if balances is not None:
+        body["result"]["value"]["preBalances"] = balances[0]
+        body["result"]["value"]["postBalances"] = balances[1]
+    return body
+
+
 def _pool(source_mint: str, dest_mint: str, *, fee_rate: int = 3000, liquidity: int = 1, adaptive: bool = False):
     wallet = phantom_transport.REQUIRED_WALLET
     vault_a = solana_tx.b58encode(b"\x31" * 32)
@@ -119,6 +152,8 @@ class FeeEstimateTests(unittest.TestCase):
                 return {"status": 200, "body": {"result": 90}}
             if request.get("method") == "isBlockhashValid":
                 return {"status": 200, "body": {"result": {"value": True}}}
+            if request.get("method") == "simulateTransaction" and request.get("purpose") == "pre_sign":
+                return {"status": 200, "body": _sim_result(request.get("output_mint"), "100", 5000)}
             if request.get("method") == "hermes_price":
                 return {"status": 200, "body": {
                     "parsed": [{
@@ -1163,3 +1198,117 @@ class FeeEstimateTests(unittest.TestCase):
         refused("rent-program", unknown_program(happy_message), base, "unparseable_instruction")
         other = self._message(values, solana_tx.NATIVE_MINT, mint, 0, amount=5)
         refused("rent-table", other, without_rent, "rent_unknown")
+
+    def test_preflight_simulation_blocks_the_mock_signer(self):
+        import json
+        mint = solana_tx.b58encode(b"\x73" * 32)
+        values, accounts = _pool(solana_tx.NATIVE_MINT, mint)
+        auth = {"mock": True, "wallet_id": phantom_transport.REQUIRED_WALLET_ID, "wallet": phantom_transport.REQUIRED_WALLET}
+        encoded = self._message(values, solana_tx.NATIVE_MINT, mint, 0, quoted=100, slippage=50)
+        digest = self._store(encoded, values["pool"], "entry", "sim-case")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-case'", ('{"reserved_usd": "1.00"}',))
+        saved = json.loads(Path("tests/fixtures/simulate_transaction_200.json").read_text(encoding="utf-8"))
+        saved["result"]["value"]["preTokenBalances"][0]["mint"] = mint
+        saved["result"]["value"]["postTokenBalances"][0]["mint"] = mint
+        saved["result"]["value"]["postTokenBalances"][0]["uiTokenAmount"]["amount"] = "100"
+        seen = {}
+
+        def run(body, boom=None):
+            base = self._transport(accounts)
+
+            def transport(request):
+                if request.get("purpose") == "pre_sign":
+                    seen["request"] = request
+                    if boom == "timeout":
+                        raise TimeoutError("slow")
+                    if boom == "rpc":
+                        return {"status": 500, "body": {"error": {"code": -32000, "message": "down"}}}
+                    return {"status": 200, "body": body}
+
+                return base(request)
+
+            return desk_loop.approach_signer("sim-case", digest, transport, NOW, auth)
+
+        passed = run(saved)
+        self.assertTrue(passed["preflight_ready"], passed)
+        self.assertTrue(passed["simulate"])
+        self.assertTrue(passed["signer_reached"], passed)
+        self.assertTrue(passed["signer"]["mock"])
+        self.assertFalse(passed["signer"]["network_called"])
+        self.assertFalse(passed["sign"])
+        self.assertFalse(passed["send"])
+        self.assertFalse(passed["live_ready"])
+        self.assertFalse(passed["execution_eligible"])
+        self.assertFalse(passed["gate_complete"])
+        ready = desk_loop.readiness()
+        self.assertFalse(ready["preflight_ready"])
+        self.assertFalse(ready["sign"])
+        self.assertFalse(ready["send"])
+        self.assertFalse(ready["live_ready"])
+        request = seen["request"]
+        self.assertEqual(request["transaction"], encoded)
+        self.assertIs(request["sigVerify"], False)
+        self.assertIs(request["replaceRecentBlockhash"], True)
+        self.assertEqual(request["commitment"], "processed")
+        options = request["jsonrpc"]["params"][1]
+        self.assertEqual(request["jsonrpc"]["params"][0], encoded)
+        self.assertIs(options["sigVerify"], False)
+        self.assertIs(options["replaceRecentBlockhash"], True)
+        self.assertEqual(options["commitment"], "processed")
+        self.assertTrue(options["innerInstructions"])
+        self.assertIn("accounts", options)
+        logged = db.query(
+            "SELECT verdict, reason, evidence_json FROM memecoin_log WHERE case_id = 'sim-case' AND stage = 'preflight' ORDER BY ts"
+        )
+        self.assertEqual(logged[-1]["verdict"], "pass")
+        self.assertIn("api.mainnet-beta.solana.com", logged[-1]["evidence_json"])
+        self.assertIn("configured_rpc", logged[-1]["evidence_json"])
+
+        def expect(body, cause, boom=None):
+            result = run(body, boom)
+            self.assertFalse(result["signer_reached"], result)
+            self.assertIsNone(result["signer"])
+            self.assertFalse(result["sign"])
+            self.assertFalse(result["send"])
+            self.assertFalse(result["preflight_ready"])
+            self.assertFalse(result["live_ready"])
+            self.assertEqual(result["reason"], cause, result)
+
+        expect(saved, "simulation_timeout", "timeout")
+        expect(saved, "simulation_rpc", "rpc")
+        erred = json.loads(json.dumps(saved))
+        erred["result"]["value"]["err"] = {"InstructionError": [0, {"Custom": 1}]}
+        expect(erred, "simulation_err")
+        costly = json.loads(json.dumps(saved))
+        costly["result"]["value"]["fee"] = 600_000
+        expect(costly, "simulated_fee_above_0.05")
+        short = json.loads(json.dumps(saved))
+        short["result"]["value"]["postTokenBalances"][0]["uiTokenAmount"]["amount"] = "98"
+        expect(short, "simulated_output_below_min")
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = 'sim-case'", ('{"reserved_usd": "8.00"}',))
+        rented = json.loads(json.dumps(saved))
+        rented["result"]["value"]["preBalances"] = [1_000_000_000, 0]
+        rented["result"]["value"]["postBalances"] = [998_000_000, solana_tx.TOKEN_ACCOUNT_RENT]
+        expect(rented, "simulated_ticket")
+        calls = {"n": 0}
+
+        def counting(request):
+            if request.get("purpose") == "pre_sign":
+                calls["n"] += 1
+            return self._transport(accounts)(request)
+
+        db.set_setting("rpc_url", "https://mainnet.helius-rpc.com", "test")
+        missed = desk_loop.approach_signer("sim-case", digest, counting, NOW, auth)
+        self.assertEqual(missed["reason"], "helius_api_key_missing", missed)
+        self.assertEqual(calls["n"], 0)
+        self.assertFalse(missed["signer_reached"])
+        os.environ["HELIUS_API_KEY"] = "test-helius-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        held = run(saved)
+        self.assertTrue(held["preflight_ready"], held)
+        fresh = db.query(
+            "SELECT evidence_json FROM memecoin_log WHERE case_id = 'sim-case' AND stage = 'preflight' ORDER BY ts"
+        )[-1]["evidence_json"]
+        self.assertNotIn("test-helius-not-a-secret", fresh)
+        self.assertIn("helius", fresh)
+        self.assertNotIn("api-key=", fresh)

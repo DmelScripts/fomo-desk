@@ -2675,6 +2675,144 @@ def mock_phantom_send(signed: dict) -> dict:
     }
 
 
+def simulate_before_sign(case_id: str, message_sha256: str, transport, now: float, estimate: dict) -> dict:
+    """simulateTransaction of the stored swap. A failure does not sign."""
+    import base64
+    import db
+    import jupiter_route_v2
+    import memecoin_desk
+    import preflight_sim
+    import solana_jupiter
+    import solana_tx
+    endpoint = preflight_sim.simulation_endpoint()
+    quiet = {"ok": False, "sign": False, "send": False, "preflight_ready": False, "rpc": endpoint}
+
+    def finish(body: dict) -> dict:
+        _log_simulation(case_id, body, now)
+        return body
+
+    if endpoint.get("uses_helius_key") is True and endpoint.get("helius_key_present") is not True:
+        return finish(quiet | {"cause": "helius_api_key_missing"})
+    rows = db.query("SELECT * FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1 or rows[0]["case_id"] != case_id:
+        return finish(quiet | {"cause": "simulation_message"})
+    proof = rows[0]
+    try:
+        encoded = proof["message_b64"]
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return finish(quiet | {"cause": "simulation_message"})
+    case = memecoin_desk._case(case_id)
+    if case is None or proof["side"] not in {"entry", "exit"}:
+        return finish(quiet | {"cause": "simulation_message"})
+    output_mint = case["mint"] if proof["side"] == "entry" else solana_tx.NATIVE_MINT
+    output_account = solana_tx.associated_token_address(decoded.fee_payer, output_mint, solana_tx.TOKEN_PROGRAM)
+    route = None
+    compute = []
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        data = bytes(item.data)
+        if program == solana_tx.COMPUTE_BUDGET:
+            compute.append(data)
+        elif program == solana_jupiter.PROGRAM_ID and route is None:
+            route = data
+    parsed = jupiter_route_v2.parse(route or b"")
+    quoted = parsed.get("quoted_out_amount") if parsed.get("ok") is True else None
+    if type(quoted) is str and quoted.isdigit():
+        quoted = int(quoted)
+    if type(quoted) is not int or quoted <= 0:
+        return finish(quiet | {"cause": "simulated_output_unproven"})
+    priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
+    cu_price = priced.get("requested_micro_lamports_per_cu") if priced.get("ok") is True else 0
+    if type(cu_price) is not int:
+        cu_price = 0
+    outflow = _message_outflow(decoded, transport, case, proof["side"])
+    if outflow.get("ok") is not True:
+        return finish(quiet | {"cause": outflow.get("reason") or "simulated_ticket_unproven"})
+    dex_raw = estimate.get("dex_fee_usd")
+    dex = None if dex_raw is None else memecoin_desk._num(dex_raw)
+    if dex is None or dex < 0:
+        return finish(quiet | {"cause": "simulation_fee_unproven"})
+    snap = memecoin_desk._snapshot(case)
+    reserved = memecoin_desk._reserved_amount(snap.get("reserved_usd")) if "reserved_usd" in snap else None
+    sol = _signer_sol_price(transport, now)
+    if sol.get("ok") is not True:
+        return finish(quiet | {"cause": sol.get("reason") or "simulation_fee_unproven"})
+    leg = {"fresh": True, "used": True, "price": sol["price"], "conf": sol["conf"], "expo": sol["expo"]}
+    payload = preflight_sim.rpc_body(encoded, output_account)
+    request = {
+        "method": "simulateTransaction",
+        "purpose": "pre_sign",
+        "transaction": encoded,
+        "commitment": preflight_sim.COMMITMENT,
+        "encoding": "base64",
+        "sigVerify": False,
+        "replaceRecentBlockhash": True,
+        "innerInstructions": True,
+        "output_mint": output_mint,
+        "jsonrpc": payload,
+        "rpc": {"provider": endpoint["provider"], "host": endpoint["host"]},
+    }
+    try:
+        response = transport(request)
+    except TimeoutError:
+        return finish(quiet | {"cause": "simulation_timeout"})
+    except Exception:
+        return finish(quiet | {"cause": "simulation_rpc"})
+    if not isinstance(response, dict) or response.get("status") != 200:
+        return finish(quiet | {"cause": "simulation_rpc"})
+    rpc = response.get("body")
+    if not isinstance(rpc, dict) or rpc.get("error") is not None:
+        return finish(quiet | {"cause": "simulation_rpc"})
+    result = rpc.get("result")
+    value = result.get("value") if isinstance(result, dict) else None
+    if not isinstance(value, dict):
+        return finish(quiet | {"cause": "simulation_malformed"})
+    checked = preflight_sim.assess(
+        value, output_mint=output_mint, quoted_out=quoted, sol=leg,
+        dex_fee_usd=dex, outflow_lamports=outflow["lamports"], reserved_usd=reserved, cu_price=cu_price,
+    )
+    checked["rpc"] = endpoint
+    checked["preflight_ready"] = checked.get("ok") is True
+    checked["sign"] = False
+    checked["send"] = False
+    return finish(checked)
+
+
+def _log_simulation(case_id: str, body: dict, now: float) -> None:
+    import memecoin_desk
+    import db
+    rpc = body.get("rpc") if isinstance(body.get("rpc"), dict) else {}
+    evidence = {
+        "cause": body.get("cause"),
+        "ok": body.get("ok") is True,
+        "fee_lamports": body.get("fee_lamports"),
+        "combined_fee_usd": body.get("combined_fee_usd"),
+        "output_amount": body.get("output_amount"),
+        "minimum_out": body.get("minimum_out"),
+        "deposit_lamports": body.get("deposit_lamports"),
+        "ticket_usd": body.get("ticket_usd"),
+        "units_consumed": body.get("units_consumed"),
+        "rpc_provider": rpc.get("provider"),
+        "rpc_host": rpc.get("host"),
+        "commitment": "processed",
+        "sig_verify": False,
+        "replace_recent_blockhash": True,
+        "sign": False,
+        "send": False,
+        "live_ready": False,
+    }
+    try:
+        row = memecoin_desk._case(case_id) if isinstance(case_id, str) else None
+        mint = None if row is None else row["mint"]
+        verdict = "pass" if body.get("ok") is True else "fail"
+        db.exclusive(lambda conn: memecoin_desk._log(
+            conn, case_id, mint, "preflight", verdict, body.get("cause"), "simulateTransaction", evidence, float(now),
+        ))
+    except Exception:
+        return
+
+
 def approach_signer(case_id: str, message_sha256: str, transport, now: float, mock_auth=None) -> dict:
     """Fee, reservation, ticket, loss, and slippage, then a mock sign and send.
 
@@ -2697,6 +2835,13 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
     auth = _server_auth(mock_auth)
     if auth.get("ok") is not True:
         return base | {"fee_estimate_blocked": False, "signer_reached": False, "reason": auth.get("reason"), "auth": auth}
+    simulated = simulate_before_sign(case_id, message_sha256, transport, now, estimate)
+    if simulated.get("ok") is not True:
+        return base | {
+            "simulate": True, "simulation": simulated, "fee_estimate_blocked": False,
+            "signer_reached": False, "reason": simulated.get("cause"), "preflight_ready": False,
+            "sign": False, "send": False, "live_ready": False, "execution_eligible": False,
+        }
     signed = mock_phantom_sign(message_sha256, auth, now, transport)
     if signed.get("signed") is not True:
         return base | {
@@ -2711,7 +2856,8 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
         "allocation_proven": signed.get("allocation_proven") is True,
         "price_freshness_proven": signed.get("price_freshness_proven") is True,
         "rent_bound_proven": signed.get("rent_bound_proven") is True,
-        "execution_eligible": False, "preflight_ready": False, "gate_complete": False, "live_ready": False,
+        "execution_eligible": False, "preflight_ready": True, "gate_complete": False, "live_ready": False,
+        "simulate": True, "simulation": simulated,
     }
 
 

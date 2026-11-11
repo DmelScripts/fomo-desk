@@ -2066,6 +2066,12 @@ conn.close()
                 else:
                     value = 5000
                 return {"status": 200, "body": {"result": {"context": {"slot": 2_000_028}, "value": value}, "message": echoed}}
+            if method == "simulateTransaction" and request.get("purpose") == "pre_sign":
+                return {"status": 200, "body": {"jsonrpc": "2.0", "id": 1, "result": {"context": {"slot": 2_000_028}, "value": {
+                    "err": None, "unitsConsumed": 1000, "fee": 5000, "innerInstructions": [],
+                    "preTokenBalances": [{"mint": request.get("output_mint"), "uiTokenAmount": {"amount": "0", "decimals": 6, "uiAmountString": "0"}}],
+                    "postTokenBalances": [{"mint": request.get("output_mint"), "uiTokenAmount": {"amount": "1000000000000", "decimals": 6, "uiAmountString": "1000000000000"}}],
+                }}}}
             if method == "simulateTransaction":
                 mode = chain.get("preflight_mode")
                 if not mode:

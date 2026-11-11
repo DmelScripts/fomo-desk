@@ -1,0 +1,35 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "context": {"apiVersion": "2.1.0", "slot": 280000000},
+    "value": {
+      "err": null,
+      "logs": ["Program log: Instruction: Swap"],
+      "unitsConsumed": 85000,
+      "fee": 5000,
+      "innerInstructions": [],
+      "preTokenBalances": [
+        {
+          "accountIndex": 2,
+          "mint": "MINT",
+          "owner": "WALLET",
+          "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "uiTokenAmount": {"amount": "0", "decimals": 6, "uiAmount": 0, "uiAmountString": "0"}
+        }
+      ],
+      "postTokenBalances": [
+        {
+          "accountIndex": 2,
+          "mint": "MINT",
+          "owner": "WALLET",
+          "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "uiTokenAmount": {"amount": "100", "decimals": 6, "uiAmount": 0.0001, "uiAmountString": "0.0001"}
+        }
+      ],
+      "preBalances": [1000000000],
+      "postBalances": [999995000],
+      "accounts": null
+    }
+  }
+}
