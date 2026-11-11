@@ -451,3 +451,34 @@ class LiveReadonlyTests(unittest.TestCase):
         invalid = json.loads(json.dumps(fresh))
         invalid["parsed"][0]["price"]["price"] = "nope"
         self.assertEqual(pyth_sponsored.assess_signer_price(invalid, NOW)["reason"], "price_unknown")
+
+    def test_hermes_parsed_id_must_equal_the_sol_feed(self):
+        saved = json.loads((Path(__file__).resolve().parent / "fixtures" / "hermes_sol_usd_200.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["parsed"][0]["id"], pyth_sponsored.SOL_FEED)
+        self.assertFalse(saved["parsed"][0]["id"].startswith("0x"))
+        saved["parsed"][0]["price"]["publish_time"] = int(NOW)
+        priced = pyth_sponsored.assess_signer_price(saved, NOW)
+        self.assertTrue(priced["ok"], priced)
+        self.assertNotIn("cause", priced)
+
+        def refused(body):
+            result = pyth_sponsored.assess_signer_price(body, NOW)
+            self.assertEqual(result["reason"], "price_unknown")
+            self.assertEqual(result["cause"], "hermes_feed_mismatch")
+            self.assertIsNot(result.get("ok"), True)
+            return result
+
+        wrong = json.loads(json.dumps(saved))
+        wrong["parsed"][0]["id"] = "a" * 64
+        refused(wrong)
+        missing = json.loads(json.dumps(saved))
+        del missing["parsed"][0]["id"]
+        refused(missing)
+        numeric = json.loads(json.dumps(saved))
+        numeric["parsed"][0]["id"] = 1
+        refused(numeric)
+        os.environ["PYTH_API_KEY"] = "test-pyth-not-a-secret"
+        self.addCleanup(lambda: os.environ.pop("PYTH_API_KEY", None))
+        wrapped = pyth_sponsored.read_hermes_response({"status": 200, "body": wrong}, NOW)
+        self.assertEqual(wrapped["reason"], "price_unknown")
+        self.assertEqual(wrapped["cause"], "hermes_feed_mismatch")

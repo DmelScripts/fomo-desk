@@ -464,7 +464,7 @@ def read_hermes_response(response, now: float, onchain=None) -> dict:
     except (OverflowError, ValueError, ArithmeticError):
         return refused
     if priced.get("ok") is not True:
-        return refused | {"cause": priced.get("reason")}
+        return refused | {"cause": priced.get("cause") or priced.get("reason")}
     return priced | {"onchain_substituted": False, "onchain_ignored": onchain is not None, "live": False}
 
 
@@ -477,6 +477,7 @@ def assess_signer_price(payload, now: float) -> dict:
     status_present = "status" in payload
     status_name = payload.get("status") if status_present else None
     price_obj = payload.get("price") if isinstance(payload.get("price"), dict) else None
+    item = payload
     if "parsed" in payload:
         parsed = payload.get("parsed")
         if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
@@ -486,6 +487,10 @@ def assess_signer_price(payload, now: float) -> dict:
             status_present = True
             status_name = item.get("status")
         price_obj = item.get("price")
+    # The saved Hermes body uses a lowercase id with no 0x prefix, equal to SOL_FEED.
+    feed = item.get("id") if isinstance(item, dict) else None
+    if type(feed) is not str or feed != SOL_FEED:
+        return unknown | {"cause": "hermes_feed_mismatch"}
     if not isinstance(price_obj, dict):
         return unknown
     if status_present and status_name != "trading":
