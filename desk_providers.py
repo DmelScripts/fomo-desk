@@ -180,9 +180,21 @@ def _urllib(spec: dict) -> dict:
     headers = {key: value for key, value in spec["headers"].items() if not key.startswith("_")}
     url = spec["url"]
     key = spec["headers"].get("_helius_key")
-    if isinstance(key, str) and key != "":
-        url = url + "?api-key=" + key
     data = None if spec.get("json") is None else json.dumps(spec["json"]).encode("utf-8")
+    if isinstance(key, str) and key != "":
+        import solana_rpc
+        keyed = url + "?api-key=" + key
+        reason = None
+        try:
+            return solana_rpc.exchange(keyed, data or b"", timeout=_remaining(), headers=headers)
+        except solana_rpc.RpcRefused as exc:
+            reason = exc.reason
+        del keyed, key, data, url
+        if reason == "rpc_bad_json":
+            raise cross_source.FetchFailed("rpc_bad_json")
+        if reason == "rpc_timeout":
+            raise cross_source.FetchFailed(spec["provider"] + "_timeout")
+        raise cross_source.FetchFailed(spec["provider"] + "_status")
     request = urllib.request.Request(url, data=data, headers=headers, method=spec["method"])
     status, raw = _read(request, _remaining())
     if status == "timeout":

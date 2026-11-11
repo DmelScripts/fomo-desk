@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 HELIUS_RPC = "https://mainnet.helius-rpc.com"
@@ -23,6 +25,85 @@ class RpcRefused(Exception):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(reason)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect", headers, fp)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+_STOCK_URLOPEN = urllib.request.urlopen
+_NO_REDIRECT = urllib.request.build_opener(_NoRedirect)
+
+
+def _open(request: urllib.request.Request, timeout: float):
+    current = urllib.request.urlopen
+    if current is not _STOCK_URLOPEN:
+        return current(request, timeout=timeout)
+    return _NO_REDIRECT.open(request, timeout=timeout)
+
+
+def _refuse(reason: str):
+    raise RpcRefused(reason)
+
+
+def exchange(url: str, data: bytes, *, timeout: float = 8, headers: dict | None = None, max_bytes: int | None = None) -> dict:
+    """POST one URL. A failure is a reason code: no URL and no body on the exception."""
+    reason, result = _exchange_once(url, data, timeout, headers, max_bytes)
+    del url, data, headers
+    if reason is not None:
+        _refuse(reason)
+    return result
+
+
+def _exchange_once(url: str, data: bytes, timeout: float, headers: dict | None, max_bytes: int | None):
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers or {"content-type": "application/json", "accept": "application/json"},
+        method="POST",
+    )
+    status = None
+    raw = b""
+    reason = None
+    try:
+        with _open(request, timeout) as response:
+            status = getattr(response, "status", None)
+            raw = response.read()
+    except TimeoutError:
+        reason = "rpc_timeout"
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            raw = exc.read() or b""
+        except Exception:
+            raw = b""
+    except urllib.error.URLError as exc:
+        reason = "rpc_timeout" if isinstance(getattr(exc, "reason", None), TimeoutError) else "rpc_transport"
+    except Exception:
+        reason = "rpc_transport"
+    if reason is not None:
+        return reason, None
+    if status in {301, 302, 303, 307, 308}:
+        return None, {"status": status, "body": None}
+    if status != 200:
+        return None, {"status": status if type(status) is int else 0, "body": None}
+    if max_bytes is not None and len(raw) > max_bytes:
+        return "body", None
+    parsed = None
+    bad = False
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        bad = True
+    if bad or not isinstance(parsed, dict):
+        return "rpc_bad_json", None
+    return None, {"status": 200, "body": parsed}
 
 
 def configured_url() -> str:
@@ -49,7 +130,7 @@ def describe() -> dict:
     }
 
 
-def post(payload: dict) -> dict:
+def post(payload: dict, *, max_bytes: int | None = None) -> dict:
     """One JSON-RPC POST. A failure reason does not include the URL."""
     if callable(TRANSPORT):
         result = TRANSPORT(payload)
@@ -59,38 +140,12 @@ def post(payload: dict) -> dict:
     info = describe()
     if info["ok"] is not True:
         raise RpcRefused("helius_api_key_missing")
-    import urllib.error
-    import urllib.request
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        _wire_url(), data=data, headers={"content-type": "application/json", "accept": "application/json"}, method="POST",
+    return exchange(
+        _wire_url(),
+        json.dumps(payload).encode("utf-8"),
+        timeout=8,
+        max_bytes=max_bytes,
     )
-    status = None
-    raw = b""
-    reason = None
-    try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            status = response.status
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-        try:
-            raw = exc.read()
-        except Exception:
-            raw = b""
-    except TimeoutError:
-        reason = "rpc_timeout"
-    except urllib.error.URLError as exc:
-        reason = "rpc_timeout" if isinstance(getattr(exc, "reason", None), TimeoutError) else "rpc_transport"
-    except Exception:
-        reason = "rpc_transport"
-    if reason is not None:
-        raise RpcRefused(reason)
-    try:
-        body = json.loads(raw.decode("utf-8")) if raw else None
-    except Exception:
-        body = None
-    return {"status": status, "body": body}
 
 
 def call(payload: dict) -> dict:
@@ -105,7 +160,7 @@ def call(payload: dict) -> dict:
         raise RpcRefused("rpc_http_%s" % code)
     body = posted.get("body")
     if not isinstance(body, dict):
-        raise RpcRefused("rpc_transport")
+        raise RpcRefused("rpc_bad_json")
     return body
 
 

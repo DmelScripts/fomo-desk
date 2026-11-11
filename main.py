@@ -50,7 +50,15 @@ class HttpxAdapter:
             return {"error": {"code": 429}}
         if response.status_code != 200:
             raise solana_rpc.RpcRefused("rpc_http_%s" % response.status_code)
-        return response.json()
+        bad = False
+        parsed = None
+        try:
+            parsed = response.json()
+        except Exception:
+            bad = True
+        if bad:
+            raise solana_rpc.RpcRefused("rpc_bad_json")
+        return parsed
 
 
 def _attach_log(name: str) -> None:

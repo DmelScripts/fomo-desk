@@ -104,38 +104,34 @@ def configured_reader() -> ReadRpc | None:
 
 def http_transport(payload: dict) -> dict:
     """POST the configured endpoint once. Redirects and cookies are not used."""
-    import httpx
     if not isinstance(payload, dict) or payload.get("method") not in METHODS:
         raise RpcError("method_refused")
-    info = solana_rpc.describe()
-    if info["ok"] is not True:
-        raise RpcError("helius_api_key_missing")
-    response = None
+    posted = None
     reason = None
     try:
-        response = httpx.post(
-            solana_rpc._wire_url(),
-            json=payload,
-            timeout=httpx.Timeout(TIMEOUT_S, connect=4.0),
-            follow_redirects=False,
-            headers={"content-type": "application/json", "accept": "application/json"},
-        )
-    except httpx.TimeoutException:
-        reason = "timeout"
-    except httpx.HTTPError:
-        reason = "transport"
-    if reason is not None:
-        raise RpcError(reason)
-    if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
-        raise RpcError("redirect")
-    if response.status_code != 200:
-        raise RpcError("http_status")
-    if len(response.content) > MAX_BODY:
+        posted = solana_rpc.post(payload, max_bytes=MAX_BODY)
+    except solana_rpc.RpcRefused as exc:
+        reason = exc.reason
+    if reason == "helius_api_key_missing":
+        raise RpcError("helius_api_key_missing")
+    if reason == "rpc_timeout":
+        raise RpcError("timeout")
+    if reason == "rpc_bad_json":
+        raise RpcError("rpc_bad_json")
+    if reason == "body":
         raise RpcError("body")
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RpcError("rpc_result") from exc
+    if reason == "redirect":
+        raise RpcError("redirect")
+    if reason is not None:
+        raise RpcError("transport")
+    status = posted.get("status")
+    if status in {301, 302, 303, 307, 308}:
+        raise RpcError("redirect")
+    if status != 200:
+        raise RpcError("http_status")
+    body = posted.get("body")
+    if not isinstance(body, dict):
+        raise RpcError("rpc_bad_json")
     return body
 
 
