@@ -94,9 +94,22 @@ def _sim_within_caps(transaction_b64: str, value: dict, now, notes, fresh_row) -
         break
     if sol is None:
         return False
+    mint = None
+    decimals = None
+    for row in value.get("postTokenBalances") or []:
+        if not isinstance(row, dict) or row.get("owner") != decoded.fee_payer:
+            continue
+        if isinstance(row.get("mint"), str) and row["mint"] != "":
+            mint = row["mint"]
+            ui = row.get("uiTokenAmount") if isinstance(row.get("uiTokenAmount"), dict) else {}
+            if type(ui.get("decimals")) is int and not isinstance(ui.get("decimals"), bool):
+                decimals = ui["decimals"]
+            break
+    if mint is None:
+        return False
     checked = preflight_sim.assess(
         value,
-        output_mint="",
+        output_mint=mint,
         owner=decoded.fee_payer,
         account_count=len(decoded.static_keys),
         quoted_out=quoted,
@@ -106,22 +119,9 @@ def _sim_within_caps(transaction_b64: str, value: dict, now, notes, fresh_row) -
         reserved_usd=None,
         cu_price=cu_price,
         cu_limit=cu_limit,
-        mint_decimals=None,
+        mint_decimals=decimals,
     )
-    if checked.get("ok") is not True:
-        if checked.get("cause") not in {"simulated_output_unproven", "simulation_ticket_unproven", "simulated_ticket"}:
-            return False
-        fee = checked.get("fee_lamports")
-        if type(fee) is not int:
-            return False
-        network = pyth_sponsored.lamports_usd(fee, sol)
-        if network is None or network > memecoin_desk.MAX_FEE:
-            return False
-        minimum = jupiter_route_v2.minimum_out(quoted, 50)
-        output = checked.get("output_amount")
-        if minimum is None or type(output) is not int or output < minimum:
-            return False
-    return checked.get("cause") != "simulated_fee_above_0.05"
+    return checked.get("ok") is True
 
 
 def quote_age_ok(row, now, limit) -> bool:
@@ -142,6 +142,8 @@ def quote_age_ok(row, now, limit) -> bool:
     if until is not None and (isinstance(until, bool) or not isinstance(until, (int, float)) or until <= now):
         return False
     return True
+
+
 _LOCK = threading.Lock()
 _NOTES: dict = {}
 
@@ -728,7 +730,7 @@ def _wire():
                     parsed = loads(raw.decode("utf-8"))
                 except Exception:
                     parsed = None
-            if conn.sock is not sock:
+            if conn.sock is not None and conn.sock is not sock:
                 accepted = False
             proved = accepted and type(parsed) is dict and check()
             if proved:

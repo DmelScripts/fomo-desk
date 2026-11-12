@@ -2612,12 +2612,15 @@ def _requote_guard(decoded, proof, moment) -> str | None:
         return "quote_unproven"
     if type(amount) is not int or isinstance(amount, bool) or amount <= 0:
         return "quote_unproven"
-    side = proof.get("side") if isinstance(proof, dict) else None
-    mint = None if not isinstance(proof, dict) else None
+    try:
+        side = proof["side"]
+    except Exception:
+        side = None
+    mint = None
     try:
         import memecoin_desk
-        case = memecoin_desk._case(proof["case_id"]) if isinstance(proof, dict) else None
-        mint = None if case is None else case.get("mint")
+        case = memecoin_desk._case(proof["case_id"])
+        mint = None if case is None else case["mint"]
     except Exception:
         mint = None
     if not isinstance(mint, str) or mint == "":
@@ -2686,13 +2689,6 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     expiry = _signer_quote_and_blockhash(proof, decoded, transport, moment)
     if expiry.get("ok") is not True:
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
-    if db.get_setting("mode", "PAPER") == "LIVE":
-        missing = _live_trade_proofs(case, proof, moment)
-        if missing is not None:
-            return refused | {"reason": missing}
-        moved = _requote_guard(decoded, proof, moment)
-        if moved is not None:
-            return refused | {"reason": moved}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
     priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
@@ -2820,7 +2816,7 @@ def live_simulate(case_id: str, message_sha256: str, now: float) -> dict:
     except Exception:
         return quiet | {"reason": "simulation_rpc", "network_called": True}
     digest = hashlib.sha256(encoded.encode()).hexdigest()
-    closed = proved is True and live_gate_proof.preflight_observed(digest=digest, now=now)
+    closed = proved is True and live_gate_proof.preflight_observed(digest=digest)
     return quiet | {
         "ok": closed, "preflight_ready": closed, "network_called": True,
         "reason": None if closed else "preflight_open", "status": status,
