@@ -215,6 +215,11 @@ def _reference_message(message_sha256: str) -> str | None:
     return rows[0]["message_b64"]
 
 
+def _accounts_rejected(result) -> bool:
+    summary = _observed_fill(result)
+    return isinstance(summary, dict) and summary.get("accounts_ok") is False
+
+
 def _bound_result(result, signature: str, reference: str | None) -> bool:
     import live_gate_proof
     return live_gate_proof._tx_bound(result, signature, reference or "")
@@ -240,7 +245,9 @@ def _reconcile(case_id: str, message_sha256: str, signature: str, status: str, n
             confirmed = isinstance(value, dict) and value.get("err") is None and value.get("confirmationStatus") in _CONFIRMED
         if not confirmed:
             result = _pull_result(signature)
-            if isinstance(result, dict) and not _bound_result(result, signature, reference):
+            if isinstance(result, dict) and (
+                not _bound_result(result, signature, reference) or _accounts_rejected(result)
+            ):
                 return _open_liability(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, None)
             return refused | {"reason": "open_liability"}
     if not confirmed:

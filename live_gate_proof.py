@@ -239,8 +239,118 @@ def _sold_amount_matches(input_delta, in_amount) -> bool:
     return abs(dropped - in_amount) <= slack
 
 
+def _loaded_lists(meta, decoded):
+    """Writable then readonly addresses the signed message is allowed to load.
+
+    A legacy message, or a v0 message with no lookup tables, rejects any loaded
+    address. A v0 message loads only as many addresses as its tables declare.
+    """
+    loaded = meta.get("loadedAddresses") if type(meta) is dict else None
+    if loaded is None:
+        writable, readonly = [], []
+    elif type(loaded) is not dict:
+        return None
+    else:
+        writable = loaded.get("writable") if "writable" in loaded else []
+        readonly = loaded.get("readonly") if "readonly" in loaded else []
+        if type(writable) is not list or type(readonly) is not list:
+            return None
+        if any(type(item) is not str or item == "" for item in writable + readonly):
+            return None
+    declared_w = sum(len(item.writable) for item in decoded.lookups)
+    declared_r = sum(len(item.readonly) for item in decoded.lookups)
+    if decoded.version != "v0" or not decoded.lookups:
+        if writable or readonly:
+            return None
+        return [], []
+    if len(writable) != declared_w or len(readonly) != declared_r:
+        return None
+    return writable, readonly
+
+
+def _keys_for(decoded, meta):
+    """Static keys from the signed message, then loaded writable, then readonly."""
+    lists = _loaded_lists(meta, decoded)
+    if lists is None:
+        return None
+    writable, readonly = lists
+    non_signers = len(decoded.static_keys) - decoded.required_signatures
+    if (
+        decoded.required_signatures < 1
+        or non_signers < 0
+        or decoded.readonly_signed > decoded.required_signatures
+        or decoded.readonly_unsigned > non_signers
+    ):
+        return None
+    return list(decoded.static_keys) + list(writable) + list(readonly), len(writable)
+
+
+def _is_writable(decoded, index: int, n_static: int, n_loaded_writable: int) -> bool:
+    if type(index) is not int or isinstance(index, bool) or index < 0:
+        return False
+    if index < n_static:
+        if index < decoded.required_signatures:
+            return index < decoded.required_signatures - decoded.readonly_signed
+        return index < n_static - decoded.readonly_unsigned
+    return index < n_static + n_loaded_writable
+
+
+def _ata_addresses(owner: str, mint: str) -> set[str]:
+    import solana_tx
+    found = set()
+    for program in (solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022):
+        try:
+            found.add(solana_tx.associated_token_address(owner, mint, program))
+        except Exception:
+            continue
+    return found
+
+
+def _resolved_delta(meta, decoded, keys, n_loaded_writable: int, owner: str, mint: str) -> int | None:
+    """One pre row and one post row for this owner and mint, on the same writable ATA."""
+    atas = _ata_addresses(owner, mint)
+    if not atas:
+        return None
+    pre_rows = meta.get("preTokenBalances")
+    post_rows = meta.get("postTokenBalances")
+    if not isinstance(pre_rows, list) or not isinstance(post_rows, list):
+        return None
+    n_static = len(decoded.static_keys)
+
+    def one(rows):
+        match = None
+        saw = False
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            if row.get("owner") != owner or row.get("mint") != mint:
+                continue
+            saw = True
+            parsed = _token_amount(row)
+            if parsed is None:
+                return None
+            index, amount = parsed
+            if index >= len(keys) or not _is_writable(decoded, index, n_static, n_loaded_writable):
+                return None
+            address = keys[index]
+            if address not in atas:
+                return None
+            if match is not None:
+                return None
+            match = (address, amount)
+        if saw and match is None:
+            return None
+        return match
+
+    pre = one(pre_rows)
+    post = one(post_rows)
+    if pre is None or post is None or pre[0] != post[0]:
+        return None
+    return post[1] - pre[1]
+
+
 def _fill_summary(result) -> dict | None:
-    """Owner+mint deltas for the hop. A missing pair is not a positive fill."""
+    """Owner+mint deltas for the hop. An index outside the signed keys is not a fill."""
     if type(result) is not dict:
         return None
     meta = result.get("meta")
@@ -262,10 +372,20 @@ def _fill_summary(result) -> dict | None:
     fee = meta.get("fee")
     if type(fee) is not int or isinstance(fee, bool) or fee < 0:
         fee = None
-    output_delta = _one_owner_mint_delta(meta, decoded.fee_payer, dest)
-    input_delta = _one_owner_mint_delta(meta, decoded.fee_payer, source)
+    keyed = _keys_for(decoded, meta)
+    accounts_ok = keyed is not None
+    output_delta = None
+    input_delta = None
+    if keyed is not None:
+        keys, n_loaded_writable = keyed
+        output_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest)
+        input_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, source)
+        if _owner_mint_rows(meta, decoded.fee_payer, dest) and output_delta is None:
+            accounts_ok = False
+        if dest == solana_tx.NATIVE_MINT and _owner_mint_rows(meta, decoded.fee_payer, source) and input_delta is None:
+            accounts_ok = False
     in_amount, quoted = _route_amounts(decoded)
-    positive = type(output_delta) is int and not isinstance(output_delta, bool) and output_delta > 0
+    positive = accounts_ok and type(output_delta) is int and not isinstance(output_delta, bool) and output_delta > 0
     if positive and dest == solana_tx.NATIVE_MINT:
         positive = _sold_amount_matches(input_delta, in_amount)
     return {
@@ -276,8 +396,20 @@ def _fill_summary(result) -> dict | None:
         "in_amount": in_amount,
         "quoted_out": quoted,
         "fee_lamports": fee,
+        "accounts_ok": accounts_ok,
         "positive": positive is True,
     }
+
+
+def _owner_mint_rows(meta, owner: str, mint: str) -> bool:
+    for name in ("preTokenBalances", "postTokenBalances"):
+        rows = meta.get(name)
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if isinstance(row, dict) and row.get("owner") == owner and row.get("mint") == mint:
+                return True
+    return False
 
 
 def _result_signature(result) -> str | None:

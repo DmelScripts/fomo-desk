@@ -668,6 +668,134 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertTrue(logged["anomalous"])
         self.assertEqual(logged["reason"], "fill_unmatched")
 
+    def test_a_balance_index_must_be_on_the_signed_writable_account(self):
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self.addCleanup(lambda: setattr(self, "_balance_index", None))
+        self.addCleanup(lambda: setattr(self, "_loaded_addresses", None))
+        self._arm()
+        self._clock = time.time()
+        case_id, message = self._message(_route(100, 50, amount=1_900_000), when=time.time(), ledger="live")
+        digest = live_submit.message_digest(message)
+        signed, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        wide = self._fill(signed, 5000, "100")
+        for row in wide["meta"]["preTokenBalances"] + wide["meta"]["postTokenBalances"]:
+            row["accountIndex"] = 40
+        self._submit_unmatched(case_id, digest, signed, signature, wide)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_loaded, message_loaded = self._message(_route(100, 50, amount=2_000_000), when=time.time(), ledger="live")
+        digest_loaded = live_submit.message_digest(message_loaded)
+        signed_loaded, signature_loaded = self._signed(message_loaded)
+        loaded = self._fill(signed_loaded, 5000, "100")
+        loaded["meta"]["loadedAddresses"] = {"writable": [solana_tx.b58encode(b"\x46" * 32)], "readonly": []}
+        self._submit_unmatched(case_loaded, digest_loaded, signed_loaded, signature_loaded, loaded)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_time, message_time = self._message(_route(100, 50, amount=2_100_000), when=time.time(), ledger="live")
+        digest_time = live_submit.message_digest(message_time)
+        signed_time, signature_time = self._signed(message_time)
+        timed = self._fill(signed_time, 5000, "100")
+        for row in timed["meta"]["preTokenBalances"] + timed["meta"]["postTokenBalances"]:
+            row["accountIndex"] = 40
+
+        def transport(payload, body=timed, signature=signature_time):
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": signature}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": body}}
+            raise TimeoutError("status")
+
+        solana_rpc.TRANSPORT = transport
+        pending = live_submit.submit(case_time, digest_time, time.time(), self._reader(), lambda body, signed=signed_time: {"signed_tx": signed})
+        self.assertFalse(pending["reconciled"], pending)
+        self.assertEqual(pending["reason"], "fill_unmatched", pending)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_time,))[0]["status"], "unknown")
+        self._assert_open_loss(case_time)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        self._balance_index = 40
+        case_seal, message_seal = self._message(_route(100, 50, amount=2_200_000), when=time.time(), ledger="live")
+        digest_seal = live_submit.message_digest(message_seal)
+        signed_seal, _signature_seal = self._signed(message_seal)
+        solana_rpc.TRANSPORT = None
+        sealed = live_submit.submit(case_seal, digest_seal, time.time(), self._reader(), lambda body, signed=signed_seal: {"signed_tx": signed})
+        self.assertFalse(sealed["reconciled"], sealed)
+        self.assertEqual(sealed["reason"], "fill_unmatched", sealed)
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_seal)
+        self._assert_v0_lookup_resolution()
+
+    def _submit_unmatched(self, case_id, digest, signed, signature, body) -> None:
+        import live_gate_proof
+        solana_rpc.TRANSPORT = lambda payload, signed=signed, signature=signature, body=body: {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": body} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 8,
+                }]}}
+            ),
+        }
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda _body, signed=signed: {"signed_tx": signed})
+        self.assertFalse(done["reconciled"], done)
+        self.assertEqual(done["reason"], "fill_unmatched", done)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_id)
+
+    def _assert_v0_lookup_resolution(self) -> None:
+        import live_gate_proof
+        import solana_jupiter
+        wallet = phantom_transport.REQUIRED_WALLET
+        program = solana_jupiter.PROGRAM_ID
+        table = solana_tx.b58encode(b"\x44" * 32)
+        ata = solana_tx.associated_token_address(wallet, MINT, solana_tx.TOKEN_PROGRAM)
+        other = solana_tx.b58encode(b"\x47" * 32)
+        keys = [wallet, program, solana_tx.NATIVE_MINT, MINT]
+        writable = self._encode_v0(keys, 3, [(table, [0], [])], 1, [0, 0, 0, 2, 3], b"")
+        readonly = self._encode_v0(keys, 3, [(table, [], [0])], 1, [0, 0, 0, 2, 3], b"")
+        correct = self._v0_result(writable, 4, ata, MINT, "0", "100", {"writable": [ata], "readonly": []})
+        wrong = self._v0_result(writable, 4, other, MINT, "0", "100", {"writable": [other], "readonly": []})
+        frozen = self._v0_result(readonly, 4, ata, MINT, "0", "100", {"writable": [], "readonly": [ata]})
+        self.assertTrue(live_gate_proof._fill_summary(correct)["positive"])
+        self.assertFalse(live_gate_proof._fill_matches(wrong))
+        self.assertFalse(live_gate_proof._fill_summary(wrong)["accounts_ok"])
+        self.assertFalse(live_gate_proof._fill_matches(frozen))
+        self.assertFalse(live_gate_proof._fill_summary(frozen)["accounts_ok"])
+
+    def _v0_result(self, transaction: str, index: int, _address: str, mint: str, pre: str, post: str, loaded: dict) -> dict:
+        tx = solana_tx.decode_transaction(base64.b64decode(transaction))
+        return {
+            "transaction": transaction,
+            "meta": {
+                "err": None,
+                "fee": 5000,
+                "loadedAddresses": loaded,
+                "preTokenBalances": [{
+                    "accountIndex": index, "mint": mint, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": pre, "decimals": 6},
+                }],
+                "postTokenBalances": [{
+                    "accountIndex": index, "mint": mint, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": post, "decimals": 6},
+                }],
+            },
+        }
+
+    def _encode_v0(self, keys, readonly_unsigned, lookups, program_index, accounts, data) -> str:
+        def compact(value: int) -> bytes:
+            return bytes([value])
+        message = bytes([0x80, 1, 0, readonly_unsigned])
+        message += compact(len(keys)) + b"".join(solana_tx.b58decode(key) for key in keys)
+        message += solana_tx.b58decode(BLOCK)
+        message += compact(1) + bytes([program_index]) + compact(len(accounts)) + bytes(accounts)
+        message += compact(len(data)) + data
+        message += compact(len(lookups))
+        for table, writable, readonly in lookups:
+            message += solana_tx.b58decode(table)
+            message += compact(len(writable)) + bytes(writable)
+            message += compact(len(readonly)) + bytes(readonly)
+        raw = bytes([1]) + (b"\x11" * 64) + message
+        return base64.b64encode(raw).decode()
+
     def test_a_bad_confirmed_fill_is_an_open_loss(self):
         import json
         from decimal import Decimal
@@ -750,12 +878,13 @@ class LiveSubmitTests(unittest.TestCase):
         import solana_jupiter
         output = live_gate_proof._traded_output_mint(tx)
         who = tx.fee_payer if owner is None else owner
+        output_index = self._ata_index(tx, output)
         pre_rows = [{
-            "accountIndex": 2, "mint": output, "owner": who,
+            "accountIndex": output_index, "mint": output, "owner": who,
             "uiTokenAmount": {"amount": pre, "decimals": 6},
         }]
         post_rows = [{
-            "accountIndex": 2, "mint": output, "owner": who,
+            "accountIndex": output_index, "mint": output, "owner": who,
             "uiTokenAmount": {"amount": amount, "decimals": 6},
         }]
         if output == solana_tx.NATIVE_MINT and owner is None:
@@ -767,12 +896,13 @@ class LiveSubmitTests(unittest.TestCase):
                     parsed = jupiter_route_v2.parse(bytes(item.data))
                     if parsed.get("ok") is True:
                         incoming = str(parsed["in_amount"])
+            sold_index = self._ata_index(tx, sold)
             pre_rows.append({
-                "accountIndex": 3, "mint": sold, "owner": who,
+                "accountIndex": sold_index, "mint": sold, "owner": who,
                 "uiTokenAmount": {"amount": incoming, "decimals": 6},
             })
             post_rows.append({
-                "accountIndex": 3, "mint": sold, "owner": who,
+                "accountIndex": sold_index, "mint": sold, "owner": who,
                 "uiTokenAmount": {"amount": "0", "decimals": 6},
             })
         return {
@@ -780,6 +910,10 @@ class LiveSubmitTests(unittest.TestCase):
             "transaction": signed_tx,
             "meta": {"err": None, "fee": fee, "preTokenBalances": pre_rows, "postTokenBalances": post_rows},
         }
+
+    def _ata_index(self, tx, mint: str) -> int:
+        ata = solana_tx.associated_token_address(tx.fee_payer, mint, solana_tx.TOKEN_PROGRAM)
+        return list(tx.static_keys).index(ata)
 
     def _prove_owned_reads(self, message: str) -> None:
         """Read Hermes, the Jupiter quote, and leave Helius up. The desk's own TLS records the proofs."""
@@ -883,27 +1017,38 @@ class LiveSubmitTests(unittest.TestCase):
                     raw = foreign
                 tx = solana_tx.decode_transaction(base64.b64decode(raw))
                 output = live_gate_proof._traded_output_mint(tx) or MINT
+                output_ata = solana_tx.associated_token_address(tx.fee_payer, output, solana_tx.TOKEN_PROGRAM)
+                output_index = list(tx.static_keys).index(output_ata)
+                forced = getattr(self, "_balance_index", None)
+                if isinstance(forced, int):
+                    output_index = forced
                 pre_rows = [{
-                    "accountIndex": 2, "mint": output, "owner": tx.fee_payer,
+                    "accountIndex": output_index, "mint": output, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": "0", "decimals": 6},
                 }]
                 post_rows = [{
-                    "accountIndex": 2, "mint": output, "owner": tx.fee_payer,
+                    "accountIndex": output_index, "mint": output, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": quoted, "decimals": 6},
                 }]
-                if output == solana_tx.NATIVE_MINT:
+                if output == solana_tx.NATIVE_MINT and not isinstance(forced, int):
+                    sold_ata = solana_tx.associated_token_address(tx.fee_payer, left, solana_tx.TOKEN_PROGRAM)
+                    sold_index = list(tx.static_keys).index(sold_ata)
                     pre_rows.append({
-                        "accountIndex": 3, "mint": left, "owner": tx.fee_payer,
+                        "accountIndex": sold_index, "mint": left, "owner": tx.fee_payer,
                         "uiTokenAmount": {"amount": amount, "decimals": 6},
                     })
                     post_rows.append({
-                        "accountIndex": 3, "mint": left, "owner": tx.fee_payer,
+                        "accountIndex": sold_index, "mint": left, "owner": tx.fee_payer,
                         "uiTokenAmount": {"amount": "0", "decimals": 6},
                     })
+                meta = {"err": None, "fee": 5000, "preTokenBalances": pre_rows, "postTokenBalances": post_rows}
+                loaded = getattr(self, "_loaded_addresses", None)
+                if isinstance(loaded, dict):
+                    meta["loadedAddresses"] = loaded
                 return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
                     "slot": 9,
                     "transaction": raw,
-                    "meta": {"err": None, "fee": 5000, "preTokenBalances": pre_rows, "postTokenBalances": post_rows},
+                    "meta": meta,
                 }}).encode()
             encoded = sent["params"][0]
             tx = solana_tx.decode_transaction(base64.b64decode(encoded))
