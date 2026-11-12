@@ -84,6 +84,11 @@ exit 2
         self.client = TestClient(server.app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
+        phantom_auth.reset_for_tests()
+        for name in ("calls", "args"):
+            path = self.home / name
+            if path.exists():
+                path.write_text("", encoding="utf-8")
 
     def test_login_requires_the_app_token_and_is_not_cached(self):
         self.assertEqual(self.client.post("/api/phantom/login", json={}).status_code, 401)

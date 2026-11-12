@@ -268,27 +268,54 @@ def _watch(child: subprocess.Popen, home: Path, timeout_s: float) -> None:
     _verify()
 
 
-def _verify() -> None:
-    binary = _binary()
-    home = _home()
-    try:
-        done = subprocess.run(
-            [binary, "wallet", "addresses", "--format", "json"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_child_env(home, binary),
-            cwd=str(home),
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        with _LOCK:
-            _FLOW["state"] = "failed"
-        log.info("phantom login failed")
-        return
-    text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
-    _apply_classification(_classify(text, done.returncode))
+def _bind_address_check():
+    """The gate bit lives here. Only this function's subprocess call can set it."""
+    run = subprocess.run
+    proof = {"mark": None}
+
+    def verify() -> None:
+        if subprocess.run is not run:
+            proof["mark"] = None
+            return
+        binary = _binary()
+        home = _home()
+        try:
+            done = run(
+                [binary, "wallet", "addresses", "--format", "json"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_child_env(home, binary),
+                cwd=str(home),
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proof["mark"] = None
+            with _LOCK:
+                _FLOW["state"] = "failed"
+            log.info("phantom login failed")
+            return
+        text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
+        result = _classify(text, done.returncode)
+        _apply_classification(result)
+        if (
+            subprocess.run is run
+            and result.get("state") == "observed"
+            and result.get("wallet_id") == phantom_transport.REQUIRED_WALLET_ID
+            and result.get("address") == phantom_transport.REQUIRED_WALLET
+        ):
+            proof["mark"] = object()
+        else:
+            proof["mark"] = None
+
+    def from_subprocess() -> bool:
+        return subprocess.run is run and proof["mark"] is not None
+
+    def clear() -> None:
+        proof["mark"] = None
+
+    return verify, from_subprocess, clear
 
 
 def _append(raw: str, chunk: bytes) -> str:
@@ -339,6 +366,7 @@ def _fail_closed(child: subprocess.Popen) -> None:
 
 
 def _apply_classification(result: dict) -> None:
+    """Update the view. This does not close the readiness gate."""
     with _LOCK:
         _FLOW["verify"] = result["verify"]
         _FLOW["approval_url"] = None
@@ -544,8 +572,23 @@ def _cached_evidence() -> dict | None:
     return {"state": body["state"], "source": body["source"], "at": body["at"]}
 
 
+_verify, _auth_from_subprocess, _clear_auth_proof = _bind_address_check()
+
+
+def reverify_on_startup() -> dict:
+    """Read the existing Phantom session. This does not log in and does not sign."""
+    try:
+        _verify()
+    except Exception:
+        return {"ok": False, "reason": "verify_unavailable", "sign": False, "send": False}
+    closed = server_auth_closed()
+    return {"ok": closed, "reason": None if closed else "auth_open", "sign": False, "send": False}
+
+
 def server_auth_closed(now: float | None = None) -> bool:
-    """The readiness gate. A cached or stale identity check stays open."""
+    """The readiness gate. A cached, stale, or stand-in identity check stays open."""
+    if _auth_from_subprocess() is not True:
+        return False
     try:
         view = account_view()
     except Exception:
@@ -656,6 +699,7 @@ def _kill(proc: subprocess.Popen | None) -> None:
 
 
 def reset_for_tests() -> None:
+    _clear_auth_proof()
     with _LOCK:
         proc = _FLOW["process"]
         _FLOW.update({

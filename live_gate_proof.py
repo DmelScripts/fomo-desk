@@ -29,6 +29,183 @@ import httpx
 from httpcore._backends.sync import SyncStream as _SYNC_STREAM
 
 FRESH_S = 30
+QUOTE_MAX_AGE_S = 10
+WSOL = "So11111111111111111111111111111111111111112"
+
+
+def quote_max_age() -> float:
+    """Seconds a Jupiter quote may be used. Invalid configuration stays at 10."""
+    raw = os.environ.get("DESK_QUOTE_MAX_AGE_S")
+    if raw is None or str(raw).strip() == "":
+        return float(QUOTE_MAX_AGE_S)
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(QUOTE_MAX_AGE_S)
+    if value != value or value <= 0 or value > FRESH_S:
+        return float(QUOTE_MAX_AGE_S)
+    return value
+
+
+def _sim_within_caps(transaction_b64: str, value: dict, now, notes, fresh_row) -> bool:
+    """Fee and output from the transaction that was simulated. No URL, no key."""
+    import base64
+    try:
+        import jupiter_route_v2
+        import memecoin_desk
+        import preflight_sim
+        import pyth_sponsored
+        import solana_jupiter
+        import solana_tx
+        decoded = solana_tx.decode_transaction(base64.b64decode(transaction_b64, validate=True))
+    except Exception:
+        return False
+    route = None
+    compute = []
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        data = bytes(item.data)
+        if program == solana_tx.COMPUTE_BUDGET:
+            compute.append(data)
+        elif program == solana_jupiter.PROGRAM_ID and route is None:
+            route = data
+    parsed = jupiter_route_v2.parse(route or b"")
+    quoted = parsed.get("quoted_out_amount") if parsed.get("ok") is True else None
+    if type(quoted) is not int or isinstance(quoted, bool) or quoted <= 0:
+        return False
+    priced = jupiter_route_v2.network_fee(compute, decoded.required_signatures)
+    cu_price = priced.get("requested_micro_lamports_per_cu") if priced.get("ok") is True else 0
+    cu_limit = priced.get("requested_compute_unit_limit") if priced.get("ok") is True else None
+    if type(cu_price) is not int:
+        return False
+    if type(cu_limit) is not int:
+        cu_limit = None
+    sol = None
+    for key, row in notes.items():
+        if type(key) is not tuple or len(key) != 2 or key[0] != "price_freshness_proven":
+            continue
+        if not fresh_row(row, now):
+            continue
+        body = row.get("body")
+        if not isinstance(body, dict):
+            continue
+        sol = {"fresh": True, "used": True, "price": body.get("price"), "conf": body.get("conf"), "expo": body.get("expo")}
+        break
+    if sol is None:
+        return False
+    output_mint = _traded_output_mint(decoded)
+    if output_mint is None:
+        return False
+    delta = _one_owner_mint_delta(value, decoded.fee_payer, output_mint)
+    if delta is None:
+        return False
+    minimum = jupiter_route_v2.minimum_out(quoted, 50)
+    if minimum is None or delta < minimum:
+        return False
+    fee = preflight_sim._simulated_fee(value, cu_price, cu_limit)
+    if fee is None:
+        return False
+    network = pyth_sponsored.lamports_usd(fee, sol)
+    if network is None or network > memecoin_desk.MAX_FEE:
+        return False
+    return True
+
+
+def _traded_output_mint(decoded) -> str | None:
+    """Buy output is the non-wSOL destination. Sell output is wSOL, not the fee payer's lamports."""
+    import solana_jupiter
+    import solana_tx
+    found = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program != solana_jupiter.PROGRAM_ID:
+            continue
+        indexes = list(item.account_indexes)
+        if len(indexes) < 5:
+            return None
+        try:
+            source = decoded.static_keys[indexes[3]]
+            dest = decoded.static_keys[indexes[4]]
+        except (IndexError, TypeError):
+            return None
+        if found is not None:
+            return None
+        found = (source, dest)
+    if found is None:
+        return None
+    source, dest = found
+    if source == solana_tx.NATIVE_MINT and dest != solana_tx.NATIVE_MINT:
+        return dest
+    if dest == solana_tx.NATIVE_MINT and source != solana_tx.NATIVE_MINT:
+        return dest
+    return None
+
+
+def _token_amount(row: dict) -> tuple[int, int] | None:
+    ui = row.get("uiTokenAmount")
+    if not isinstance(ui, dict):
+        return None
+    amount = ui.get("amount")
+    decimals = ui.get("decimals")
+    if type(amount) is not str or not amount.isdigit():
+        return None
+    if type(decimals) is not int or isinstance(decimals, bool) or decimals < 0:
+        return None
+    index = row.get("accountIndex")
+    if type(index) is not int or isinstance(index, bool) or index < 0:
+        return None
+    return index, int(amount)
+
+
+def _one_owner_mint_delta(value: dict, owner: str, mint: str) -> int | None:
+    """Exactly one pre row and one post row, same account, this owner and mint."""
+    pre_rows = value.get("preTokenBalances")
+    post_rows = value.get("postTokenBalances")
+    if not isinstance(pre_rows, list) or not isinstance(post_rows, list):
+        return None
+
+    def one(rows):
+        match = None
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            if row.get("owner") != owner or row.get("mint") != mint:
+                continue
+            parsed = _token_amount(row)
+            if parsed is None:
+                return None
+            if match is not None:
+                return None
+            match = parsed
+        return match
+
+    pre = one(pre_rows)
+    post = one(post_rows)
+    if pre is None or post is None or pre[0] != post[0]:
+        return None
+    return post[1] - pre[1]
+
+
+def quote_age_ok(row, now, limit) -> bool:
+    """The owned-read timestamp, not a caller clock planted in the body."""
+    if not isinstance(row, dict) or row.get("ok") is not True:
+        return False
+    stamp = row.get("at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return False
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        return False
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit <= 0:
+        return False
+    age = now - stamp
+    if not (0 <= age <= limit):
+        return False
+    until = row.get("until")
+    if until is not None and (isinstance(until, bool) or not isinstance(until, (int, float)) or until <= now):
+        return False
+    return True
+
+
 _LOCK = threading.Lock()
 _NOTES: dict = {}
 
@@ -103,7 +280,10 @@ def _plan(url, body, mint, now, history, existing, lp_ok, mint_at, plan_dev, pla
             priced = assess_price(body, now)
         except (OverflowError, ValueError, ArithmeticError):
             priced = {"ok": False}
-        put(("price_freshness_proven", mint), priced.get("ok") is True, None)
+        stored = None
+        if priced.get("ok") is True:
+            stored = {"price": priced.get("price"), "conf": priced.get("conf"), "expo": priced.get("expo")}
+        put(("price_freshness_proven", mint), priced.get("ok") is True, None, stored)
     elif url.startswith("https://api.jup.ag/swap/v2/order"):
         query = parse_query(split(url).query)
         inputs = query.get("inputMint") or []
@@ -353,6 +533,7 @@ def _wire():
     global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _NOTES
     global attributes_intact, monitored
     global _fresh, _lp_ok, _plan, _plan_dev, _plan_history
+    global quote_ready, preflight_observed
     secret = os.urandom(32)
     notes = {}
     lock = threading.Lock()
@@ -540,10 +721,47 @@ def _wire():
         load_verify(ctx, cafile=ca_file)
         return ctx
 
-    def seal(url, parsed, mint, history) -> None:
+    def sim_rows(raw, parsed, now):
+        """A Helius simulateTransaction this socket just read. The URL is not stored."""
+        if not isinstance(raw, (bytes, bytearray)) or type(parsed) is not dict:
+            return []
+        try:
+            sent = loads(bytes(raw))
+        except Exception:
+            return []
+        if type(sent) is not dict or sent.get("method") != "simulateTransaction":
+            return []
+        params = sent.get("params")
+        if type(params) is not list or not params or type(params[0]) is not str or params[0] == "":
+            return []
+        options = params[1] if len(params) > 1 else None
+        if type(options) is not dict or options.get("sigVerify") is not False:
+            return []
+        digest = digest_new(params[0].encode()).hexdigest()
+        result = parsed.get("result")
+        value = result.get("value") if type(result) is dict else None
+        ok = False
+        if type(value) is dict and value.get("err") is None and "error" not in parsed:
+            logs = value.get("logs")
+            denied = False
+            if type(logs) is list:
+                for line in logs:
+                    if type(line) is str and "insufficient" in line.lower():
+                        denied = True
+            if not denied:
+                ok = _sim_within_caps(params[0], value, now, seen(), fresh)
+        return [(("preflight_ready", digest), {"at": now, "ok": ok is True, "until": None})]
+
+    def seal(url, parsed, mint, history, request_body=None) -> None:
         if not check():
             return
-        save(plan(url, parsed, mint, clock(), history, seen()))
+        moment = clock()
+        rows = list(plan(url, parsed, mint, moment, history, seen()))
+        host = split(url).hostname if type(url) is str else None
+        if host == "mainnet.helius-rpc.com":
+            rows.extend(sim_rows(request_body, parsed, moment))
+        if rows:
+            save(rows)
 
     def commit(sock, url, parsed, mint, history) -> None:
         host = split(url).hostname if type(url) is str else None
@@ -574,11 +792,11 @@ def _wire():
                     parsed = loads(raw.decode("utf-8"))
                 except Exception:
                     parsed = None
-            if conn.sock is not sock:
+            if conn.sock is not None and conn.sock is not sock:
                 accepted = False
             proved = accepted and type(parsed) is dict and check()
             if proved:
-                seal(request.full_url, parsed, mint, history)
+                seal(request.full_url, parsed, mint, history, request.data)
             return status, raw, proved
         finally:
             conn.close()
@@ -594,6 +812,9 @@ def _wire():
                     closer()
         return owned_https(request, timeout, mint, history)
 
+    age_limit = quote_max_age
+    age_ok = quote_age_ok
+
     def note_ok(gate, mint, now=None, *, input_mint=None, output_mint=None) -> bool:
         """True only for a fresh proof of this gate for this mint."""
         moment = clock() if now is None else now
@@ -607,8 +828,55 @@ def _wire():
         if gate == "quote_expiry":
             if mint not in {input_mint, output_mint}:
                 return False
-            return fresh(current.get(("quote_expiry", input_mint, output_mint)), moment)
+            row = current.get(("quote_expiry", input_mint, output_mint))
+            return fresh(row, moment) and age_ok(row, moment, age_limit())
+        if gate == "preflight_ready":
+            return fresh(current.get(("preflight_ready", mint)), moment)
         return fresh(current.get((gate, mint)), moment)
+
+    def quote_ready(mint=None, now=None, *, input_mint=None, output_mint=None) -> bool:
+        """A quote this process read over its own TLS connection, inside the max age."""
+        moment = clock() if now is None else now
+        if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+            return False
+        current = seen()
+        limit = age_limit()
+
+        def row_ok(row) -> bool:
+            return fresh(row, moment) and age_ok(row, moment, limit)
+
+        if isinstance(input_mint, str) and isinstance(output_mint, str) and input_mint and output_mint:
+            if isinstance(mint, str) and mint not in {input_mint, output_mint}:
+                return False
+            return row_ok(current.get(("quote_expiry", input_mint, output_mint)))
+        if isinstance(mint, str) and mint:
+            for key, row in current.items():
+                if type(key) is not tuple or len(key) != 3 or key[0] != "quote_expiry":
+                    continue
+                if mint not in {key[1], key[2]} or WSOL not in {key[1], key[2]}:
+                    continue
+                if row_ok(row):
+                    return True
+            return False
+        for key, row in current.items():
+            if type(key) is tuple and len(key) == 3 and key[0] == "quote_expiry" and WSOL in {key[1], key[2]} and row_ok(row):
+                return True
+        return False
+
+    def preflight_observed(mint=None, now=None, *, digest=None) -> bool:
+        """A simulateTransaction this process read, not a passed-in RPC body."""
+        moment = clock() if now is None else now
+        if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+            return False
+        current = seen()
+        if isinstance(digest, str) and digest:
+            return fresh(current.get(("preflight_ready", digest)), moment)
+        if isinstance(mint, str) and mint:
+            return fresh(current.get(("preflight_ready", mint)), moment)
+        for key, row in current.items():
+            if type(key) is tuple and len(key) == 2 and key[0] == "preflight_ready" and fresh(row, moment):
+                return True
+        return False
 
     def reset() -> None:
         with lock:
@@ -793,6 +1061,8 @@ def _wire():
     _NOTES = view
     attributes_intact = check
     monitored = names
+    quote_ready = quote_ready
+    preflight_observed = preflight_observed
     _OwnedTransport._note = note
     _OwnedTransport.handle_request = handle
     mod = sys.modules[__name__]

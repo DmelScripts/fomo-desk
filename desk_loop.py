@@ -2586,8 +2586,73 @@ def _live_trade_proofs(case, proof, moment) -> str | None:
         input_mint, output_mint = native, traded
     if not live_gate_proof.closed("price_freshness_proven", traded, now=moment):
         return "price_unknown"
-    if not live_gate_proof.closed("quote_expiry", traded, now=moment, input_mint=input_mint, output_mint=output_mint):
+    if not live_gate_proof.quote_ready(traded, moment, input_mint=input_mint, output_mint=output_mint):
         return "quote_expired"
+    return None
+
+
+def _requote_guard(decoded, proof, moment) -> str | None:
+    """A second owned-TLS quote. A move past 50 bps, or a stand-in body, refuses the sign."""
+    import json
+    import urllib.request
+    import jupiter_route_v2
+    import jupiter_swap_v2
+    import live_gate_proof
+    import solana_jupiter
+    import solana_tx
+    route = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program == solana_jupiter.PROGRAM_ID and route is None:
+            route = bytes(item.data)
+    parsed = jupiter_route_v2.parse(route or b"")
+    quoted = parsed.get("quoted_out_amount") if parsed.get("ok") is True else None
+    amount = parsed.get("in_amount") if parsed.get("ok") is True else None
+    if type(quoted) is not int or isinstance(quoted, bool) or quoted <= 0:
+        return "quote_unproven"
+    if type(amount) is not int or isinstance(amount, bool) or amount <= 0:
+        return "quote_unproven"
+    try:
+        side = proof["side"]
+    except Exception:
+        side = None
+    mint = None
+    try:
+        import memecoin_desk
+        case = memecoin_desk._case(proof["case_id"])
+        mint = None if case is None else case["mint"]
+    except Exception:
+        mint = None
+    if not isinstance(mint, str) or mint == "":
+        return "quote_unproven"
+    native = solana_tx.NATIVE_MINT
+    if side == "exit":
+        left, right = mint, native
+    else:
+        left, right = native, mint
+    if not live_gate_proof.quote_ready(mint, moment, input_mint=left, output_mint=right):
+        return "quote_expired"
+    url = jupiter_swap_v2.order_url(left, right, str(amount))
+    try:
+        status, raw, proved = live_gate_proof.exchange(
+            urllib.request.Request(url, headers={"accept": "application/json"}),
+            8,
+            mint,
+        )
+    except Exception:
+        return "quote_unproven"
+    if proved is not True or type(status) is not int or status != 200:
+        return "quote_unproven"
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return "quote_unproven"
+    out_raw = body.get("outAmount") if isinstance(body, dict) else None
+    if type(out_raw) is not str or not out_raw.isdigit():
+        return "quote_unproven"
+    minimum = jupiter_route_v2.minimum_out(quoted, 50)
+    if minimum is None or int(out_raw) < minimum:
+        return "quote_moved"
     return None
 
 
@@ -2624,10 +2689,6 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     expiry = _signer_quote_and_blockhash(proof, decoded, transport, moment)
     if expiry.get("ok") is not True:
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
-    if db.get_setting("mode", "PAPER") == "LIVE":
-        missing = _live_trade_proofs(case, proof, moment)
-        if missing is not None:
-            return refused | {"reason": missing}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
     priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
@@ -2694,6 +2755,79 @@ def mock_phantom_send(signed: dict) -> dict:
     return {
         "sent": False, "accepted": True, "mock": True, "network_called": False,
         "broadcast": False, "reason": "mock_not_broadcast", "signature": signed.get("signature"),
+    }
+
+
+def simulation_allowed() -> bool:
+    """LIVE with the agents on, or an explicit PAPER dry-run. The dry-run never signs."""
+    import os
+    if os.environ.get("DESK_SIM_DRY_RUN") == "1":
+        return True
+    import db
+    return db.get_setting("mode", "PAPER") == "LIVE" and db.get_setting("agents_enabled", "0") == "1"
+
+
+def live_simulate(case_id: str, message_sha256: str, now: float) -> dict:
+    """simulateTransaction through the owned TLS transport. This function does not sign."""
+    import hashlib
+    import json
+    import os
+    import urllib.request
+    import db
+    import live_gate_proof
+    import preflight_sim
+    import solana_rpc
+    quiet = {
+        "ok": False, "sign": False, "send": False, "preflight_ready": False,
+        "dry_run": os.environ.get("DESK_SIM_DRY_RUN") == "1", "network_called": False,
+    }
+    if not simulation_allowed():
+        return quiet | {"reason": "simulation_unreachable"}
+    info = solana_rpc.describe()
+    if info.get("ok") is not True:
+        return quiet | {"reason": info.get("reason") or "helius_api_key_missing"}
+    try:
+        rows = db.query(
+            "SELECT message_b64, side FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?",
+            (message_sha256, case_id),
+        )
+    except Exception:
+        return quiet | {"reason": "simulation_message"}
+    if len(rows) != 1 or not isinstance(rows[0]["message_b64"], str) or rows[0]["side"] not in {"entry", "exit"}:
+        return quiet | {"reason": "simulation_message"}
+    encoded = rows[0]["message_b64"]
+    try:
+        import memecoin_desk
+        import solana_tx
+        case = memecoin_desk._case(case_id)
+        if case is None or not isinstance(case["mint"], str):
+            return quiet | {"reason": "simulation_message"}
+        output_mint = case["mint"] if rows[0]["side"] == "entry" else solana_tx.NATIVE_MINT
+        decoded = solana_tx.decode_transaction(__import__("base64").b64decode(encoded, validate=True))
+        output_account = solana_tx.associated_token_address(decoded.fee_payer, output_mint, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return quiet | {"reason": "simulation_message"}
+    payload = preflight_sim.rpc_body(encoded, output_account)
+    try:
+        url = solana_rpc._wire_url()
+    except solana_rpc.RpcRefused as exc:
+        return quiet | {"reason": exc.reason}
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json", "accept": "application/json"},
+        method="POST",
+    )
+    del url
+    try:
+        status, _raw, proved = live_gate_proof.exchange(request, 8)
+    except Exception:
+        return quiet | {"reason": "simulation_rpc", "network_called": True}
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
+    closed = proved is True and live_gate_proof.preflight_observed(digest=digest)
+    return quiet | {
+        "ok": closed, "preflight_ready": closed, "network_called": True,
+        "reason": None if closed else "preflight_open", "status": status,
     }
 
 
@@ -5382,7 +5516,7 @@ def _readiness_blocks(pyth: dict) -> list[str]:
     return blocks
 
 
-def _remaining_live_gates_body(mint, shut) -> list[dict]:
+def _remaining_live_gates_body(mint, shut, quote_fn, preflight_fn) -> list[dict]:
     """What still sits between this branch and a genuine live send. None of these are armed.
 
     Thành removed stalkchain_rest_envelope on 2026-11-11 at 22:23 Asia/Saigon.
@@ -5429,17 +5563,17 @@ def _remaining_live_gates_body(mint, shut) -> list[dict]:
         },
         {
             "gate": "quote_expiry",
-            "proves": "a Jupiter quote expireAt still in the future for this mint's input and output, checked again before signing",
+            "proves": "a Jupiter quote this process read over TLS, newer than the max age (default 10s), re-checked against 50 bps before signing",
             "owner": False,
             "needs_live_read": True,
-            "closed": False,
+            "closed": quote_fn(mint),
         },
         {
             "gate": "preflight_ready",
-            "proves": "simulateTransaction of the exact reserved message",
+            "proves": "simulateTransaction of the exact unsigned message on Helius, with no error, funds, fee, or slippage miss",
             "owner": False,
             "needs_live_read": True,
-            "closed": False,
+            "closed": preflight_fn(mint),
         },
         {
             "gate": "ticket_limit_proven",
@@ -5487,17 +5621,35 @@ def _bind_remaining_live_gates():
     import live_gate_proof as proof
     check = proof.attributes_intact
     read = proof.closed
+    quote_read = proof.quote_ready
+    preflight_read = proof.preflight_observed
     mod = proof
 
     def remaining_live_gates(mint: str | None = None) -> list[dict]:
-        intact = mod.closed is read and mod.attributes_intact is check and check()
+        intact = (
+            mod.closed is read
+            and mod.quote_ready is quote_read
+            and mod.preflight_observed is preflight_read
+            and mod.attributes_intact is check
+            and check()
+        )
 
         def shut(name, mint_arg):
             if not intact:
                 return False
             return read(name, mint_arg)
 
-        return _remaining_live_gates_body(mint, shut)
+        def quote(mint_arg):
+            if not intact:
+                return False
+            return quote_read(mint_arg)
+
+        def preflight(mint_arg):
+            if not intact:
+                return False
+            return preflight_read(mint_arg)
+
+        return _remaining_live_gates_body(mint, shut, quote, preflight)
 
     return remaining_live_gates
 

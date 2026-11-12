@@ -642,3 +642,164 @@ class LiveGateTests(unittest.TestCase):
             now,
         )
         self.assertTrue(fresh["ok"])
+
+    def test_quote_age_preflight_and_auth_standins_stay_open(self):
+        import phantom_auth
+        now = 1_700_000_000.0
+        fresh = {"ok": True, "at": now - 9, "until": now + 30}
+        stale = {"ok": True, "at": now - 11, "until": now + 30}
+        expired = {"ok": True, "at": now - 1, "until": now}
+        self.assertEqual(live_gate_proof.quote_max_age(), 10.0)
+        self.assertTrue(live_gate_proof.quote_age_ok(fresh, now, 10))
+        self.assertFalse(live_gate_proof.quote_age_ok(stale, now, 10))
+        self.assertFalse(live_gate_proof.quote_age_ok(expired, now, 10))
+        os.environ["DESK_QUOTE_MAX_AGE_S"] = "not-a-number"
+        self.addCleanup(lambda: os.environ.pop("DESK_QUOTE_MAX_AGE_S", None))
+        self.assertEqual(live_gate_proof.quote_max_age(), 10.0)
+        self.assertFalse(live_gate_proof.quote_ready(MINT_A, now))
+        self.assertFalse(live_gate_proof.preflight_observed(MINT_A, now))
+        self.assertFalse(live_gate_proof.preflight_observed(digest="abc", now=now))
+        live_gate_proof._plan(
+            "https://api.jup.ag/swap/v2/order?inputMint=So11111111111111111111111111111111111111112&outputMint=" + MINT_A,
+            {"inputMint": "So11111111111111111111111111111111111111112", "outputMint": MINT_A, "outAmount": "10", "expireAt": int(now) + 30},
+            MINT_A,
+            now,
+            None,
+            {},
+        )
+        live_gate_proof._apply(
+            "https://mainnet.helius-rpc.com/?api-key=hidden",
+            {"result": {"value": {"err": None, "fee": 5000, "logs": []}}},
+        )
+        self.assertFalse(live_gate_proof.quote_ready(MINT_A, now))
+        self.assertFalse(live_gate_proof.preflight_observed())
+        import db
+        db.init_db()
+        gates = {item["gate"]: item["closed"] for item in desk_loop.remaining_live_gates(MINT_A)}
+        self.assertFalse(gates["quote_expiry"])
+        self.assertFalse(gates["preflight_ready"])
+        self.assertFalse(desk_loop.simulation_allowed())
+        blocked = desk_loop.live_simulate("case", "digest", now)
+        self.assertEqual(blocked["reason"], "simulation_unreachable")
+        self.assertFalse(blocked["preflight_ready"])
+        self.assertFalse(blocked["sign"])
+        self.assertFalse(blocked["send"])
+        self.assertFalse(blocked["network_called"])
+        os.environ["DESK_SIM_DRY_RUN"] = "1"
+        self.addCleanup(lambda: os.environ.pop("DESK_SIM_DRY_RUN", None))
+        import urllib.request
+        original = urllib.request.urlopen
+
+        def stand_in(request, timeout=8):
+            class Response:
+                status = 200
+
+                def read(self):
+                    return b'{"result":{"value":{"err":null,"fee":1,"logs":[]}}}'
+
+                def close(self):
+                    return None
+
+            return Response()
+
+        urllib.request.urlopen = stand_in
+        self.addCleanup(lambda: setattr(urllib.request, "urlopen", original))
+        db.set_setting("mode", "LIVE", "test")
+        db.set_setting("agents_enabled", "1", "test")
+        forged = desk_loop.live_simulate("missing", "digest", now)
+        self.assertFalse(forged["preflight_ready"])
+        self.assertFalse(forged["sign"])
+        self.assertFalse(live_gate_proof.preflight_observed())
+        urllib.request.urlopen = original
+        original_run = phantom_auth.subprocess.run
+
+        def fake_run(*args, **kwargs):
+            class Done:
+                returncode = 0
+                stdout = b'{"walletId":"eba28e4f-6b99-4543-af72-c7d1b008ce4e","addresses":[{"addressType":"Solana","address":"7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"}]}'
+                stderr = b""
+
+            return Done()
+
+        phantom_auth.subprocess.run = fake_run
+        try:
+            started = phantom_auth.reverify_on_startup()
+            self.assertFalse(started["ok"])
+            self.assertFalse(started["sign"])
+            self.assertFalse(phantom_auth.server_auth_closed())
+            gate = next(item for item in desk_loop.remaining_live_gates() if item["gate"] == "phantom_server_auth")
+            self.assertFalse(gate["closed"])
+        finally:
+            phantom_auth.subprocess.run = original_run
+        observed = {
+            "state": "observed",
+            "wallet_id": "eba28e4f-6b99-4543-af72-c7d1b008ce4e",
+            "address": "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
+            "verify": {},
+        }
+        phantom_auth._apply_classification(observed)
+        self.assertFalse(phantom_auth.server_auth_closed())
+        try:
+            phantom_auth._apply_classification(observed, from_run=True)
+        except TypeError:
+            pass
+        self.assertFalse(phantom_auth.server_auth_closed())
+
+    def test_simulation_output_is_the_traded_mint_not_the_first_row(self):
+        from tests.test_jupiter_route_v2 import _metas, _pool, _route, _tx
+        token = solana_tx.b58encode(b"\x55" * 32)
+        owner = "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"
+        wsol = solana_tx.NATIVE_MINT
+        now = 1_700_000_000.0
+        notes = {("price_freshness_proven", token): {"ok": True, "at": now, "body": {"price": 100, "conf": 0, "expo": 0}}}
+
+        def fresh(row, moment):
+            return isinstance(row, dict) and row.get("ok") is True
+
+        def balances(rows):
+            return {
+                "err": None,
+                "logs": ["Program log: Instruction: Swap"],
+                "unitsConsumed": 8000,
+                "fee": 5000,
+                "preTokenBalances": [item[0] for item in rows],
+                "postTokenBalances": [item[1] for item in rows],
+            }
+
+        def pair(mint, pre, post, index):
+            def row(amount):
+                return {
+                    "accountIndex": index, "mint": mint, "owner": owner,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6},
+                }
+            return row(pre), row(post)
+
+        def check(message, rows):
+            return live_gate_proof._sim_within_caps(message, balances(rows), now, notes, fresh)
+
+        buy_values, _accounts = _pool(wsol, token)
+        buy = _tx(_metas(wsol, token, buy_values), _route(100, 50))
+        wsol_big = pair(wsol, 0, 5_000_000, 1)
+        token_good = pair(token, 0, 100, 2)
+        token_tiny = pair(token, 0, 1, 2)
+        self.assertTrue(check(buy, [wsol_big, token_good]))
+        self.assertTrue(check(buy, [token_good, wsol_big]))
+        self.assertFalse(check(buy, [wsol_big, token_tiny]))
+        self.assertFalse(check(buy, [token_tiny, wsol_big]))
+        self.assertFalse(check(buy, [wsol_big]))
+        self.assertFalse(check(buy, [token_good, token_good]))
+        self.assertFalse(check(buy, []))
+        shifted = pair(token, 0, 100, 3)
+        self.assertFalse(check(buy, [(token_good[0], shifted[1])]))
+
+        sell_values, _sell_accounts = _pool(token, wsol)
+        sell = _tx(_metas(token, wsol, sell_values), _route(100, 50), side="exit")
+        wsol_good = pair(wsol, 0, 100, 4)
+        wsol_tiny = pair(wsol, 0, 1, 4)
+        token_big = pair(token, 0, 5_000_000, 5)
+        self.assertTrue(check(sell, [token_big, wsol_good]))
+        self.assertTrue(check(sell, [wsol_good, token_big]))
+        self.assertFalse(check(sell, [token_big, wsol_tiny]))
+        self.assertFalse(check(sell, [wsol_tiny, token_big]))
+        self.assertFalse(check(sell, [token_big]))
+        self.assertFalse(check(sell, [wsol_good, pair(wsol, 0, 100, 6)]))

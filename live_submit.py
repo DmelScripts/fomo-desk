@@ -84,6 +84,18 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
     session_ready = getattr(signer, "ready", None)
     if callable(session_ready) and session_ready() is not True:
         return refused | {"reason": "phantom_session_missing"}
+    if db.get_setting("mode", "PAPER") == "LIVE":
+        import time as _time
+        moment = _time.time()
+        missing = desk_loop._live_trade_proofs(memecoin_desk._case(case_id), proof, moment)
+        if missing is not None:
+            return refused | {"reason": missing}
+        moved = desk_loop._requote_guard(decoded, proof, moment)
+        if moved is not None:
+            return refused | {"reason": moved}
+        simulated = desk_loop.live_simulate(case_id, message_sha256, moment)
+        if simulated.get("preflight_ready") is not True:
+            return refused | {"reason": simulated.get("reason") or "preflight_open", "sign": False, "send": False}
     owned, signature, status = _claim(message_sha256, case_id, now)
     if not owned:
         if not signature:

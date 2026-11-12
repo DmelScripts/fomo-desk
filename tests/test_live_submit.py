@@ -101,7 +101,9 @@ class LiveSubmitTests(unittest.TestCase):
 
     def test_a_retry_reconciles_the_same_signature_and_processed_stays_pending(self):
         self._arm()
-        case_id, message = self._message(_route(100, 50))
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(100, 50), when=moment)
         digest = live_submit.message_digest(message)
         raw = bytearray(base64.b64decode(message))
         raw[1:65] = b"\x11" * 64
@@ -130,17 +132,18 @@ class LiveSubmitTests(unittest.TestCase):
             }]}}}
 
         solana_rpc.TRANSPORT = transport
-        pending = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        self._prove_owned_reads(message)
+        pending = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertEqual(pending["reason"], "confirmation_pending", pending)
         self.assertFalse(pending["reconciled"])
         self.assertEqual(signs, [message])
         self.assertEqual(methods, ["sendTransaction", "getSignatureStatuses"])
-        again = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        again = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertEqual(again["reason"], "confirmation_pending")
         self.assertEqual(signs, [message])
         self.assertEqual(methods, ["sendTransaction", "getSignatureStatuses", "getSignatureStatuses"])
         state["status"] = "confirmed"
-        done = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertTrue(done["reconciled"], done)
         self.assertEqual(done["signature"], signature)
         self.assertFalse(done["live_ready"])
@@ -149,7 +152,7 @@ class LiveSubmitTests(unittest.TestCase):
         logged = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'live_submit'")
         self.assertEqual(len(logged), 1)
         self.assertNotIn(SECRET, logged[0]["evidence_json"])
-        repeat = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        repeat = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertTrue(repeat["reconciled"])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE stage = 'live_submit'")[0]["n"], 1)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
@@ -157,7 +160,9 @@ class LiveSubmitTests(unittest.TestCase):
 
     def test_a_keyed_transport_error_is_a_reason_code(self):
         self._arm()
-        case_id, message = self._message(_route(100, 50))
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(100, 50), when=moment)
         digest = live_submit.message_digest(message)
         raw = bytearray(base64.b64decode(message))
         raw[1:65] = b"\x22" * 64
@@ -170,7 +175,8 @@ class LiveSubmitTests(unittest.TestCase):
             raise RuntimeError("https://mainnet.helius-rpc.com/?api-key=" + SECRET)
 
         solana_rpc.TRANSPORT = transport
-        failed = live_submit._sign_send_confirm(case_id, digest, NOW, self._reader(), signer)
+        self._prove_owned_reads(message)
+        failed = live_submit._sign_send_confirm(case_id, digest, time.time(), self._reader(), signer)
         self.assertEqual(failed["reason"], "rpc_transport")
         self.assertNotIn(SECRET, repr(failed))
         self.assertNotIn("api-key=", repr(failed))
@@ -179,7 +185,9 @@ class LiveSubmitTests(unittest.TestCase):
 
     def test_overlapping_calls_sign_and_send_the_reservation_once(self):
         self._arm()
-        case_id, message = self._message(_route(102, 50))
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(102, 50), when=moment)
         digest = live_submit.message_digest(message)
         raw = bytearray(base64.b64decode(message))
         raw[1:65] = b"\x33" * 64
@@ -209,8 +217,9 @@ class LiveSubmitTests(unittest.TestCase):
 
         def run():
             gate.wait()
-            results.append(live_submit.submit(case_id, digest, NOW, self._reader(), signer))
+            results.append(live_submit.submit(case_id, digest, time.time(), self._reader(), signer))
 
+        self._prove_owned_reads(message)
         threads = [threading.Thread(target=run), threading.Thread(target=run)]
         for thread in threads:
             thread.start()
@@ -225,13 +234,15 @@ class LiveSubmitTests(unittest.TestCase):
 
     def test_a_missing_signer_does_not_stick_and_the_next_call_signs_once(self):
         self._arm()
-        case_id, message = self._message(_route(103, 50))
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(103, 50), when=moment)
         digest = live_submit.message_digest(message)
         raw = bytearray(base64.b64decode(message))
         raw[1:65] = b"\x55" * 64
         signed_tx = base64.b64encode(bytes(raw)).decode()
         signature = solana_tx.first_signature(signed_tx)
-        missing = live_submit.submit(case_id, digest, NOW, self._reader(), None)
+        missing = live_submit.submit(case_id, digest, time.time(), self._reader(), None)
         self.assertEqual(missing["reason"], "phantom_session_missing")
         self.assertEqual(missing["sign"], False)
         self.assertEqual(self._rows(), [])
@@ -243,7 +254,8 @@ class LiveSubmitTests(unittest.TestCase):
         def boom(message_b64):
             raise RuntimeError("session")
 
-        broken = live_submit.submit(case_id, digest, NOW, self._reader(), boom)
+        self._prove_owned_reads(message)
+        broken = live_submit.submit(case_id, digest, time.time(), self._reader(), boom)
         self.assertEqual(broken["reason"], "signature_refused")
         self.assertEqual(self._rows(), [])
         signs = []
@@ -258,7 +270,7 @@ class LiveSubmitTests(unittest.TestCase):
                 "confirmationStatus": "confirmed", "err": None, "slot": 9,
             }]}},
         }
-        done = live_submit.submit(case_id, digest, NOW, self._reader(), signer)
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertTrue(done["reconciled"], done)
         self.assertEqual(signs, [message])
         self.assertEqual(len(self._rows()), 1)
@@ -298,6 +310,177 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertFalse(armed["live_ready"])
         self.assertFalse(phantom_session.ready())
 
+    def _prove_owned_reads(self, message: str) -> None:
+        """Read Hermes, the Jupiter quote, and leave Helius up. The desk's own TLS records the proofs."""
+        import json
+        import socket
+        import ssl
+        import subprocess
+        import tempfile
+        import threading
+        import urllib.request
+        from pathlib import Path
+        import jupiter_route_v2
+        import jupiter_swap_v2
+        import live_gate_proof
+        import solana_jupiter
+        from tests.test_live_gates import _open_blocked_socket, _redirected_getaddrinfo
+
+        os.environ["DESK_QUOTE_MAX_AGE_S"] = "30"
+        self.addCleanup(lambda: os.environ.pop("DESK_QUOTE_MAX_AGE_S", None))
+        try:
+            probe = socket.socket()
+            probe.bind(("8.8.8.8", 0))
+            probe.close()
+        except OSError:
+            subprocess.run(["sudo", "-n", "python3", "-c",
+                "import socket,struct,fcntl; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); "
+                "name=b'lo:1'+b'\\x00'*12; sin=struct.pack('=H2x4s8x', socket.AF_INET, socket.inet_aton('8.8.8.8')); "
+                "fcntl.ioctl(s, 0x8916, name[:16]+sin)"
+            ], check=True, capture_output=True)
+        decoded = solana_tx.decode_transaction(base64.b64decode(message))
+        route = b""
+        for item in decoded.instructions:
+            program = decoded.static_keys[item.program_index]
+            if program == solana_jupiter.PROGRAM_ID:
+                route = bytes(item.data)
+                break
+        parsed = jupiter_route_v2.parse(route)
+        quoted = str(parsed["quoted_out_amount"])
+        amount = str(parsed["in_amount"])
+        root = Path(tempfile.mkdtemp())
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(root / "ca.key"), "-out", str(root / "ca.pem"), "-days", "1", "-nodes", "-subj", "/CN=Desk Test CA"], check=True, capture_output=True)
+        subprocess.run(["openssl", "req", "-newkey", "rsa:2048", "-keyout", str(root / "server.key"), "-out", str(root / "server.csr"), "-nodes", "-subj", "/CN=desk"], check=True, capture_output=True)
+        ext = root / "ext.cnf"
+        ext.write_text("subjectAltName=DNS:hermes.pyth.network,DNS:api.jup.ag,DNS:mainnet.helius-rpc.com\n")
+        subprocess.run(["openssl", "x509", "-req", "-in", str(root / "server.csr"), "-CA", str(root / "ca.pem"), "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-out", str(root / "server.pem"), "-days", "1", "-extfile", str(ext)], check=True, capture_output=True)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(root / "server.pem", root / "server.key")
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_IP, 15, 1)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("8.8.8.8", 0))
+        listener.listen(8)
+        listener.settimeout(0.5)
+        port = listener.getsockname()[1]
+        stop = threading.Event()
+
+        def answer(head: bytes, rest: bytes) -> bytes:
+            if b"hermes.pyth.network" in head:
+                body = {
+                    "parsed": [{
+                        "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+                        "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": int(time.time())},
+                        "status": "trading",
+                    }],
+                }
+                return json.dumps(body).encode()
+            if b"api.jup.ag" in head:
+                body = {
+                    "inputMint": solana_tx.NATIVE_MINT,
+                    "outputMint": MINT,
+                    "inAmount": amount,
+                    "outAmount": quoted,
+                    "expireAt": int(time.time()) + 120,
+                }
+                return json.dumps(body).encode()
+            sent = json.loads(rest.decode() or "{}")
+            encoded = sent["params"][0]
+            tx = solana_tx.decode_transaction(base64.b64decode(encoded))
+            width = len(tx.static_keys)
+            value = {
+                "err": None,
+                "logs": ["Program log: Instruction: Swap"],
+                "unitsConsumed": 8000,
+                "fee": 5000,
+                "preTokenBalances": [{
+                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": "0", "decimals": 6},
+                }],
+                "postTokenBalances": [{
+                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": quoted, "decimals": 6},
+                }],
+                "preBalances": [1_000_000_000] + [1] * (width - 1),
+                "postBalances": [999_995_000] + [1] * (width - 1),
+            }
+            return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"value": value}}).encode()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    raw, _addr = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                try:
+                    wrapped = server_ctx.wrap_socket(raw, server_side=True)
+                    wrapped.settimeout(3)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = wrapped.recv(8192)
+                        if not chunk:
+                            break
+                        data += chunk
+                    head, _, rest = data.partition(b"\r\n\r\n")
+                    length = 0
+                    for line in head.split(b"\r\n"):
+                        if line.lower().startswith(b"content-length:"):
+                            length = int(line.split(b":", 1)[1].strip())
+                    while len(rest) < length:
+                        rest += wrapped.recv(8192)
+                    payload = answer(head, rest)
+                    wrapped.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(payload)
+                        + payload
+                    )
+                    wrapped.close()
+                except Exception:
+                    try:
+                        raw.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        bundle = Path(live_gate_proof._CA_FILE)
+        original_bundle = bundle.read_bytes()
+        bundle.write_bytes(original_bundle + b"\n" + (root / "ca.pem").read_bytes())
+        original_lookup = socket.getaddrinfo.__code__
+        opener = socket.create_connection
+        original_open = opener.__code__
+        socket._proof_redirect = ("8.8.8.8", port)
+        socket.getaddrinfo.__code__ = _redirected_getaddrinfo.__code__
+        opener.__code__ = _open_blocked_socket.__code__
+
+        def restore():
+            stop.set()
+            socket.getaddrinfo.__code__ = original_lookup
+            opener.__code__ = original_open
+            socket._proof_redirect = None
+            bundle.write_bytes(original_bundle)
+            try:
+                listener.close()
+            except Exception:
+                pass
+
+        self.addCleanup(restore)
+        self._clock = time.time()
+        hermes = urllib.request.Request(
+            "https://hermes.pyth.network/v2/updates/price/latest?ids=ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+            headers={"accept": "application/json"},
+        )
+        status, _raw, proved = live_gate_proof.exchange(hermes, 8, MINT)
+        self.assertTrue(proved, status)
+        self.assertTrue(live_gate_proof.closed("price_freshness_proven", MINT))
+        quote = urllib.request.Request(
+            jupiter_swap_v2.order_url(solana_tx.NATIVE_MINT, MINT, amount),
+            headers={"accept": "application/json"},
+        )
+        status, _raw, proved = live_gate_proof.exchange(quote, 8, MINT)
+        self.assertTrue(proved, status)
+        self.assertTrue(live_gate_proof.quote_ready(MINT, time.time(), input_mint=solana_tx.NATIVE_MINT, output_mint=MINT))
+
     def _rows(self):
         try:
             return db.query("SELECT message_sha256, signature, status FROM live_submit")
@@ -312,22 +495,23 @@ class LiveSubmitTests(unittest.TestCase):
         desk_loop.remaining_live_gates = lambda: [{"gate": "all", "closed": True}]
         self.assertTrue(live_submit.armed())
 
-    def _message(self, swap: bytes, price: int = 1_000, reserved: str = "1.00"):
+    def _message(self, swap: bytes, price: int = 1_000, reserved: str = "1.00", when: float | None = None):
         values, accounts = _pool(solana_tx.NATIVE_MINT, MINT)
         message = _tx(_metas(solana_tx.NATIVE_MINT, MINT, values), swap, price=price, blockhash=BLOCK)
         digest = live_submit.message_digest(message)
         case_id = "case-%s-%s" % (digest[:8], reserved.replace(".", ""))
-        self._store(digest, message, case_id, reserved)
+        self._store(digest, message, case_id, reserved, when=NOW if when is None else when)
         self._accounts = accounts
         return case_id, message
 
-    def _store(self, digest: str, message: str, case_id: str, reserved: str = "1.00") -> None:
+    def _store(self, digest: str, message: str, case_id: str, reserved: str = "1.00", when: float | None = None) -> None:
+        stamp = NOW if when is None else when
         db.execute(
             """
             INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
             VALUES (?, ?, 'protected', ?, 'paper', 'server', ?, ?)
             """,
-            (case_id, MINT, '{"reserved_usd": "%s"}' % reserved, NOW, NOW),
+            (case_id, MINT, '{"reserved_usd": "%s"}' % reserved, stamp, stamp),
         )
         db.execute(
             """
@@ -336,7 +520,7 @@ class LiveSubmitTests(unittest.TestCase):
                 expire_at, ledger, ledger_provenance, created_at
             ) VALUES (?, ?, 'entry', ?, 'jupiterz', ?, 200, ?, 'paper', 'server', ?)
             """,
-            (digest, case_id, message, BLOCK, NOW + 60, NOW),
+            (digest, case_id, message, BLOCK, stamp + 60, stamp),
         )
 
     def _reader(self):
@@ -350,10 +534,11 @@ class LiveSubmitTests(unittest.TestCase):
             if request.get("method") == "isBlockhashValid":
                 return {"status": 200, "body": {"result": {"value": True}}}
             if request.get("method") == "hermes_price":
+                publish = int(getattr(self, "_clock", NOW))
                 return {"status": 200, "body": {
                     "parsed": [{
                         "id": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-                        "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": NOW},
+                        "price": {"price": "100", "conf": "0", "expo": 0, "publish_time": publish},
                         "status": "trading",
                     }],
                 }}
