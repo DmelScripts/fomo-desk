@@ -93,6 +93,11 @@ exit 2
         self.client = TestClient(server.app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
+        phantom_auth.reset_for_tests()
+        for name in ("calls", "args"):
+            path = self.home / name
+            if path.exists():
+                path.write_text("", encoding="utf-8")
 
     def test_balance_is_readonly_and_bound_to_the_allowlist(self):
         self.assertEqual(self.client.post("/api/phantom/balance", json={}).status_code, 401)

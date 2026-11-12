@@ -269,10 +269,14 @@ def _watch(child: subprocess.Popen, home: Path, timeout_s: float) -> None:
 
 
 def _verify() -> None:
+    global _VERIFIED_BY_RUN
+    if subprocess.run is not _RUN:
+        _VERIFIED_BY_RUN = False
+        return
     binary = _binary()
     home = _home()
     try:
-        done = subprocess.run(
+        done = _RUN(
             [binary, "wallet", "addresses", "--format", "json"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -288,7 +292,7 @@ def _verify() -> None:
         log.info("phantom login failed")
         return
     text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
-    _apply_classification(_classify(text, done.returncode))
+    _apply_classification(_classify(text, done.returncode), from_run=True)
 
 
 def _append(raw: str, chunk: bytes) -> str:
@@ -338,7 +342,9 @@ def _fail_closed(child: subprocess.Popen) -> None:
     log.info("phantom login failed")
 
 
-def _apply_classification(result: dict) -> None:
+def _apply_classification(result: dict, from_run: bool = False) -> None:
+    global _VERIFIED_BY_RUN
+    _VERIFIED_BY_RUN = bool(from_run) and result.get("state") == "observed" and subprocess.run is _RUN
     with _LOCK:
         _FLOW["verify"] = result["verify"]
         _FLOW["approval_url"] = None
@@ -544,8 +550,24 @@ def _cached_evidence() -> dict | None:
     return {"state": body["state"], "source": body["source"], "at": body["at"]}
 
 
+_RUN = subprocess.run
+_VERIFIED_BY_RUN = False
+
+
+def reverify_on_startup() -> dict:
+    """Read the existing Phantom session. This does not log in and does not sign."""
+    try:
+        _verify()
+    except Exception:
+        return {"ok": False, "reason": "verify_unavailable", "sign": False, "send": False}
+    closed = server_auth_closed()
+    return {"ok": closed, "reason": None if closed else "auth_open", "sign": False, "send": False}
+
+
 def server_auth_closed(now: float | None = None) -> bool:
-    """The readiness gate. A cached or stale identity check stays open."""
+    """The readiness gate. A cached, stale, or stand-in identity check stays open."""
+    if subprocess.run is not _RUN or _VERIFIED_BY_RUN is not True:
+        return False
     try:
         view = account_view()
     except Exception:
@@ -656,6 +678,8 @@ def _kill(proc: subprocess.Popen | None) -> None:
 
 
 def reset_for_tests() -> None:
+    global _VERIFIED_BY_RUN
+    _VERIFIED_BY_RUN = False
     with _LOCK:
         proc = _FLOW["process"]
         _FLOW.update({

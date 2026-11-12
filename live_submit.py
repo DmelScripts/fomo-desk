@@ -76,6 +76,9 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
         return refused | {"reason": "ticket"}
     if capital.get("allocation_proven") is not True:
         return refused | {"reason": "allocation"}
+    simulated = desk_loop.live_simulate(case_id, message_sha256, now)
+    if simulated.get("preflight_ready") is not True:
+        return refused | {"reason": simulated.get("reason") or "preflight_open", "sign": False, "send": False}
     totals = memecoin_desk.loss_totals()
     if totals.get("live_halts_new_entries") is True:
         return refused | {"reason": "stop_new_entries"}

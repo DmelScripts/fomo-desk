@@ -79,6 +79,8 @@ def _attach_log(name: str) -> None:
 async def run_desk() -> None:
     install_secret_redaction()
     db.init_db()
+    import phantom_auth
+    phantom_auth.reverify_on_startup()
     for name in ("scanner", "auditor", "analyst", "executor", "risk", "notifier"):
         _attach_log(name)
     import httpx
