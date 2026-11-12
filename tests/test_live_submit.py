@@ -576,6 +576,98 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertNotEqual(totals["live_loss_usd"], "0.00")
         self.assertLess(float(totals["live_loss_usd"]), 20)
 
+    def test_a_get_transaction_must_be_the_sent_signature(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self.addCleanup(lambda: setattr(self, "_foreign_tx", None))
+        self._arm()
+        self._clock = time.time()
+        case_a, message_a = self._message(_route(100, 50, amount=1_400_000), when=time.time(), ledger="live")
+        digest_a = live_submit.message_digest(message_a)
+        signed_a, signature_a = self._signed(message_a)
+        _case_b, message_b = self._message(_route(100, 50, amount=1_500_000), when=time.time(), ledger="live")
+        raw_b = bytearray(base64.b64decode(message_b))
+        raw_b[1:65] = b"\x22" * 64
+        signed_b = base64.b64encode(bytes(raw_b)).decode()
+        signature_b = solana_tx.first_signature(signed_b)
+        self.assertNotEqual(signature_a, signature_b)
+        self.assertNotEqual(solana_tx.message_bytes(signed_a), solana_tx.message_bytes(signed_b))
+        self._prove_owned_reads(message_a)
+        self._foreign_tx = signed_b
+        solana_rpc.TRANSPORT = None
+        swapped = live_submit.submit(case_a, digest_a, time.time(), self._reader(), lambda body, signed=signed_a: {"signed_tx": signed})
+        self.assertFalse(swapped["reconciled"], swapped)
+        self.assertEqual(swapped["reason"], "fill_unmatched", swapped)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_a,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_a)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_c, message_c = self._message(_route(100, 50, amount=1_600_000), when=time.time(), ledger="live")
+        digest_c = live_submit.message_digest(message_c)
+        signed_c, signature_c = self._signed(message_c)
+        _case_d, message_d = self._message(_route(100, 50, amount=1_700_000), when=time.time(), ledger="live")
+        signed_d, _signature_d = self._signed(message_d)
+        raw_c = bytearray(base64.b64decode(signed_c))
+        raw_d = bytearray(base64.b64decode(signed_d))
+        raw_d[1:65] = raw_c[1:65]
+        spliced = base64.b64encode(bytes(raw_d)).decode()
+        self.assertEqual(solana_tx.first_signature(spliced), signature_c)
+        self.assertNotEqual(solana_tx.message_bytes(spliced), solana_tx.message_bytes(signed_c))
+        solana_rpc.TRANSPORT = lambda payload, signed=signed_c, signature=signature_c, body=self._fill(spliced, 5000, "100"): {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": body} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 8,
+                }]}}
+            ),
+        }
+        moved = live_submit.submit(case_c, digest_c, time.time(), self._reader(), lambda body, signed=signed_c: {"signed_tx": signed})
+        self.assertFalse(moved["reconciled"], moved)
+        self.assertEqual(moved["reason"], "fill_unmatched", moved)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_c,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_c)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_e, message_e = self._message(_route(100, 50, amount=1_800_000), when=time.time(), ledger="live")
+        digest_e = live_submit.message_digest(message_e)
+        signed_e, signature_e = self._signed(message_e)
+        other = solana_tx.b58encode(b"\x99" * 64)
+        self.assertNotEqual(other, signature_e)
+        methods = []
+
+        def transport(payload):
+            methods.append(payload["method"])
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": other}}
+            raise AssertionError("polled a signature the send did not match")
+
+        solana_rpc.TRANSPORT = transport
+        lied = live_submit.submit(case_e, digest_e, time.time(), self._reader(), lambda body, signed=signed_e: {"signed_tx": signed})
+        self.assertFalse(lied["reconciled"], lied)
+        self.assertEqual(lied["reason"], "fill_unmatched", lied)
+        self.assertEqual(methods, ["sendTransaction"])
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_e,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_e)
+        totals = memecoin_desk.loss_totals()
+        self.assertTrue(totals["live_halts_new_entries"])
+        self.assertGreater(Decimal(totals["live_loss_usd"]), 0)
+        self.assertNotIn("api-key=", json.dumps(totals))
+
+    def _assert_open_loss(self, case_id: str) -> None:
+        import json
+        from decimal import Decimal
+        row = db.query("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]
+        snap = json.loads(row["snapshot_json"])
+        self.assertEqual(row["stage"], "entry_failed")
+        self.assertLess(Decimal(snap["realized_pnl"]), 0)
+        self.assertEqual(snap["reserved_usd"], format(-Decimal(snap["realized_pnl"]), "f"))
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'", (case_id,))[0]["evidence_json"])
+        self.assertTrue(logged["anomalous"])
+        self.assertEqual(logged["reason"], "fill_unmatched")
+
     def test_a_bad_confirmed_fill_is_an_open_loss(self):
         import json
         from decimal import Decimal
@@ -785,7 +877,11 @@ class LiveSubmitTests(unittest.TestCase):
                     "confirmationStatus": "confirmed", "err": None, "slot": 9,
                 }]}}).encode()
             if method == "getTransaction" and sent_tx["raw"]:
-                tx = solana_tx.decode_transaction(base64.b64decode(sent_tx["raw"]))
+                raw = sent_tx["raw"]
+                foreign = getattr(self, "_foreign_tx", None)
+                if isinstance(foreign, str) and foreign != "":
+                    raw = foreign
+                tx = solana_tx.decode_transaction(base64.b64decode(raw))
                 output = live_gate_proof._traded_output_mint(tx) or MINT
                 pre_rows = [{
                     "accountIndex": 2, "mint": output, "owner": tx.fee_payer,
@@ -806,7 +902,7 @@ class LiveSubmitTests(unittest.TestCase):
                     })
                 return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
                     "slot": 9,
-                    "transaction": sent_tx["raw"],
+                    "transaction": raw,
                     "meta": {"err": None, "fee": 5000, "preTokenBalances": pre_rows, "postTokenBalances": post_rows},
                 }}).encode()
             encoded = sent["params"][0]

@@ -280,6 +280,95 @@ def _fill_summary(result) -> dict | None:
     }
 
 
+def _result_signature(result) -> str | None:
+    """signatures[0] of a getTransaction body. Bytes and a listed signature must agree."""
+    transaction = result.get("transaction") if type(result) is dict else None
+    listed = None
+    if type(transaction) is dict:
+        sigs = transaction.get("signatures")
+        if type(sigs) is list and sigs and type(sigs[0]) is str and sigs[0] != "":
+            listed = sigs[0]
+    encoded = _transaction_b64(result)
+    embedded = None
+    if encoded is not None:
+        try:
+            import solana_tx
+            embedded = solana_tx.first_signature(encoded)
+        except Exception:
+            embedded = None
+    if listed is not None and embedded is not None and listed != embedded:
+        return None
+    return embedded if embedded is not None else listed
+
+
+def _tx_bound(result, signature: str, reference_b64: str) -> bool:
+    """The returned transaction is the one we signed, not another signature's fill."""
+    if type(result) is not dict or type(signature) is not str or signature == "" or type(reference_b64) is not str or reference_b64 == "":
+        return False
+    encoded = _transaction_b64(result)
+    if encoded is None or _result_signature(result) != signature:
+        return False
+    try:
+        import base64
+        import solana_tx
+        if solana_tx.message_bytes(encoded) != solana_tx.message_bytes(reference_b64):
+            return False
+        returned = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+        reference = solana_tx.decode_transaction(base64.b64decode(reference_b64, validate=True))
+    except Exception:
+        return False
+    if returned.fee_payer != reference.fee_payer:
+        return False
+    return list(returned.static_keys) == list(reference.static_keys)
+
+
+def _sent_binding(payload: str) -> dict | None:
+    """Message hash, fee payer, and account keys of the transaction we asked Helius to send."""
+    if type(payload) is not str or payload == "":
+        return None
+    try:
+        import base64
+        import hashlib
+        import solana_tx
+        decoded = solana_tx.decode_transaction(base64.b64decode(payload, validate=True))
+        local = solana_tx.first_signature(payload)
+        digest = hashlib.sha256(solana_tx.message_bytes(payload)).hexdigest()
+    except Exception:
+        return None
+    if local == "" or decoded.fee_payer == "":
+        return None
+    return {
+        "signature": local,
+        "message_sha256": digest,
+        "fee_payer": decoded.fee_payer,
+        "keys": list(decoded.static_keys),
+    }
+
+
+def _bound_to_note(result, signature: str, sent_body) -> bool:
+    """A getTransaction read matches the send this process recorded for that signature."""
+    if not isinstance(sent_body, dict) or _result_signature(result) != signature:
+        return False
+    encoded = _transaction_b64(result)
+    if encoded is None:
+        return False
+    try:
+        import base64
+        import hashlib
+        import solana_tx
+        digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return False
+    keys = sent_body.get("keys")
+    return (
+        digest == sent_body.get("message_sha256")
+        and decoded.fee_payer == sent_body.get("fee_payer")
+        and type(keys) is list
+        and list(decoded.static_keys) == keys
+    )
+
+
 def _fill_matches(result) -> bool:
     """A buy gained the traded mint. A sell gained wSOL and spent about the quoted input."""
     summary = _fill_summary(result)
@@ -878,11 +967,19 @@ def _wire():
             return []
         method = sent.get("method")
         params = sent.get("params")
-        if method == "sendTransaction":
-            signature = parsed.get("result")
-            if type(signature) is not str or signature == "":
+        if method == "sendTransaction" and type(params) is list and params and type(params[0]) is str:
+            binding = _sent_binding(params[0])
+            result_sig = parsed.get("result")
+            if binding is None:
                 return []
-            return [(("submit_sent", signature), {"at": now, "ok": True, "until": None})]
+            local = binding["signature"]
+            body = {
+                "message_sha256": binding["message_sha256"],
+                "fee_payer": binding["fee_payer"],
+                "keys": binding["keys"],
+            }
+            ok = type(result_sig) is str and result_sig == local
+            return [(("submit_sent", local), {"at": now, "ok": ok, "until": None, "body": body})]
         if method == "getSignatureStatuses" and type(params) is list and params and type(params[0]) is list and params[0]:
             signature = params[0][0]
             if type(signature) is not str or signature == "":
@@ -899,11 +996,12 @@ def _wire():
         if method == "getTransaction" and type(params) is list and params and type(params[0]) is str:
             signature = params[0]
             result = parsed.get("result")
-            ok = _fill_matches(result)
-            body = None
-            if ok:
-                body = _fill_summary(result)
-            return [(("real_submit", signature), {"at": now, "ok": ok, "until": None, "body": body})]
+            sent = seen().get(("submit_sent", signature))
+            sent_body = sent.get("body") if isinstance(sent, dict) else None
+            bound = _bound_to_note(result, signature, sent_body)
+            summary = _fill_summary(result) if bound else None
+            ok = bound and isinstance(summary, dict) and summary.get("positive") is True
+            return [(("real_submit", signature), {"at": now, "ok": ok, "until": None, "body": summary if ok else None})]
         return []
 
     def seal(url, parsed, mint, history, request_body=None) -> None:

@@ -144,7 +144,7 @@ def _sign_send_confirm(case_id: str, message_sha256: str, now: float, transport,
             return _reconcile(case_id, message_sha256, signature, "inflight", now, fallback=sent.get("reason"))
         return refused | {"reason": sent.get("reason") or "send_refused", "sign": True, "signature": signature}
     if sent["body"].get("result") != signature:
-        return refused | {"reason": "send_refused", "sign": True, "signature": signature}
+        return _open_liability(case_id, message_sha256, signature, {}, now, None)
     return _reconcile(case_id, message_sha256, signature, "inflight", now)
 
 
@@ -208,10 +208,23 @@ def _observed_fill(result):
     return summary if isinstance(summary, dict) else None
 
 
+def _reference_message(message_sha256: str) -> str | None:
+    rows = db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ?", (message_sha256,))
+    if len(rows) != 1 or not isinstance(rows[0]["message_b64"], str) or rows[0]["message_b64"] == "":
+        return None
+    return rows[0]["message_b64"]
+
+
+def _bound_result(result, signature: str, reference: str | None) -> bool:
+    import live_gate_proof
+    return live_gate_proof._tx_bound(result, signature, reference or "")
+
+
 def _reconcile(case_id: str, message_sha256: str, signature: str, status: str, now: float, fallback: str | None = None) -> dict:
     refused = _blank() | {"sign": True, "signature": signature}
     if status == "confirmed":
         return _confirmed(signature)
+    reference = _reference_message(message_sha256)
     posted = _poll_status(signature)
     if posted.get("reason") == "rpc_transport":
         return refused | {"reason": "rpc_transport"}
@@ -226,11 +239,16 @@ def _reconcile(case_id: str, message_sha256: str, signature: str, status: str, n
             value = _status_value(posted)
             confirmed = isinstance(value, dict) and value.get("err") is None and value.get("confirmationStatus") in _CONFIRMED
         if not confirmed:
-            _pull_result(signature)
+            result = _pull_result(signature)
+            if isinstance(result, dict) and not _bound_result(result, signature, reference):
+                return _open_liability(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, None)
             return refused | {"reason": "open_liability"}
     if not confirmed:
         return refused | {"reason": "confirmation_pending"}
-    summary = _observed_fill(_pull_result(signature))
+    result = _pull_result(signature)
+    if not _bound_result(result, signature, reference):
+        return _open_liability(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, None)
+    summary = _observed_fill(result)
     if isinstance(summary, dict) and summary.get("positive") is True:
         return _commit(case_id, message_sha256, signature, value, now, summary)
     return _open_liability(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, summary)
