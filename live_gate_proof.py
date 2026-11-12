@@ -307,7 +307,11 @@ def _ata_addresses(owner: str, mint: str) -> set[str]:
 
 
 def _resolved_delta(meta, decoded, keys, n_loaded_writable: int, owner: str, mint: str) -> int | None:
-    """One pre row and one post row for this owner and mint, on the same writable ATA."""
+    """One pre row and one post row for this owner and mint, on the same writable ATA.
+
+    A missing pre row is zero only when this transaction creates that ATA and the
+    account did not exist before. Any other gap is not a delta.
+    """
     atas = _ata_addresses(owner, mint)
     if not atas:
         return None
@@ -337,16 +341,235 @@ def _resolved_delta(meta, decoded, keys, n_loaded_writable: int, owner: str, min
                 return None
             if match is not None:
                 return None
-            match = (address, amount)
+            match = (address, index, amount)
         if saw and match is None:
             return None
         return match
 
     pre = one(pre_rows)
     post = one(post_rows)
-    if pre is None or post is None or pre[0] != post[0]:
+    if post is None:
         return None
-    return post[1] - pre[1]
+    if pre is None:
+        if _owner_mint_rows(meta, owner, mint) and not _post_only(meta, owner, mint):
+            return None
+        if not _post_only(meta, owner, mint):
+            return None
+        if not _created_empty(meta, decoded, keys, post[0], post[1], owner, mint):
+            return None
+        return post[2]
+    if pre[0] != post[0]:
+        return None
+    return post[2] - pre[2]
+
+
+def _post_only(meta, owner: str, mint: str) -> bool:
+    """A post row for this owner and mint, and no pre row."""
+    pre = False
+    post = False
+    for name, flag in (("preTokenBalances", "pre"), ("postTokenBalances", "post")):
+        rows = meta.get(name)
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if isinstance(row, dict) and row.get("owner") == owner and row.get("mint") == mint:
+                if flag == "pre":
+                    pre = True
+                else:
+                    post = True
+    return post and not pre
+
+
+def _created_empty(meta, decoded, keys, address: str, index: int, owner: str, mint: str) -> bool:
+    """The signed message creates this ATA, and it held no lamports before."""
+    if keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return False
+    if not _message_creates_ata(decoded, address, owner, mint):
+        return False
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return False
+    pre, _post = balances
+    return pre[index] == 0
+
+
+def _message_creates_ata(decoded, address: str, owner: str, mint: str) -> bool:
+    """One create or createIdempotent for this ATA, owner, mint, and token program."""
+    import solana_tx
+    found = False
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            accounts = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return False
+        data = bytes(instruction.data)
+        if program != solana_tx.ASSOCIATED_TOKEN or data not in {bytes([0]), bytes([1])} or len(accounts) != 6:
+            continue
+        payer, ata, row_owner, row_mint, system, token_program = accounts
+        if system != solana_tx.SYSTEM_PROGRAM or token_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+            continue
+        if payer != owner or row_owner != owner or row_mint != mint or ata != address:
+            continue
+        try:
+            derived = solana_tx.associated_token_address(owner, mint, token_program)
+        except Exception:
+            return False
+        if derived != address:
+            continue
+        if found:
+            return False
+        found = True
+    return found
+
+
+def _lamport_table(meta, nkeys: int):
+    pre = meta.get("preBalances")
+    post = meta.get("postBalances")
+    if not isinstance(pre, list) or not isinstance(post, list) or len(pre) != nkeys or len(post) != nkeys:
+        return None
+    before, after = [], []
+    for left, right in zip(pre, post):
+        if type(left) is not int or type(right) is not int or isinstance(left, bool) or isinstance(right, bool):
+            return None
+        if left < 0 or right < 0:
+            return None
+        before.append(left)
+        after.append(right)
+    return before, after
+
+
+def _native_sol_output(meta, decoded, keys) -> int | None:
+    """SOL unwrapped to the fee payer. None when the lamports are not attributable.
+
+    output = (post - pre) + fee - rent refunded by closing accounts that already
+    existed + rent left in accounts this transaction created and did not close.
+    A wSOL account created and closed here contributes no rent.
+    """
+    import solana_tx
+    if not keys or keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return None
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return None
+    pre, post = balances
+    fee = meta.get("fee")
+    if type(fee) is not int or isinstance(fee, bool) or fee < 0:
+        return None
+    try:
+        wsol = solana_tx.associated_token_address(decoded.fee_payer, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return None
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if creates is None or closes is None:
+        return None
+    attributed = set()
+    refund = 0
+    opened = 0
+    for address in set(creates) | set(closes):
+        if keys.count(address) != 1:
+            return None
+        index = keys.index(address)
+        before, after = pre[index], post[index]
+        if address in creates and address in closes:
+            if before != 0 or after != 0:
+                return None
+            attributed.add(index)
+            continue
+        if address in closes:
+            if after != 0:
+                return None
+            if before == 0:
+                attributed.add(index)
+                continue
+            if address == wsol and _token_amount_of(meta, "preTokenBalances", decoded.fee_payer, solana_tx.NATIVE_MINT) not in {None, 0}:
+                return None
+            refund += before
+            attributed.add(index)
+            continue
+        if before != 0 or after <= 0 or address == wsol:
+            return None
+        opened += after
+        attributed.add(index)
+    for index, (before, after) in enumerate(zip(pre, post)):
+        if index != 0 and index not in attributed and before != after:
+            return None
+    output = (post[0] - pre[0]) + fee - refund + opened
+    if output < 0:
+        return None
+    return output
+
+
+def _ata_touches(decoded, owner: str, close: bool):
+    """ATA addresses this message creates, or closes back to the owner. None is ambiguous."""
+    import solana_tx
+    found = []
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            accounts = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return None
+        data = bytes(instruction.data)
+        if not close and program == solana_tx.ASSOCIATED_TOKEN and data in {bytes([0]), bytes([1])} and len(accounts) == 6:
+            payer, ata, row_owner, _mint, system, token_program = accounts
+            if system != solana_tx.SYSTEM_PROGRAM or token_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+                return None
+            if payer != owner or row_owner != owner:
+                return None
+            try:
+                derived = solana_tx.associated_token_address(owner, _mint, token_program)
+            except Exception:
+                return None
+            if ata != derived:
+                return None
+            found.append(ata)
+        elif close and program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and len(accounts) == 3:
+            account, dest, row_owner = accounts
+            if dest != owner or row_owner != owner:
+                return None
+            found.append(account)
+    if len(found) != len(set(found)):
+        return None
+    return found
+
+
+def _token_amount_of(meta, name: str, owner: str, mint: str):
+    rows = meta.get(name)
+    if not isinstance(rows, list):
+        return None
+    found = None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("owner") != owner or row.get("mint") != mint:
+            continue
+        parsed = _token_amount(row)
+        if parsed is None:
+            return None
+        if found is not None:
+            return None
+        found = parsed[1]
+    return found
+
+
+def _open_rent(meta, decoded, keys) -> int:
+    """Lamports left in ATAs this message created and did not close. Not a trade loss."""
+    if not keys:
+        return 0
+    balances = _lamport_table(meta, len(keys))
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if balances is None or creates is None or closes is None:
+        return 0
+    pre, post = balances
+    total = 0
+    for address in creates:
+        if address in closes or keys.count(address) != 1:
+            continue
+        index = keys.index(address)
+        if pre[index] == 0 and post[index] > 0:
+            total += post[index]
+    return total
 
 
 def _fill_summary(result) -> dict | None:
@@ -376,18 +599,26 @@ def _fill_summary(result) -> dict | None:
     accounts_ok = keyed is not None
     output_delta = None
     input_delta = None
+    rent_lamports = 0
     if keyed is not None:
         keys, n_loaded_writable = keyed
         output_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest)
         input_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, source)
-        if _owner_mint_rows(meta, decoded.fee_payer, dest) and output_delta is None:
+        rent_lamports = _open_rent(meta, decoded, keys)
+        if dest == solana_tx.NATIVE_MINT and output_delta is None and not _bad_token_rows(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest):
+            native = _native_sol_output(meta, decoded, keys)
+            if native is None:
+                accounts_ok = False
+            else:
+                output_delta = native
+        elif _owner_mint_rows(meta, decoded.fee_payer, dest) and output_delta is None:
             accounts_ok = False
         if dest == solana_tx.NATIVE_MINT and _owner_mint_rows(meta, decoded.fee_payer, source) and input_delta is None:
             accounts_ok = False
     in_amount, quoted = _route_amounts(decoded)
     positive = accounts_ok and type(output_delta) is int and not isinstance(output_delta, bool) and output_delta > 0
     if positive and dest == solana_tx.NATIVE_MINT:
-        positive = _sold_amount_matches(input_delta, in_amount)
+        positive = type(input_delta) is int and not isinstance(input_delta, bool) and _sold_amount_matches(input_delta, in_amount)
     return {
         "mint": dest,
         "input_mint": source,
@@ -396,9 +627,17 @@ def _fill_summary(result) -> dict | None:
         "in_amount": in_amount,
         "quoted_out": quoted,
         "fee_lamports": fee,
+        "rent_lamports": rent_lamports,
         "accounts_ok": accounts_ok,
         "positive": positive is True,
     }
+
+
+def _bad_token_rows(meta, decoded, keys, n_loaded_writable: int, owner: str, mint: str) -> bool:
+    """A present owner+mint row that does not resolve. Absence is not this failure."""
+    if not _owner_mint_rows(meta, owner, mint):
+        return False
+    return _resolved_delta(meta, decoded, keys, n_loaded_writable, owner, mint) is None
 
 
 def _owner_mint_rows(meta, owner: str, mint: str) -> bool:

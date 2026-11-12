@@ -515,6 +515,9 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
     if type(amount_in) is not int or isinstance(amount_in, bool):
         amount_in = route.get("in_amount") if route.get("ok") is True else None
     leg = live_gate_proof.fresh_sol_leg(now)
+    # meta.fee is the network fee. ATA rent is recorded beside it and is not part of
+    # the $0.05 cap: preflight prices rent as a deposit against the ticket, not as
+    # _simulated_fee.
     fee_usd = pyth_sponsored.lamports_usd(fee_lamports, leg) if isinstance(leg, dict) and type(fee_lamports) is int else None
     slippage_bps = _slippage_bps(quoted, delta)
     halt = (
@@ -533,6 +536,7 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
         "quoted_out": quoted,
         "fee_lamports": fee_lamports,
         "fee_usd": None if fee_usd is None else format(fee_usd, "f"),
+        "rent_lamports": summary.get("rent_lamports") if type(summary.get("rent_lamports")) is int else 0,
         "slippage_bps": slippage_bps,
         "halt_new_entries": halt,
     }

@@ -2580,7 +2580,11 @@ def _live_trade_proofs(case, proof, moment) -> str | None:
     import solana_tx
     traded = None if case is None else case["mint"]
     native = solana_tx.NATIVE_MINT
-    if isinstance(proof, dict) and proof.get("side") == "exit":
+    try:
+        side = proof["side"]
+    except Exception:
+        side = None
+    if side == "exit":
         input_mint, output_mint = traded, native
     else:
         input_mint, output_mint = native, traded
