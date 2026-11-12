@@ -967,6 +967,80 @@ class LiveSubmitTests(unittest.TestCase):
         body["remaining_raw"] = amount
         db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
 
+    def test_only_the_stored_ata_close_releases_its_rent(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        import pyth_sponsored
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        self._clock = time.time()
+        quoted = 100
+        fee = 5000
+        case_id, message = self._message(_route(quoted, 50, amount=1_090_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        bought = self._confirm(case_id, live_submit.message_digest(message), signed, signature, self._created_ata_fill(signed, fee, str(quoted)))
+        self.assertTrue(bought["reconciled"], bought)
+        live_gate_proof._reset_for_tests()
+        self._prove_owned_reads(message)
+        stored = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(stored["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self.assertTrue(stored["rent_account"])
+        rent_account = stored["rent_account"]
+        reserved = stored["reserved_usd"]
+        self._mark_remaining(case_id, 1_100_000)
+        _id, wsol_message = self._message(_route(quoted, 50, amount=1_100_000), when=time.time(), side="exit", ledger="live", case_id=case_id)
+        signed_wsol, signature_wsol = self._signed(wsol_message)
+        self._prove_owned_reads(wsol_message)
+        wrapped = 2_039_280
+        body = self._fill(signed_wsol, fee, str(quoted))
+        tx = solana_tx.decode_transaction(base64.b64decode(signed_wsol))
+        width = len(tx.static_keys)
+        pre = [0] * width
+        post = [0] * width
+        pre[0] = 5_000_000
+        post[0] = pre[0] + wrapped - fee
+        wsol = self._ata_index(tx, solana_tx.NATIVE_MINT)
+        pre[wsol] = wrapped
+        post[wsol] = 0
+        body["meta"]["preBalances"] = pre
+        body["meta"]["postBalances"] = post
+        held = self._confirm(case_id, live_submit.message_digest(wsol_message), signed_wsol, signature_wsol, body)
+        self.assertTrue(held["reconciled"], held)
+        after_wsol = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(after_wsol["reserved_usd"], reserved)
+        self.assertEqual(after_wsol["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self.assertNotIn(rent_account, after_wsol.get("rent_released_accounts") or [])
+        leg = {"fresh": True, "used": True, "price": 100, "conf": 0, "expo": 0}
+        unrelated = solana_tx.b58encode(b"\x61" * 32)
+        db.exclusive(lambda conn: live_submit._apply_book(
+            conn, case_id, "exit", "sig-unrelated", quoted, 1_100_000,
+            pyth_sponsored.lamports_usd(fee, leg), leg, time.time(), 0, None, [unrelated],
+        ))
+        still = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(still["reserved_usd"], reserved)
+        self.assertEqual(still["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self._mark_remaining(case_id, 1_110_000)
+        _id, close_message = self._message(_route(quoted, 50, amount=1_110_000), when=time.time(), side="exit", ledger="live", case_id=case_id, close_mint=MINT)
+        signed_close, signature_close = self._signed(close_message)
+        closed_body = self._sol_fill(signed_close, fee, quoted, quoted + solana_tx.TOKEN_ACCOUNT_RENT, token_rent=solana_tx.TOKEN_ACCOUNT_RENT)
+        closed = self._confirm(case_id, live_submit.message_digest(close_message), signed_close, signature_close, closed_body)
+        self.assertTrue(closed["reconciled"], closed)
+        once = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(once["rent_lamports"], 0)
+        self.assertIn(rent_account, once["rent_released_accounts"])
+        released_reserved = once["reserved_usd"]
+        summary = live_gate_proof._fill_summary(closed_body)
+        db.exclusive(lambda conn: live_submit._apply_book(
+            conn, case_id, "exit", signature_close, summary["output_delta"], summary["in_amount"],
+            pyth_sponsored.lamports_usd(fee, leg), leg, time.time(),
+            summary["rent_lamports"], summary["rent_account"], summary["closed_accounts"],
+        ))
+        twice = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(twice["reserved_usd"], released_reserved)
+        self.assertEqual(twice["rent_released_accounts"], once["rent_released_accounts"])
+
     def test_a_bad_confirmed_fill_is_an_open_loss(self):
         import json
         from decimal import Decimal

@@ -559,6 +559,53 @@ def _token_amount_of(meta, name: str, owner: str, mint: str):
     return found
 
 
+def _locked_ata(meta, decoded, keys, mint: str) -> str | None:
+    """The traded-mint ATA this message created and left open, if the lamports show it."""
+    import solana_tx
+    if not keys or type(mint) is not str or mint == "":
+        return None
+    balances = _lamport_table(meta, len(keys))
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if balances is None or creates is None or closes is None:
+        return None
+    pre, post = balances
+    for program in (solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022):
+        try:
+            ata = solana_tx.associated_token_address(decoded.fee_payer, mint, program)
+        except Exception:
+            continue
+        if ata not in creates or ata in closes or keys.count(ata) != 1:
+            continue
+        index = keys.index(ata)
+        if pre[index] == 0 and post[index] > 0:
+            return ata
+    return None
+
+
+def _ata_closed_out(meta, decoded, keys, address: str) -> bool:
+    """True when this exact account is closed to the fee payer and ends at zero lamports."""
+    if type(address) is not str or address == "" or not keys or keys.count(address) != 1:
+        return False
+    if keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return False
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if not closes or address not in closes:
+        return False
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return False
+    _before, after = balances
+    return after[keys.index(address)] == 0
+
+
+def _closed_accounts(meta, decoded, keys) -> list[str]:
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True) if keys else None
+    if not closes:
+        return []
+    return [address for address in closes if _ata_closed_out(meta, decoded, keys, address)]
+
+
 def _open_rent(meta, decoded, keys) -> int:
     """Lamports left in ATAs this message created and did not close. Not a trade loss."""
     if not keys:
@@ -607,18 +654,16 @@ def _fill_summary(result) -> dict | None:
     output_delta = None
     input_delta = None
     rent_lamports = 0
-    rent_released = 0
+    rent_account = None
+    closed_accounts = []
     if keyed is not None:
         keys, n_loaded_writable = keyed
         output_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest)
         input_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, source)
         parts = _lamport_parts(meta, decoded, keys)
-        if parts is None:
-            rent_lamports = _open_rent(meta, decoded, keys)
-            rent_released = 0
-        else:
-            rent_lamports = parts["opened"]
-            rent_released = parts["refund"]
+        rent_lamports = parts["opened"] if parts is not None else _open_rent(meta, decoded, keys)
+        rent_account = _locked_ata(meta, decoded, keys, dest)
+        closed_accounts = _closed_accounts(meta, decoded, keys)
         if dest == solana_tx.NATIVE_MINT and output_delta is None and not _bad_token_rows(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest):
             native = None if parts is None else parts["output"]
             if native is None:
@@ -642,7 +687,8 @@ def _fill_summary(result) -> dict | None:
         "quoted_out": quoted,
         "fee_lamports": fee,
         "rent_lamports": rent_lamports,
-        "rent_released_lamports": rent_released,
+        "rent_account": rent_account,
+        "closed_accounts": closed_accounts,
         "accounts_ok": accounts_ok,
         "positive": positive is True,
     }
