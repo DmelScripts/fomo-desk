@@ -2891,6 +2891,15 @@ def _hold_conn(conn, row, reason: str, *, status: str, moment: float, stage_now:
     }
 
 
+def _halt_review(conn) -> bool:
+    """A fee or slippage past the cap stops new entries until someone reviews it."""
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'live_halt_review'").fetchone()
+    except Exception:
+        return False
+    return row is not None and row["value"] == "1"
+
+
 def loss_totals() -> dict:
     """Paper projections and confirmed chain losses. The $20 halt reads only the live figure."""
     def read(conn):
@@ -2901,7 +2910,7 @@ def loss_totals() -> dict:
             "paper_loss_usd": format(paper.quantize(Decimal("0.01")), "f"),
             "live_includes_paper": False,
             "limit_usd": format(MAX_LOSS, "f"),
-            "live_halts_new_entries": live >= MAX_LOSS,
+            "live_halts_new_entries": live >= MAX_LOSS or _halt_review(conn),
         }
     _ensure()
     return db.exclusive(read)

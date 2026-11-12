@@ -14,6 +14,7 @@ import phantom_auth
 import phantom_transport
 
 _SCRIPT = Path(__file__).resolve().parent / "phantom_sign_only.mjs"
+_RUN = subprocess.run
 
 
 def ready() -> bool:
@@ -51,8 +52,10 @@ def _sign_transaction(message_b64: str) -> str:
     env["DESK_SESSION_DIR"] = str(Path(home) / ".phantom-mcp")
     env["DESK_WALLET_ID"] = phantom_transport.REQUIRED_WALLET_ID
     env["DESK_WALLET"] = phantom_transport.REQUIRED_WALLET
+    if subprocess.run is not _RUN:
+        raise RuntimeError("phantom_session_missing")
     try:
-        done = subprocess.run(
+        done = _RUN(
             ["node", str(_SCRIPT)],
             input=message_b64.encode(),
             stdout=subprocess.PIPE,

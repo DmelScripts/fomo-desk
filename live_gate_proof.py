@@ -186,6 +186,61 @@ def _one_owner_mint_delta(value: dict, owner: str, mint: str) -> int | None:
     return post[1] - pre[1]
 
 
+def _fill_matches(result) -> bool:
+    """One owner+mint+accountIndex pair on the confirmed transaction. Fee-payer lamports are not the fill."""
+    if type(result) is not dict:
+        return False
+    meta = result.get("meta")
+    if type(meta) is not dict or meta.get("err") is not None:
+        return False
+    try:
+        import base64
+        import solana_tx
+        encoded = _transaction_b64(result)
+        if encoded is None:
+            return False
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return False
+    mint = _traded_output_mint(decoded)
+    if mint is None:
+        return False
+    return _one_owner_mint_delta(meta, decoded.fee_payer, mint) is not None
+
+
+def _fill_summary(result) -> dict | None:
+    try:
+        import base64
+        import solana_tx
+        encoded = _transaction_b64(result)
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return None
+    mint = _traded_output_mint(decoded)
+    meta = result.get("meta") if type(result) is dict else None
+    if mint is None or type(meta) is not dict:
+        return None
+    delta = _one_owner_mint_delta(meta, decoded.fee_payer, mint)
+    fee = meta.get("fee")
+    if delta is None or type(fee) is not int or isinstance(fee, bool) or fee < 0:
+        return None
+    return {"mint": mint, "output_delta": delta, "fee_lamports": fee}
+
+
+def _transaction_b64(result) -> str | None:
+    transaction = result.get("transaction") if type(result) is dict else None
+    if type(transaction) is str and transaction != "":
+        return transaction
+    if type(transaction) is list and transaction and type(transaction[0]) is str and transaction[0] != "":
+        return transaction[0]
+    if type(transaction) is not dict:
+        return None
+    message = transaction.get("message")
+    if type(message) is str and message != "":
+        return message
+    return None
+
+
 def quote_age_ok(row, now, limit) -> bool:
     """The owned-read timestamp, not a caller clock planted in the body."""
     if not isinstance(row, dict) or row.get("ok") is not True:
@@ -533,7 +588,7 @@ def _wire():
     global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _NOTES
     global attributes_intact, monitored
     global _fresh, _lp_ok, _plan, _plan_dev, _plan_history
-    global quote_ready, preflight_observed
+    global quote_ready, preflight_observed, real_submit_observed, fresh_sol_leg
     secret = os.urandom(32)
     notes = {}
     lock = threading.Lock()
@@ -752,6 +807,46 @@ def _wire():
                 ok = _sim_within_caps(params[0], value, now, seen(), fresh)
         return [(("preflight_ready", digest), {"at": now, "ok": ok is True, "until": None})]
 
+    def submit_rows(raw, parsed, now):
+        """A Helius send or confirmation this socket just read. The URL is not stored."""
+        if not isinstance(raw, (bytes, bytearray)) or type(parsed) is not dict or "error" in parsed:
+            return []
+        try:
+            sent = loads(bytes(raw))
+        except Exception:
+            return []
+        if type(sent) is not dict:
+            return []
+        method = sent.get("method")
+        params = sent.get("params")
+        if method == "sendTransaction":
+            signature = parsed.get("result")
+            if type(signature) is not str or signature == "":
+                return []
+            return [(("submit_sent", signature), {"at": now, "ok": True, "until": None})]
+        if method == "getSignatureStatuses" and type(params) is list and params and type(params[0]) is list and params[0]:
+            signature = params[0][0]
+            if type(signature) is not str or signature == "":
+                return []
+            result = parsed.get("result")
+            values = result.get("value") if type(result) is dict else None
+            item = values[0] if type(values) is list and values else None
+            ok = (
+                type(item) is dict
+                and item.get("err") is None
+                and item.get("confirmationStatus") in {"confirmed", "finalized"}
+            )
+            return [(("submit_status", signature), {"at": now, "ok": ok, "until": None})]
+        if method == "getTransaction" and type(params) is list and params and type(params[0]) is str:
+            signature = params[0]
+            result = parsed.get("result")
+            ok = _fill_matches(result)
+            body = None
+            if ok:
+                body = _fill_summary(result)
+            return [(("real_submit", signature), {"at": now, "ok": ok, "until": None, "body": body})]
+        return []
+
     def seal(url, parsed, mint, history, request_body=None) -> None:
         if not check():
             return
@@ -760,8 +855,11 @@ def _wire():
         host = split(url).hostname if type(url) is str else None
         if host == "mainnet.helius-rpc.com":
             rows.extend(sim_rows(request_body, parsed, moment))
+            rows.extend(submit_rows(request_body, parsed, moment))
         if rows:
             save(rows)
+        if _submit_ready(seen(), moment):
+            submit_mark["closed"] = True
 
     def commit(sock, url, parsed, mint, history) -> None:
         host = split(url).hostname if type(url) is str else None
@@ -878,9 +976,57 @@ def _wire():
                 return True
         return False
 
+    submit_mark = {"closed": False}
+
+    def _submit_ready(current, moment) -> bool:
+        """Send, confirmed status, and one owner+mint fill, all from this socket."""
+        if not isinstance(current, dict):
+            return False
+        for key, row in current.items():
+            if type(key) is not tuple or len(key) != 2 or key[0] != "real_submit":
+                continue
+            if not fresh(row, moment) or row.get("ok") is not True:
+                continue
+            signature = key[1]
+            if not isinstance(signature, str) or signature == "":
+                continue
+            sent = current.get(("submit_sent", signature))
+            status = current.get(("submit_status", signature))
+            if fresh(sent, moment) and sent.get("ok") is True and fresh(status, moment) and status.get("ok") is True:
+                return True
+        return False
+
+    def real_submit_observed(mint=None, now=None) -> bool:
+        """Closed only after seal saw a confirmed fill. A note write does not flip this."""
+        return submit_mark["closed"] is True
+
+    def fresh_sol_leg(now=None):
+        """The SOL/USD note this process read. A caller-supplied price is not a leg."""
+        moment = clock() if now is None else now
+        if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+            return None
+        current = seen()
+        for key, row in current.items():
+            if type(key) is not tuple or len(key) != 2 or key[0] != "price_freshness_proven":
+                continue
+            if not fresh(row, moment):
+                continue
+            body = row.get("body")
+            if not isinstance(body, dict):
+                continue
+            return {
+                "fresh": True,
+                "used": True,
+                "price": body.get("price"),
+                "conf": body.get("conf"),
+                "expo": body.get("expo"),
+            }
+        return None
+
     def reset() -> None:
         with lock:
             notes.clear()
+        submit_mark["closed"] = False
 
     view = types.MappingProxyType(notes)
     snapshots = {"classes": (), "functions": (), "methods": ()}
@@ -1063,6 +1209,8 @@ def _wire():
     monitored = names
     quote_ready = quote_ready
     preflight_observed = preflight_observed
+    real_submit_observed = real_submit_observed
+    fresh_sol_leg = fresh_sol_leg
     _OwnedTransport._note = note
     _OwnedTransport.handle_request = handle
     mod = sys.modules[__name__]

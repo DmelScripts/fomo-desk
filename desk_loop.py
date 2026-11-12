@@ -2688,6 +2688,9 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         return refused | {"reason": priced.get("reason") or "price_unknown"}
     expiry = _signer_quote_and_blockhash(proof, decoded, transport, moment)
     if expiry.get("ok") is not True:
+        if expiry.get("reason") == "blockhash_expired" and db.get_setting("mode", "PAPER") == "LIVE":
+            _requote_guard(decoded, proof, moment if moment is not None else time.time())
+            live_simulate(proof["case_id"], message_sha256, moment if moment is not None else time.time())
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
@@ -5516,7 +5519,7 @@ def _readiness_blocks(pyth: dict) -> list[str]:
     return blocks
 
 
-def _remaining_live_gates_body(mint, shut, quote_fn, preflight_fn) -> list[dict]:
+def _remaining_live_gates_body(mint, shut, quote_fn, preflight_fn, submit_fn) -> list[dict]:
     """What still sits between this branch and a genuine live send. None of these are armed.
 
     Thành removed stalkchain_rest_envelope on 2026-11-11 at 22:23 Asia/Saigon.
@@ -5599,11 +5602,11 @@ def _remaining_live_gates_body(mint, shut, quote_fn, preflight_fn) -> list[dict]
         },
         {
             "gate": "real_submit",
-            "proves": "a real signature is submitted and confirmed, not the mock sender",
+            "proves": "this process read a confirmed Helius fill for the signed message, with one owner and mint row",
             "owner": True,
             "owner_action": "approve the Phantom session before any real signature",
             "needs_live_read": True,
-            "closed": False,
+            "closed": submit_fn(mint),
         },
         {
             "gate": "deploy_env",
@@ -5623,6 +5626,7 @@ def _bind_remaining_live_gates():
     read = proof.closed
     quote_read = proof.quote_ready
     preflight_read = proof.preflight_observed
+    submit_read = proof.real_submit_observed
     mod = proof
 
     def remaining_live_gates(mint: str | None = None) -> list[dict]:
@@ -5630,6 +5634,7 @@ def _bind_remaining_live_gates():
             mod.closed is read
             and mod.quote_ready is quote_read
             and mod.preflight_observed is preflight_read
+            and mod.real_submit_observed is submit_read
             and mod.attributes_intact is check
             and check()
         )
@@ -5649,7 +5654,12 @@ def _bind_remaining_live_gates():
                 return False
             return preflight_read(mint_arg)
 
-        return _remaining_live_gates_body(mint, shut, quote, preflight)
+        def submit(mint_arg):
+            if not intact:
+                return False
+            return submit_read(mint_arg)
+
+        return _remaining_live_gates_body(mint, shut, quote, preflight, submit)
 
     return remaining_live_gates
 
