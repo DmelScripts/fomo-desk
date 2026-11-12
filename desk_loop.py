@@ -2136,6 +2136,7 @@ def _signer_rent_bound(decoded, transport, wallet: str, wsol: str, position_ata:
         return "unknown"
 
     total = 0
+    open_total = 0
     for item in creates:
         explicit = item["explicit"]
         if explicit is not None:
@@ -2146,6 +2147,8 @@ def _signer_rent_bound(decoded, transport, wallet: str, wsol: str, position_ata:
         found = presence(item["account"], item["mint"])
         if found == "absent":
             total += minimum
+            if item["account"] not in closes:
+                open_total += minimum
         elif found == "present":
             if explicit is not None:
                 return unknown
@@ -2155,6 +2158,8 @@ def _signer_rent_bound(decoded, transport, wallet: str, wsol: str, position_ata:
         if account not in recognized and account not in seen:
             return unknown
         mint = solana_tx.NATIVE_MINT if account == wsol else None
+        if mint is None and account == position_ata and isinstance(position_mint, str) and position_mint != "":
+            mint = position_mint
         if mint is None:
             for item in creates:
                 if item["account"] == account:
@@ -2166,7 +2171,7 @@ def _signer_rent_bound(decoded, transport, wallet: str, wsol: str, position_ata:
             return {"ok": False, "reason": "preexisting_close_refused"}
         if found != "absent":
             return unknown
-    return {"ok": True, "lamports": total}
+    return {"ok": True, "lamports": total, "open_lamports": open_total}
 
 
 def _message_deposit_lamports(decoded, transport) -> dict:
@@ -2230,6 +2235,8 @@ def _payer_token_ix(decoded, data: bytes, keys: list, wallet: str, wsol: str, po
         return refused
     if data == bytes([9]):
         if keys == [wsol, wallet, wallet]:
+            return {"ok": True, "wsol": 0, "position": 0}
+        if side == "exit" and position_ata is not None and keys == [position_ata, wallet, wallet]:
             return {"ok": True, "wsol": 0, "position": 0}
         return refused
     amount = solana_tx.token_transfer(data)
@@ -2363,6 +2370,7 @@ def _message_outflow(decoded, transport, case: dict | None, side: str) -> dict:
     return {
         "ok": True,
         "lamports": lamport_out + route_sol + wsol_out + deposit["lamports"],
+        "open_rent_lamports": deposit.get("open_lamports") or 0,
         "cu_limit": cu_limit,
         "cu_price": cu_price,
         "rent_bounded": True,
@@ -2698,6 +2706,7 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
         return refused | {"reason": expiry.get("reason") or "blockhash_unknown"}
     sol = {"fresh": True, "used": True, "price": priced["price"], "conf": priced["conf"], "expo": priced["expo"], "reason": None}
     import jupiter_route_v2
+    from decimal import Decimal
     priority = (outflow["cu_price"] * outflow["cu_limit"] + 999_999) // 1_000_000
     fee_usd = pyth_sponsored.lamports_usd(priority + jupiter_route_v2.BASE_FEE_LAMPORTS, sol)
     if fee_usd is None:
@@ -2717,13 +2726,26 @@ def _signer_capital(message_sha256: str, now, transport) -> dict:
     reserved = memecoin_desk._reserved_amount(snap.get("reserved_usd"))
     if reserved is None:
         return refused | {"reason": "exposure_unknown"}
-    if reserved > usd:
+    open_rent = outflow.get("open_rent_lamports") or 0
+    if type(open_rent) is not int or isinstance(open_rent, bool) or open_rent < 0:
+        open_rent = 0
+    rent_usd = pyth_sponsored.lamports_usd(open_rent, sol) if open_rent else Decimal("0")
+    if rent_usd is None:
+        return refused | {"reason": "price_unknown"}
+    priced = usd
+    if reserved > priced:
         usd = reserved
     if usd > memecoin_desk.TICKET:
         return refused | {"reason": "ticket"}
+    # A reserved ticket does not include rent that this message locks in a new ATA.
+    # capital_room still enforces the $8 ticket on the trade itself.
     room = db.exclusive(lambda conn: memecoin_desk.capital_room(conn, proof["case_id"], usd, now=moment))
     if room.get("ok") is not True:
         return refused | {"reason": room.get("reason") or "allocation"}
+    if reserved >= priced and rent_usd > 0:
+        held = Decimal(room["held_usd"])
+        if held + usd + rent_usd > memecoin_desk.ALLOCATION:
+            return refused | {"reason": "allocation"}
     return {
         "ok": True, "reason": None, "ticket_limit_proven": True, "allocation_proven": True,
         "price_freshness_proven": True, "rent_bound_proven": outflow.get("rent_bounded") is True, "reduce_only": False,

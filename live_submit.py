@@ -578,7 +578,11 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
             """,
             (signature, case_id, message_sha256, slot, qty, basis, fee_lamports, fee_text),
         )
-    _apply_book(conn, case_id, side, signature, delta, basis, fee_usd, leg, now)
+    _apply_book(
+        conn, case_id, side, signature, delta, basis, fee_usd, leg, now,
+        receipt["rent_lamports"],
+        summary.get("rent_released_lamports") if type(summary.get("rent_released_lamports")) is int else 0,
+    )
     if halt:
         memecoin_desk._log(
             conn, case_id, mint, "live_halt_review", "fail", None, "getTransaction",
@@ -593,10 +597,14 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
         )
 
 
-def _apply_book(conn, case_id: str, side: str, signature: str, delta: int, basis: int, fee_usd, leg, now: float) -> None:
-    """Realized P&L and the reserved dollars the $100 cap reads."""
+def _apply_book(conn, case_id: str, side: str, signature: str, delta: int, basis: int, fee_usd, leg, now: float, rent_lamports: int = 0, rent_released: int = 0) -> None:
+    """Realized P&L and the reserved dollars the $100 cap reads.
+
+    Open ATA rent is reserved capital, not P&L and not part of the network fee.
+    """
     import json
     from decimal import Decimal
+    import memecoin_desk
     import pyth_sponsored
     row = conn.execute("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
     if row is None:
@@ -604,10 +612,19 @@ def _apply_book(conn, case_id: str, side: str, signature: str, delta: int, basis
     body = json.loads(row["snapshot_json"])
     if not isinstance(body, dict):
         body = {}
+    if type(rent_lamports) is not int or isinstance(rent_lamports, bool) or rent_lamports < 0:
+        rent_lamports = 0
+    if type(rent_released) is not int or isinstance(rent_released, bool) or rent_released < 0:
+        rent_released = 0
+    rent_usd = pyth_sponsored.lamports_usd(rent_lamports, leg) if isinstance(leg, dict) and rent_lamports else Decimal("0")
+    if rent_usd is None:
+        rent_usd = Decimal("0")
     if side == "entry" and isinstance(leg, dict) and fee_usd is not None and basis > 0:
         spent = pyth_sponsored.lamports_usd(basis, leg)
         if spent is not None:
-            body["reserved_usd"] = format((spent + fee_usd).quantize(Decimal("0.01")), "f")
+            body["reserved_usd"] = format((spent + fee_usd + rent_usd).quantize(Decimal("0.01")), "f")
+        body["rent_lamports"] = rent_lamports
+        body["rent_usd"] = format(rent_usd, "f")
         body["entry_funding"] = {
             "signature": signature,
             "source": "entry_receipt",
@@ -631,6 +648,18 @@ def _apply_book(conn, case_id: str, side: str, signature: str, delta: int, basis
                 realized = (proceeds - cost - prior_fee - fee_usd).quantize(Decimal("0.01"))
                 body["realized_pnl"] = format(realized, "f")
                 body["pnl_live"] = True
+        stored = body.get("rent_lamports")
+        if rent_released and type(stored) is int and not isinstance(stored, bool) and stored > 0:
+            release_l = min(stored, rent_released)
+            release_usd = pyth_sponsored.lamports_usd(release_l, leg) or Decimal("0")
+            current = memecoin_desk._reserved_amount(body.get("reserved_usd")) or Decimal("0")
+            body["reserved_usd"] = format(max(Decimal("0"), (current - release_usd).quantize(Decimal("0.01"))), "f")
+            body["rent_lamports"] = stored - release_l
+            try:
+                stored_usd = Decimal(str(body.get("rent_usd") or "0"))
+            except Exception:
+                stored_usd = Decimal("0")
+            body["rent_usd"] = format(max(Decimal("0"), (stored_usd - release_usd).quantize(Decimal("0.01"))), "f")
     conn.execute(
         "UPDATE memecoin_cases SET snapshot_json = ?, updated_at = ? WHERE id = ?",
         (json.dumps(body, sort_keys=True), float(now), case_id),

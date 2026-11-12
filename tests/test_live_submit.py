@@ -895,6 +895,78 @@ class LiveSubmitTests(unittest.TestCase):
         body["meta"]["postBalances"] = post
         return body
 
+    def test_open_ata_rent_reduces_allocation_until_it_is_refunded(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        import pyth_sponsored
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        db.execute(
+            """
+            INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
+            VALUES ('held-92', ?, 'protected', '{"reserved_usd": "92.00"}', 'paper', 'server', ?, ?)
+            """,
+            (MINT, NOW, NOW),
+        )
+        crowded, crowded_message = self._message(_route(100, 50, amount=900_000), reserved="8.00", fund_mint=MINT)
+        calls = []
+        refused = live_submit.submit(
+            crowded, live_submit.message_digest(crowded_message), NOW, self._reader(), lambda body: calls.append(body),
+        )
+        self.assertEqual(refused["reason"], "allocation", refused)
+        self.assertEqual(calls, [])
+        db.execute("DELETE FROM memecoin_cases WHERE id = 'held-92'")
+        self._clock = time.time()
+        quoted = 100
+        fee = 5000
+        case_keep, message_keep = self._message(_route(quoted, 50, amount=1_050_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed_keep, signature_keep = self._signed(message_keep)
+        self._prove_owned_reads(message_keep)
+        kept = self._confirm(case_keep, live_submit.message_digest(message_keep), signed_keep, signature_keep, self._created_ata_fill(signed_keep, fee, str(quoted)))
+        self.assertTrue(kept["reconciled"], kept)
+        kept_snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_keep,))[0]["snapshot_json"])
+        leg = {"fresh": True, "used": True, "price": 100, "conf": 0, "expo": 0}
+        rent_usd = pyth_sponsored.lamports_usd(solana_tx.TOKEN_ACCOUNT_RENT, leg)
+        spent = pyth_sponsored.lamports_usd(1_050_000, leg) + pyth_sponsored.lamports_usd(fee, leg)
+        self.assertEqual(Decimal(kept_snap["reserved_usd"]), (spent + rent_usd).quantize(Decimal("0.01")))
+        self.assertEqual(kept_snap["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        case_free, message_free = self._message(_route(quoted, 50, amount=1_060_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed_free, signature_free = self._signed(message_free)
+        freed = self._confirm(case_free, live_submit.message_digest(message_free), signed_free, signature_free, self._created_ata_fill(signed_free, fee, str(quoted)))
+        self.assertTrue(freed["reconciled"], freed)
+        before = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_free,))[0]["snapshot_json"])
+        self._mark_remaining(case_keep, 1_070_000)
+        self._mark_remaining(case_free, 1_080_000)
+        _id, hold_message = self._message(_route(quoted, 50, amount=1_070_000), when=time.time(), side="exit", ledger="live", case_id=case_keep)
+        signed_hold, signature_hold = self._signed(hold_message)
+        self._prove_owned_reads(hold_message)
+        held = self._confirm(case_keep, live_submit.message_digest(hold_message), signed_hold, signature_hold, self._fill(signed_hold, fee, str(quoted)))
+        self.assertTrue(held["reconciled"], held)
+        still = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_keep,))[0]["snapshot_json"])
+        self.assertEqual(still["reserved_usd"], kept_snap["reserved_usd"])
+        self.assertEqual(still["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        _id, close_message = self._message(_route(quoted, 50, amount=1_080_000), when=time.time(), side="exit", ledger="live", case_id=case_free, close_mint=MINT)
+        signed_close, signature_close = self._signed(close_message)
+        closed = self._confirm(
+            case_free, live_submit.message_digest(close_message), signed_close, signature_close,
+            self._sol_fill(signed_close, fee, quoted, quoted + solana_tx.TOKEN_ACCOUNT_RENT, token_rent=solana_tx.TOKEN_ACCOUNT_RENT),
+        )
+        self.assertTrue(closed["reconciled"], closed)
+        after = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_free,))[0]["snapshot_json"])
+        self.assertEqual(Decimal(after["reserved_usd"]), Decimal(before["reserved_usd"]) - rent_usd)
+        self.assertEqual(after["rent_lamports"], 0)
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill' AND evidence_json LIKE '%exit%'", (case_free,))[0]["evidence_json"])
+        self.assertEqual(logged["amount_out"], quoted)
+        self.assertNotIn(str(solana_tx.TOKEN_ACCOUNT_RENT), str(logged.get("realized_pnl")))
+
+    def _mark_remaining(self, case_id: str, amount: int) -> None:
+        import json
+        raw = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]
+        body = json.loads(raw)
+        body["remaining_raw"] = amount
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
+
     def test_a_bad_confirmed_fill_is_an_open_loss(self):
         import json
         from decimal import Decimal

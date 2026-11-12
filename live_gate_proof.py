@@ -440,6 +440,13 @@ def _lamport_table(meta, nkeys: int):
 
 
 def _native_sol_output(meta, decoded, keys) -> int | None:
+    parts = _lamport_parts(meta, decoded, keys)
+    if parts is None:
+        return None
+    return parts["output"]
+
+
+def _lamport_parts(meta, decoded, keys):
     """SOL unwrapped to the fee payer. None when the lamports are not attributable.
 
     output = (post - pre) + fee - rent refunded by closing accounts that already
@@ -498,7 +505,7 @@ def _native_sol_output(meta, decoded, keys) -> int | None:
     output = (post[0] - pre[0]) + fee - refund + opened
     if output < 0:
         return None
-    return output
+    return {"output": output, "refund": refund, "opened": opened}
 
 
 def _ata_touches(decoded, owner: str, close: bool):
@@ -600,13 +607,20 @@ def _fill_summary(result) -> dict | None:
     output_delta = None
     input_delta = None
     rent_lamports = 0
+    rent_released = 0
     if keyed is not None:
         keys, n_loaded_writable = keyed
         output_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest)
         input_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, source)
-        rent_lamports = _open_rent(meta, decoded, keys)
+        parts = _lamport_parts(meta, decoded, keys)
+        if parts is None:
+            rent_lamports = _open_rent(meta, decoded, keys)
+            rent_released = 0
+        else:
+            rent_lamports = parts["opened"]
+            rent_released = parts["refund"]
         if dest == solana_tx.NATIVE_MINT and output_delta is None and not _bad_token_rows(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest):
-            native = _native_sol_output(meta, decoded, keys)
+            native = None if parts is None else parts["output"]
             if native is None:
                 accounts_ok = False
             else:
@@ -628,6 +642,7 @@ def _fill_summary(result) -> dict | None:
         "quoted_out": quoted,
         "fee_lamports": fee,
         "rent_lamports": rent_lamports,
+        "rent_released_lamports": rent_released,
         "accounts_ok": accounts_ok,
         "positive": positive is True,
     }
