@@ -127,6 +127,8 @@ class LiveSubmitTests(unittest.TestCase):
                     state["send_timeouts"] -= 1
                     raise TimeoutError("timed out api-key=" + SECRET)
                 return {"status": 200, "body": {"result": signature}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": self._fill(signed_tx, 5000, "100")}}
             return {"status": 200, "body": {"result": {"value": [{
                 "confirmationStatus": state["status"], "err": None, "slot": 9,
             }]}}}
@@ -208,6 +210,8 @@ class LiveSubmitTests(unittest.TestCase):
             if payload["method"] == "sendTransaction":
                 with lock:
                     sends.append(payload["method"])
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": self._fill(signed_tx, 5000, "102")}}
             return {"status": 200, "body": {"result": {"value": [{
                 "confirmationStatus": "confirmed", "err": None, "slot": 4,
             }]}}} if payload["method"] == "getSignatureStatuses" else {"status": 200, "body": {"result": signature}}
@@ -266,9 +270,11 @@ class LiveSubmitTests(unittest.TestCase):
 
         solana_rpc.TRANSPORT = lambda payload: {
             "status": 200,
-            "body": {"result": signature} if payload["method"] == "sendTransaction" else {"result": {"value": [{
-                "confirmationStatus": "confirmed", "err": None, "slot": 9,
-            }]}},
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": self._fill(signed_tx, 5000, "103")} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 9,
+                }]}}
+            ),
         }
         done = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
         self.assertTrue(done["reconciled"], done)
@@ -310,6 +316,850 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertFalse(armed["live_ready"])
         self.assertFalse(phantom_session.ready())
 
+    def test_a_stale_blockhash_is_not_signed_again(self):
+        self._arm()
+        case_id, message = self._message(_route(100, 50))
+        calls = []
+
+        def reader(request):
+            if request.get("method") == "getBlockHeight":
+                return {"status": 200, "body": {"result": 500}}
+            return self._reader()(request)
+
+        refused = live_submit.submit(case_id, live_submit.message_digest(message), NOW, reader, lambda body: calls.append(body))
+        self.assertEqual(refused["reason"], "blockhash_expired", refused)
+        self.assertEqual(calls, [])
+        self.assertFalse(refused["sign"])
+        self.assertEqual(self._rows(), [])
+
+    def test_a_different_signer_or_a_changed_message_is_not_sent(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(110, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        self._prove_owned_reads(message)
+        methods = []
+        solana_rpc.TRANSPORT = lambda payload: methods.append(payload["method"]) or {"status": 200, "body": {"result": None}}
+        foreign = solana_tx.encode_legacy_transfer(solana_tx.b58encode(b"\x22" * 32), phantom_transport.REQUIRED_WALLET, 1, BLOCK)
+        raw = bytearray(base64.b64decode(foreign))
+        raw[1:65] = b"\x44" * 64
+        mismatch = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": base64.b64encode(bytes(raw)).decode()})
+        self.assertEqual(mismatch["reason"], "signer_mismatch", mismatch)
+        self.assertEqual(methods, [])
+        self.assertEqual(self._rows(), [])
+        flipped = bytearray(base64.b64decode(message))
+        flipped[1:65] = b"\x11" * 64
+        flipped[200] ^= 1
+        tampered = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": base64.b64encode(bytes(flipped)).decode()})
+        self.assertEqual(tampered["reason"], "message_mismatch", tampered)
+        self.assertEqual(methods, [])
+
+    def test_a_confirmation_timeout_does_not_send_twice(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(111, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, signature = self._signed(message)
+        methods = []
+
+        def transport(payload):
+            methods.append(payload["method"])
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": signature}}
+            raise TimeoutError("confirmation")
+
+        solana_rpc.TRANSPORT = transport
+        self._prove_owned_reads(message)
+        pending = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertEqual(pending["reason"], "open_liability", pending)
+        self.assertEqual(methods.count("sendTransaction"), 1)
+        self.assertIn("getSignatureStatuses", methods)
+        self.assertIn("getTransaction", methods)
+        self.assertEqual(self._rows()[0]["status"], "unknown")
+        self.assertEqual(self._rows()[0]["idempotency_key"], digest)
+        again = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertEqual(methods.count("sendTransaction"), 1)
+        self.assertNotEqual(again["reason"], None)
+        import live_gate_proof
+        self.assertFalse(live_gate_proof.real_submit_observed())
+
+    def test_the_same_claim_is_not_submitted_twice(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(112, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, signature = self._signed(message)
+        signs = []
+        sends = []
+
+        def transport(payload):
+            if payload["method"] == "sendTransaction":
+                sends.append(payload["method"])
+                return {"status": 200, "body": {"result": signature}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": self._fill(signed_tx, 5000, "112")}}
+            return {"status": 200, "body": {"result": {"value": [{"confirmationStatus": "confirmed", "err": None, "slot": 3}]}}}
+
+        solana_rpc.TRANSPORT = transport
+        self._prove_owned_reads(message)
+        signer = lambda body: signs.append(body) or {"signed_tx": signed_tx}
+        first = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
+        second = live_submit.submit(case_id, digest, time.time(), self._reader(), signer)
+        self.assertTrue(first["reconciled"], first)
+        self.assertTrue(second["reconciled"], second)
+        self.assertEqual(len(signs), 1)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM live_submit")[0]["n"], 1)
+
+    def test_an_rpc_error_is_not_retried_as_a_new_send(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(113, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, _signature = self._signed(message)
+        methods = []
+
+        def transport(payload):
+            methods.append(payload["method"])
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"error": {"code": -32002, "message": "blockhash"}}}
+            raise TimeoutError("status")
+
+        solana_rpc.TRANSPORT = transport
+        self._prove_owned_reads(message)
+        failed = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertEqual(failed["reason"], "send_refused", failed)
+        self.assertNotIn(SECRET, repr(failed))
+        live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertEqual(methods.count("sendTransaction"), 1)
+
+    def test_a_fee_or_slippage_past_the_cap_halts_new_entries(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(114, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        solana_rpc.TRANSPORT = lambda payload: {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": self._fill(signed_tx, 2_000_000, "114")} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 6,
+                }]}}
+            ),
+        }
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertTrue(done["reconciled"], done)
+        self.assertTrue(memecoin_desk.loss_totals()["live_halts_new_entries"])
+        import live_gate_proof
+        logged = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'live_halt_review'")
+        self.assertEqual(len(logged), 1)
+        self.assertNotIn("api-key=", logged[0]["evidence_json"])
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        later_id, later = self._message(_route(115, 50), when=time.time())
+        calls = []
+        halted = live_submit.submit(later_id, live_submit.message_digest(later), time.time(), self._reader(), lambda body: calls.append(body))
+        self.assertEqual(halted["reason"], "stop_new_entries", halted)
+        self.assertEqual(calls, [])
+
+    def test_slippage_past_50_bps_halts_and_a_mock_does_not_close_the_gate(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(100, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, signature = self._signed(message)
+        os.environ["DESK_REAL_SUBMIT"] = "1"
+        self.addCleanup(lambda: os.environ.pop("DESK_REAL_SUBMIT", None))
+        import live_gate_proof
+        live_gate_proof._apply("https://mainnet.helius-rpc.com/?api-key=hidden", {"result": signature})
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._prove_owned_reads(message)
+        solana_rpc.TRANSPORT = lambda payload: {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": self._fill(signed_tx, 5000, "1")} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 7,
+                }]}}
+            ),
+        }
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertTrue(done["reconciled"], done)
+        self.assertTrue(memecoin_desk.loss_totals()["live_halts_new_entries"])
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        view = desk_loop.readiness()
+        self.assertFalse(view["live_ready"])
+        self.assertFalse(view["sign"])
+        self.assertFalse(view["send"])
+
+    def test_an_owned_confirmed_fill_closes_real_submit_and_an_exit_uses_it(self):
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(100, 50), when=moment)
+        digest = live_submit.message_digest(message)
+        signed_tx, _signature = self._signed(message)
+        self._prove_owned_reads(message)
+        solana_rpc.TRANSPORT = None
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertTrue(done["reconciled"], done)
+        self.assertTrue(live_gate_proof.real_submit_observed())
+        gates = {item["gate"]: item["closed"] for item in self._gates()}
+        self.assertTrue(gates["real_submit"])
+        view = desk_loop.readiness()
+        self.assertFalse(view["live_ready"])
+        self.assertFalse(view["sign"])
+        self.assertFalse(view["send"])
+        fill = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'live_fill'")
+        self.assertEqual(len(fill), 1)
+        self.assertNotIn("api-key=", fill[0]["evidence_json"])
+        self.assertIn("fee_usd", fill[0]["evidence_json"])
+        self.assertEqual(self._rows()[0]["idempotency_key"], digest)
+        snap = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]
+        self.assertIn("0.11", snap["snapshot_json"])
+        def refuse_second(_body):
+            raise AssertionError("signed twice")
+
+        again = live_submit.submit(case_id, digest, time.time(), self._reader(), refuse_second)
+        self.assertTrue(again["reconciled"], again)
+        exit_id, exit_message = self._message(_route(80, 50), when=time.time(), side="exit")
+        exit_signed, _exit_sig = self._signed(exit_message)
+        self._prove_owned_reads(exit_message)
+        exited = live_submit.submit(exit_id, live_submit.message_digest(exit_message), time.time(), self._reader(), lambda body: {"signed_tx": exit_signed})
+        self.assertTrue(exited["reconciled"], exited)
+        exits = db.query("SELECT evidence_json FROM memecoin_log WHERE stage = 'live_fill' AND case_id = ?", (exit_id,))
+        self.assertEqual(len(exits), 1)
+        self.assertIn(solana_tx.NATIVE_MINT, exits[0]["evidence_json"])
+
+    def test_a_live_exit_feeds_realized_loss_and_the_allocation(self):
+        self._arm()
+        moment = time.time()
+        self._clock = moment
+        case_id, message = self._message(_route(100, 50), when=moment, ledger="live")
+        digest = live_submit.message_digest(message)
+        signed_tx, signature = self._signed(message)
+        self._prove_owned_reads(message)
+
+        def transport(payload, signed=signed_tx, sig=signature, amount="100"):
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": sig}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": self._fill(signed, 5000, amount)}}
+            return {"status": 200, "body": {"result": {"value": [{"confirmationStatus": "confirmed", "err": None, "slot": 4}]}}}
+
+        solana_rpc.TRANSPORT = lambda payload: transport(payload)
+        opened = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body: {"signed_tx": signed_tx})
+        self.assertTrue(opened["reconciled"], opened)
+        receipt = db.query("SELECT qty, ledger FROM memecoin_entry_receipts WHERE case_id = ?", (case_id,))
+        self.assertEqual(len(receipt), 1)
+        self.assertEqual(receipt[0]["ledger"], "live")
+        held = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]
+        self.assertIn("0.11", held)
+        import json
+        body = json.loads(held)
+        body["remaining_raw"] = 1_000_000
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
+        _exit_id, exit_message = self._message(_route(100, 50), when=time.time(), side="exit", ledger="live", case_id=case_id)
+        exit_signed, exit_sig = self._signed(exit_message)
+        self._prove_owned_reads(exit_message)
+        solana_rpc.TRANSPORT = lambda payload: transport(payload, exit_signed, exit_sig, "1")
+        closed = live_submit.submit(case_id, live_submit.message_digest(exit_message), time.time(), self._reader(), lambda body: {"signed_tx": exit_signed})
+        self.assertTrue(closed["reconciled"], closed)
+        totals = memecoin_desk.loss_totals()
+        self.assertNotEqual(totals["live_loss_usd"], "0.00")
+        self.assertLess(float(totals["live_loss_usd"]), 20)
+
+    def test_a_get_transaction_must_be_the_sent_signature(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self.addCleanup(lambda: setattr(self, "_foreign_tx", None))
+        self._arm()
+        self._clock = time.time()
+        case_a, message_a = self._message(_route(100, 50, amount=1_400_000), when=time.time(), ledger="live")
+        digest_a = live_submit.message_digest(message_a)
+        signed_a, signature_a = self._signed(message_a)
+        _case_b, message_b = self._message(_route(100, 50, amount=1_500_000), when=time.time(), ledger="live")
+        raw_b = bytearray(base64.b64decode(message_b))
+        raw_b[1:65] = b"\x22" * 64
+        signed_b = base64.b64encode(bytes(raw_b)).decode()
+        signature_b = solana_tx.first_signature(signed_b)
+        self.assertNotEqual(signature_a, signature_b)
+        self.assertNotEqual(solana_tx.message_bytes(signed_a), solana_tx.message_bytes(signed_b))
+        self._prove_owned_reads(message_a)
+        self._foreign_tx = signed_b
+        solana_rpc.TRANSPORT = None
+        swapped = live_submit.submit(case_a, digest_a, time.time(), self._reader(), lambda body, signed=signed_a: {"signed_tx": signed})
+        self.assertFalse(swapped["reconciled"], swapped)
+        self.assertEqual(swapped["reason"], "fill_unmatched", swapped)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_a,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_a)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_c, message_c = self._message(_route(100, 50, amount=1_600_000), when=time.time(), ledger="live")
+        digest_c = live_submit.message_digest(message_c)
+        signed_c, signature_c = self._signed(message_c)
+        _case_d, message_d = self._message(_route(100, 50, amount=1_700_000), when=time.time(), ledger="live")
+        signed_d, _signature_d = self._signed(message_d)
+        raw_c = bytearray(base64.b64decode(signed_c))
+        raw_d = bytearray(base64.b64decode(signed_d))
+        raw_d[1:65] = raw_c[1:65]
+        spliced = base64.b64encode(bytes(raw_d)).decode()
+        self.assertEqual(solana_tx.first_signature(spliced), signature_c)
+        self.assertNotEqual(solana_tx.message_bytes(spliced), solana_tx.message_bytes(signed_c))
+        solana_rpc.TRANSPORT = lambda payload, signed=signed_c, signature=signature_c, body=self._fill(spliced, 5000, "100"): {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": body} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 8,
+                }]}}
+            ),
+        }
+        moved = live_submit.submit(case_c, digest_c, time.time(), self._reader(), lambda body, signed=signed_c: {"signed_tx": signed})
+        self.assertFalse(moved["reconciled"], moved)
+        self.assertEqual(moved["reason"], "fill_unmatched", moved)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_c,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_c)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_e, message_e = self._message(_route(100, 50, amount=1_800_000), when=time.time(), ledger="live")
+        digest_e = live_submit.message_digest(message_e)
+        signed_e, signature_e = self._signed(message_e)
+        other = solana_tx.b58encode(b"\x99" * 64)
+        self.assertNotEqual(other, signature_e)
+        methods = []
+
+        def transport(payload):
+            methods.append(payload["method"])
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": other}}
+            raise AssertionError("polled a signature the send did not match")
+
+        solana_rpc.TRANSPORT = transport
+        lied = live_submit.submit(case_e, digest_e, time.time(), self._reader(), lambda body, signed=signed_e: {"signed_tx": signed})
+        self.assertFalse(lied["reconciled"], lied)
+        self.assertEqual(lied["reason"], "fill_unmatched", lied)
+        self.assertEqual(methods, ["sendTransaction"])
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_e,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_e)
+        totals = memecoin_desk.loss_totals()
+        self.assertTrue(totals["live_halts_new_entries"])
+        self.assertGreater(Decimal(totals["live_loss_usd"]), 0)
+        self.assertNotIn("api-key=", json.dumps(totals))
+
+    def _assert_open_loss(self, case_id: str) -> None:
+        import json
+        from decimal import Decimal
+        row = db.query("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]
+        snap = json.loads(row["snapshot_json"])
+        self.assertEqual(row["stage"], "entry_failed")
+        self.assertLess(Decimal(snap["realized_pnl"]), 0)
+        self.assertEqual(snap["reserved_usd"], format(-Decimal(snap["realized_pnl"]), "f"))
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'", (case_id,))[0]["evidence_json"])
+        self.assertTrue(logged["anomalous"])
+        self.assertEqual(logged["reason"], "fill_unmatched")
+
+    def test_a_balance_index_must_be_on_the_signed_writable_account(self):
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self.addCleanup(lambda: setattr(self, "_balance_index", None))
+        self.addCleanup(lambda: setattr(self, "_loaded_addresses", None))
+        self._arm()
+        self._clock = time.time()
+        case_id, message = self._message(_route(100, 50, amount=1_900_000), when=time.time(), ledger="live")
+        digest = live_submit.message_digest(message)
+        signed, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        wide = self._fill(signed, 5000, "100")
+        for row in wide["meta"]["preTokenBalances"] + wide["meta"]["postTokenBalances"]:
+            row["accountIndex"] = 40
+        self._submit_unmatched(case_id, digest, signed, signature, wide)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_loaded, message_loaded = self._message(_route(100, 50, amount=2_000_000), when=time.time(), ledger="live")
+        digest_loaded = live_submit.message_digest(message_loaded)
+        signed_loaded, signature_loaded = self._signed(message_loaded)
+        loaded = self._fill(signed_loaded, 5000, "100")
+        loaded["meta"]["loadedAddresses"] = {"writable": [solana_tx.b58encode(b"\x46" * 32)], "readonly": []}
+        self._submit_unmatched(case_loaded, digest_loaded, signed_loaded, signature_loaded, loaded)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        case_time, message_time = self._message(_route(100, 50, amount=2_100_000), when=time.time(), ledger="live")
+        digest_time = live_submit.message_digest(message_time)
+        signed_time, signature_time = self._signed(message_time)
+        timed = self._fill(signed_time, 5000, "100")
+        for row in timed["meta"]["preTokenBalances"] + timed["meta"]["postTokenBalances"]:
+            row["accountIndex"] = 40
+
+        def transport(payload, body=timed, signature=signature_time):
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": signature}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": body}}
+            raise TimeoutError("status")
+
+        solana_rpc.TRANSPORT = transport
+        pending = live_submit.submit(case_time, digest_time, time.time(), self._reader(), lambda body, signed=signed_time: {"signed_tx": signed})
+        self.assertFalse(pending["reconciled"], pending)
+        self.assertEqual(pending["reason"], "fill_unmatched", pending)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest_time,))[0]["status"], "unknown")
+        self._assert_open_loss(case_time)
+        db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+        self._balance_index = 40
+        case_seal, message_seal = self._message(_route(100, 50, amount=2_200_000), when=time.time(), ledger="live")
+        digest_seal = live_submit.message_digest(message_seal)
+        signed_seal, _signature_seal = self._signed(message_seal)
+        solana_rpc.TRANSPORT = None
+        sealed = live_submit.submit(case_seal, digest_seal, time.time(), self._reader(), lambda body, signed=signed_seal: {"signed_tx": signed})
+        self.assertFalse(sealed["reconciled"], sealed)
+        self.assertEqual(sealed["reason"], "fill_unmatched", sealed)
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_seal)
+        self._assert_v0_lookup_resolution()
+
+    def _submit_unmatched(self, case_id, digest, signed, signature, body) -> None:
+        import live_gate_proof
+        solana_rpc.TRANSPORT = lambda payload, signed=signed, signature=signature, body=body: {
+            "status": 200,
+            "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                {"result": body} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 8,
+                }]}}
+            ),
+        }
+        done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda _body, signed=signed: {"signed_tx": signed})
+        self.assertFalse(done["reconciled"], done)
+        self.assertEqual(done["reason"], "fill_unmatched", done)
+        self.assertEqual(db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest,))[0]["status"], "unknown")
+        self.assertFalse(live_gate_proof.real_submit_observed())
+        self._assert_open_loss(case_id)
+
+    def _assert_v0_lookup_resolution(self) -> None:
+        import live_gate_proof
+        import solana_jupiter
+        wallet = phantom_transport.REQUIRED_WALLET
+        program = solana_jupiter.PROGRAM_ID
+        table = solana_tx.b58encode(b"\x44" * 32)
+        ata = solana_tx.associated_token_address(wallet, MINT, solana_tx.TOKEN_PROGRAM)
+        other = solana_tx.b58encode(b"\x47" * 32)
+        keys = [wallet, program, solana_tx.NATIVE_MINT, MINT]
+        writable = self._encode_v0(keys, 3, [(table, [0], [])], 1, [0, 0, 0, 2, 3], b"")
+        readonly = self._encode_v0(keys, 3, [(table, [], [0])], 1, [0, 0, 0, 2, 3], b"")
+        correct = self._v0_result(writable, 4, ata, MINT, "0", "100", {"writable": [ata], "readonly": []})
+        wrong = self._v0_result(writable, 4, other, MINT, "0", "100", {"writable": [other], "readonly": []})
+        frozen = self._v0_result(readonly, 4, ata, MINT, "0", "100", {"writable": [], "readonly": [ata]})
+        self.assertTrue(live_gate_proof._fill_summary(correct)["positive"])
+        self.assertFalse(live_gate_proof._fill_matches(wrong))
+        self.assertFalse(live_gate_proof._fill_summary(wrong)["accounts_ok"])
+        self.assertFalse(live_gate_proof._fill_matches(frozen))
+        self.assertFalse(live_gate_proof._fill_summary(frozen)["accounts_ok"])
+
+    def _v0_result(self, transaction: str, index: int, _address: str, mint: str, pre: str, post: str, loaded: dict) -> dict:
+        tx = solana_tx.decode_transaction(base64.b64decode(transaction))
+        return {
+            "transaction": transaction,
+            "meta": {
+                "err": None,
+                "fee": 5000,
+                "loadedAddresses": loaded,
+                "preTokenBalances": [{
+                    "accountIndex": index, "mint": mint, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": pre, "decimals": 6},
+                }],
+                "postTokenBalances": [{
+                    "accountIndex": index, "mint": mint, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": post, "decimals": 6},
+                }],
+            },
+        }
+
+    def _encode_v0(self, keys, readonly_unsigned, lookups, program_index, accounts, data) -> str:
+        def compact(value: int) -> bytes:
+            return bytes([value])
+        message = bytes([0x80, 1, 0, readonly_unsigned])
+        message += compact(len(keys)) + b"".join(solana_tx.b58decode(key) for key in keys)
+        message += solana_tx.b58decode(BLOCK)
+        message += compact(1) + bytes([program_index]) + compact(len(accounts)) + bytes(accounts)
+        message += compact(len(data)) + data
+        message += compact(len(lookups))
+        for table, writable, readonly in lookups:
+            message += solana_tx.b58decode(table)
+            message += compact(len(writable)) + bytes(writable)
+            message += compact(len(readonly)) + bytes(readonly)
+        raw = bytes([1]) + (b"\x11" * 64) + message
+        return base64.b64encode(raw).decode()
+
+    def test_unwrap_and_created_ata_fills_match_the_signed_message(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        self._clock = time.time()
+        quoted = 100
+        fee = 5000
+        case_id, message = self._message(_route(quoted, 50), when=time.time(), side="exit", ledger="live")
+        digest = live_submit.message_digest(message)
+        signed, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        body = self._sol_fill(signed, fee, quoted, quoted)
+        done = self._confirm(case_id, digest, signed, signature, body)
+        self.assertTrue(done["reconciled"], done)
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'", (case_id,))[0]["evidence_json"])
+        self.assertEqual(logged["amount_out"], quoted)
+        self.assertEqual(logged["slippage_bps"], 0)
+        self.assertFalse(logged["halt_new_entries"])
+        rent = solana_tx.TOKEN_ACCOUNT_RENT
+        _case_rent, message_rent = self._message(_route(quoted, 50, amount=1_010_000), when=time.time(), side="exit", ledger="live", close_mint=MINT)
+        signed_rent, _signature_rent = self._signed(message_rent)
+        refunded = self._sol_fill(signed_rent, fee, quoted, quoted + rent, token_rent=rent)
+        summary = live_gate_proof._fill_summary(refunded)
+        self.assertTrue(summary["positive"], summary)
+        self.assertEqual(summary["output_delta"], quoted)
+        self.assertNotEqual(summary["output_delta"], quoted + rent)
+        self.assertEqual(live_submit._slippage_bps(summary["quoted_out"], summary["output_delta"]), 0)
+        case_buy, message_buy = self._message(_route(quoted, 50, amount=1_020_000), when=time.time(), ledger="live", fund_mint=MINT)
+        digest_buy = live_submit.message_digest(message_buy)
+        signed_buy, signature_buy = self._signed(message_buy)
+        self._prove_owned_reads(message_buy)
+        created = self._created_ata_fill(signed_buy, fee, str(quoted))
+        bought = self._confirm(case_buy, digest_buy, signed_buy, signature_buy, created)
+        self.assertTrue(bought["reconciled"], bought)
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'", (case_buy,))[0]["evidence_json"])
+        self.assertEqual(logged["amount_out"], quoted)
+        self.assertEqual(logged["rent_lamports"], rent)
+        self.assertEqual(logged["fee_lamports"], fee)
+        self.assertFalse(logged["halt_new_entries"])
+        self.assertLess(Decimal(logged["fee_usd"]), memecoin_desk.MAX_FEE)
+        case_bare, message_bare = self._message(_route(quoted, 50, amount=1_030_000), when=time.time(), ledger="live")
+        digest_bare = live_submit.message_digest(message_bare)
+        signed_bare, signature_bare = self._signed(message_bare)
+        bare = self._created_ata_fill(signed_bare, fee, str(quoted))
+        solana_rpc.TRANSPORT = self._status_transport(signature_bare, bare)
+        refused = live_submit.submit(case_bare, digest_bare, time.time(), self._reader(), lambda _body, signed=signed_bare: {"signed_tx": signed})
+        self.assertFalse(refused["reconciled"], refused)
+        self.assertEqual(refused["reason"], "fill_unmatched", refused)
+
+    def _confirm(self, case_id, digest, signed, signature, body):
+        solana_rpc.TRANSPORT = self._status_transport(signature, body)
+        return live_submit.submit(case_id, digest, time.time(), self._reader(), lambda _body, signed=signed: {"signed_tx": signed})
+
+    def _status_transport(self, signature, body):
+        def transport(payload, signature=signature, body=body):
+            if payload["method"] == "sendTransaction":
+                return {"status": 200, "body": {"result": signature}}
+            if payload["method"] == "getTransaction":
+                return {"status": 200, "body": {"result": body}}
+            return {"status": 200, "body": {"result": {"value": [{"confirmationStatus": "confirmed", "err": None, "slot": 8}]}}}
+        return transport
+
+    def _sol_fill(self, signed: str, fee: int, quoted: int, payer_gain: int, token_rent: int = 0) -> dict:
+        tx = solana_tx.decode_transaction(base64.b64decode(signed))
+        body = self._fill(signed, fee, "0")
+        native = solana_tx.NATIVE_MINT
+        for name in ("preTokenBalances", "postTokenBalances"):
+            body["meta"][name] = [row for row in body["meta"][name] if row["mint"] != native]
+        width = len(tx.static_keys)
+        pre = [0] * width
+        post = [0] * width
+        pre[0] = 5_000_000
+        post[0] = pre[0] + payer_gain - fee
+        if token_rent:
+            index = self._ata_index(tx, MINT)
+            pre[index] = token_rent
+        body["meta"]["preBalances"] = pre
+        body["meta"]["postBalances"] = post
+        return body
+
+    def _created_ata_fill(self, signed: str, fee: int, amount: str) -> dict:
+        tx = solana_tx.decode_transaction(base64.b64decode(signed))
+        body = self._fill(signed, fee, amount)
+        output = body["meta"]["postTokenBalances"][0]["mint"]
+        body["meta"]["preTokenBalances"] = [row for row in body["meta"]["preTokenBalances"] if row["mint"] != output]
+        width = len(tx.static_keys)
+        pre = [1] * width
+        post = [1] * width
+        pre[0] = 5_000_000
+        post[0] = 5_000_000
+        index = self._ata_index(tx, output)
+        pre[index] = 0
+        post[index] = solana_tx.TOKEN_ACCOUNT_RENT
+        body["meta"]["preBalances"] = pre
+        body["meta"]["postBalances"] = post
+        return body
+
+    def test_open_ata_rent_reduces_allocation_until_it_is_refunded(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        import pyth_sponsored
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        db.execute(
+            """
+            INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
+            VALUES ('held-92', ?, 'protected', '{"reserved_usd": "92.00"}', 'paper', 'server', ?, ?)
+            """,
+            (MINT, NOW, NOW),
+        )
+        crowded, crowded_message = self._message(_route(100, 50, amount=900_000), reserved="8.00", fund_mint=MINT)
+        calls = []
+        refused = live_submit.submit(
+            crowded, live_submit.message_digest(crowded_message), NOW, self._reader(), lambda body: calls.append(body),
+        )
+        self.assertEqual(refused["reason"], "allocation", refused)
+        self.assertEqual(calls, [])
+        db.execute("DELETE FROM memecoin_cases WHERE id = 'held-92'")
+        self._clock = time.time()
+        quoted = 100
+        fee = 5000
+        case_keep, message_keep = self._message(_route(quoted, 50, amount=1_050_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed_keep, signature_keep = self._signed(message_keep)
+        self._prove_owned_reads(message_keep)
+        kept = self._confirm(case_keep, live_submit.message_digest(message_keep), signed_keep, signature_keep, self._created_ata_fill(signed_keep, fee, str(quoted)))
+        self.assertTrue(kept["reconciled"], kept)
+        kept_snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_keep,))[0]["snapshot_json"])
+        leg = {"fresh": True, "used": True, "price": 100, "conf": 0, "expo": 0}
+        rent_usd = pyth_sponsored.lamports_usd(solana_tx.TOKEN_ACCOUNT_RENT, leg)
+        spent = pyth_sponsored.lamports_usd(1_050_000, leg) + pyth_sponsored.lamports_usd(fee, leg)
+        self.assertEqual(Decimal(kept_snap["reserved_usd"]), (spent + rent_usd).quantize(Decimal("0.01")))
+        self.assertEqual(kept_snap["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        case_free, message_free = self._message(_route(quoted, 50, amount=1_060_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed_free, signature_free = self._signed(message_free)
+        freed = self._confirm(case_free, live_submit.message_digest(message_free), signed_free, signature_free, self._created_ata_fill(signed_free, fee, str(quoted)))
+        self.assertTrue(freed["reconciled"], freed)
+        before = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_free,))[0]["snapshot_json"])
+        self._mark_remaining(case_keep, 1_070_000)
+        self._mark_remaining(case_free, 1_080_000)
+        _id, hold_message = self._message(_route(quoted, 50, amount=1_070_000), when=time.time(), side="exit", ledger="live", case_id=case_keep)
+        signed_hold, signature_hold = self._signed(hold_message)
+        self._prove_owned_reads(hold_message)
+        held = self._confirm(case_keep, live_submit.message_digest(hold_message), signed_hold, signature_hold, self._fill(signed_hold, fee, str(quoted)))
+        self.assertTrue(held["reconciled"], held)
+        still = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_keep,))[0]["snapshot_json"])
+        self.assertEqual(still["reserved_usd"], kept_snap["reserved_usd"])
+        self.assertEqual(still["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        _id, close_message = self._message(_route(quoted, 50, amount=1_080_000), when=time.time(), side="exit", ledger="live", case_id=case_free, close_mint=MINT)
+        signed_close, signature_close = self._signed(close_message)
+        closed = self._confirm(
+            case_free, live_submit.message_digest(close_message), signed_close, signature_close,
+            self._sol_fill(signed_close, fee, quoted, quoted + solana_tx.TOKEN_ACCOUNT_RENT, token_rent=solana_tx.TOKEN_ACCOUNT_RENT),
+        )
+        self.assertTrue(closed["reconciled"], closed)
+        after = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_free,))[0]["snapshot_json"])
+        self.assertEqual(Decimal(after["reserved_usd"]), Decimal(before["reserved_usd"]) - rent_usd)
+        self.assertEqual(after["rent_lamports"], 0)
+        logged = json.loads(db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill' AND evidence_json LIKE '%exit%'", (case_free,))[0]["evidence_json"])
+        self.assertEqual(logged["amount_out"], quoted)
+        self.assertNotIn(str(solana_tx.TOKEN_ACCOUNT_RENT), str(logged.get("realized_pnl")))
+
+    def _mark_remaining(self, case_id: str, amount: int) -> None:
+        import json
+        raw = db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"]
+        body = json.loads(raw)
+        body["remaining_raw"] = amount
+        db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(body), case_id))
+
+    def test_only_the_stored_ata_close_releases_its_rent(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        import pyth_sponsored
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        self._clock = time.time()
+        quoted = 100
+        fee = 5000
+        case_id, message = self._message(_route(quoted, 50, amount=1_090_000), when=time.time(), ledger="live", fund_mint=MINT)
+        signed, signature = self._signed(message)
+        self._prove_owned_reads(message)
+        bought = self._confirm(case_id, live_submit.message_digest(message), signed, signature, self._created_ata_fill(signed, fee, str(quoted)))
+        self.assertTrue(bought["reconciled"], bought)
+        live_gate_proof._reset_for_tests()
+        self._prove_owned_reads(message)
+        stored = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(stored["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self.assertTrue(stored["rent_account"])
+        rent_account = stored["rent_account"]
+        reserved = stored["reserved_usd"]
+        self._mark_remaining(case_id, 1_100_000)
+        _id, wsol_message = self._message(_route(quoted, 50, amount=1_100_000), when=time.time(), side="exit", ledger="live", case_id=case_id)
+        signed_wsol, signature_wsol = self._signed(wsol_message)
+        self._prove_owned_reads(wsol_message)
+        wrapped = 2_039_280
+        body = self._fill(signed_wsol, fee, str(quoted))
+        tx = solana_tx.decode_transaction(base64.b64decode(signed_wsol))
+        width = len(tx.static_keys)
+        pre = [0] * width
+        post = [0] * width
+        pre[0] = 5_000_000
+        post[0] = pre[0] + wrapped - fee
+        wsol = self._ata_index(tx, solana_tx.NATIVE_MINT)
+        pre[wsol] = wrapped
+        post[wsol] = 0
+        body["meta"]["preBalances"] = pre
+        body["meta"]["postBalances"] = post
+        held = self._confirm(case_id, live_submit.message_digest(wsol_message), signed_wsol, signature_wsol, body)
+        self.assertTrue(held["reconciled"], held)
+        after_wsol = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(after_wsol["reserved_usd"], reserved)
+        self.assertEqual(after_wsol["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self.assertNotIn(rent_account, after_wsol.get("rent_released_accounts") or [])
+        leg = {"fresh": True, "used": True, "price": 100, "conf": 0, "expo": 0}
+        unrelated = solana_tx.b58encode(b"\x61" * 32)
+        db.exclusive(lambda conn: live_submit._apply_book(
+            conn, case_id, "exit", "sig-unrelated", quoted, 1_100_000,
+            pyth_sponsored.lamports_usd(fee, leg), leg, time.time(), 0, None, [unrelated],
+        ))
+        still = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(still["reserved_usd"], reserved)
+        self.assertEqual(still["rent_lamports"], solana_tx.TOKEN_ACCOUNT_RENT)
+        self._mark_remaining(case_id, 1_110_000)
+        _id, close_message = self._message(_route(quoted, 50, amount=1_110_000), when=time.time(), side="exit", ledger="live", case_id=case_id, close_mint=MINT)
+        signed_close, signature_close = self._signed(close_message)
+        closed_body = self._sol_fill(signed_close, fee, quoted, quoted + solana_tx.TOKEN_ACCOUNT_RENT, token_rent=solana_tx.TOKEN_ACCOUNT_RENT)
+        closed = self._confirm(case_id, live_submit.message_digest(close_message), signed_close, signature_close, closed_body)
+        self.assertTrue(closed["reconciled"], closed)
+        once = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(once["rent_lamports"], 0)
+        self.assertIn(rent_account, once["rent_released_accounts"])
+        released_reserved = once["reserved_usd"]
+        summary = live_gate_proof._fill_summary(closed_body)
+        db.exclusive(lambda conn: live_submit._apply_book(
+            conn, case_id, "exit", signature_close, summary["output_delta"], summary["in_amount"],
+            pyth_sponsored.lamports_usd(fee, leg), leg, time.time(),
+            summary["rent_lamports"], summary["rent_account"], summary["closed_accounts"],
+        ))
+        twice = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+        self.assertEqual(twice["reserved_usd"], released_reserved)
+        self.assertEqual(twice["rent_released_accounts"], once["rent_released_accounts"])
+
+    def test_a_bad_confirmed_fill_is_an_open_loss(self):
+        import json
+        from decimal import Decimal
+        import live_gate_proof
+        self.addCleanup(live_gate_proof._reset_for_tests)
+        self._arm()
+        self._clock = time.time()
+        foreign = solana_tx.b58encode(b"\x22" * 32)
+
+        def wsol_only(tx):
+            payer = solana_tx.decode_transaction(base64.b64decode(tx)).fee_payer
+            def row(amount):
+                return {
+                    "accountIndex": 2, "mint": solana_tx.NATIVE_MINT, "owner": payer,
+                    "uiTokenAmount": {"amount": amount, "decimals": 9},
+                }
+            return {"slot": 6, "transaction": tx, "meta": {
+                "err": None, "fee": 5000,
+                "preTokenBalances": [row("0")], "postTokenBalances": [row("5000000")],
+            }}
+
+        def missing(tx):
+            return {"slot": 6, "transaction": tx, "meta": {
+                "err": None, "fee": 5000, "preTokenBalances": [], "postTokenBalances": [],
+            }}
+
+        specs = [
+            (1_000_000, lambda tx: self._fill(tx, 5000, "0", pre="1000000"), "fill_anomaly"),
+            (1_100_000, wsol_only, "fill_unmatched"),
+            (1_200_000, lambda tx: self._fill(tx, 5000, "100", owner=foreign), "fill_unmatched"),
+            (1_300_000, missing, "fill_unmatched"),
+        ]
+        proved = False
+        for amount, build, reason in specs:
+            db.execute("DELETE FROM settings WHERE key = 'live_halt_review'")
+            case_id, message = self._message(_route(100, 50, amount=amount), when=time.time(), ledger="live")
+            digest = live_submit.message_digest(message)
+            signed, signature = self._signed(message)
+            if not proved:
+                self._prove_owned_reads(message)
+                proved = True
+            solana_rpc.TRANSPORT = lambda payload, signed=signed, signature=signature, build=build: {
+                "status": 200,
+                "body": {"result": signature} if payload["method"] == "sendTransaction" else (
+                    {"result": build(signed)} if payload["method"] == "getTransaction" else {"result": {"value": [{
+                        "confirmationStatus": "confirmed", "err": None, "slot": 8,
+                    }]}}
+                ),
+            }
+            done = live_submit.submit(case_id, digest, time.time(), self._reader(), lambda body, signed=signed: {"signed_tx": signed})
+            self.assertFalse(done["reconciled"], (reason, done))
+            self.assertEqual(done["reason"], reason, done)
+            status = db.query("SELECT status FROM live_submit WHERE message_sha256 = ?", (digest,))[0]["status"]
+            self.assertEqual(status, "unknown")
+            self.assertFalse(live_gate_proof.real_submit_observed())
+            row = db.query("SELECT stage, snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]
+            snap = json.loads(row["snapshot_json"])
+            self.assertEqual(row["stage"], "entry_failed")
+            self.assertLess(Decimal(snap["realized_pnl"]), 0)
+            self.assertEqual(snap["reserved_usd"], format(-Decimal(snap["realized_pnl"]), "f"))
+            self.assertTrue(snap["entry_funding"]["anomalous"])
+            logged = db.query("SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'", (case_id,))
+            body = json.loads(logged[0]["evidence_json"])
+            self.assertTrue(body["anomalous"])
+            self.assertGreater(body["slippage_bps"], 50)
+        totals = memecoin_desk.loss_totals()
+        self.assertTrue(totals["live_halts_new_entries"])
+        self.assertGreater(Decimal(totals["live_loss_usd"]), 0)
+
+    def _signed(self, message: str):
+        raw = bytearray(base64.b64decode(message))
+        raw[1:65] = b"\x11" * 64
+        signed_tx = base64.b64encode(bytes(raw)).decode()
+        return signed_tx, solana_tx.first_signature(signed_tx)
+
+    def _fill(self, signed_tx: str, fee: int, amount: str, pre: str = "0", owner: str | None = None) -> dict:
+        tx = solana_tx.decode_transaction(base64.b64decode(signed_tx))
+        import jupiter_route_v2
+        import live_gate_proof
+        import solana_jupiter
+        output = live_gate_proof._traded_output_mint(tx)
+        who = tx.fee_payer if owner is None else owner
+        output_index = self._ata_index(tx, output)
+        pre_rows = [{
+            "accountIndex": output_index, "mint": output, "owner": who,
+            "uiTokenAmount": {"amount": pre, "decimals": 6},
+        }]
+        post_rows = [{
+            "accountIndex": output_index, "mint": output, "owner": who,
+            "uiTokenAmount": {"amount": amount, "decimals": 6},
+        }]
+        if output == solana_tx.NATIVE_MINT and owner is None:
+            hop = next(item for item in tx.instructions if tx.static_keys[item.program_index] == solana_jupiter.PROGRAM_ID)
+            sold = tx.static_keys[hop.account_indexes[3]]
+            incoming = "0"
+            for item in tx.instructions:
+                if tx.static_keys[item.program_index] == solana_jupiter.PROGRAM_ID:
+                    parsed = jupiter_route_v2.parse(bytes(item.data))
+                    if parsed.get("ok") is True:
+                        incoming = str(parsed["in_amount"])
+            sold_index = self._ata_index(tx, sold)
+            pre_rows.append({
+                "accountIndex": sold_index, "mint": sold, "owner": who,
+                "uiTokenAmount": {"amount": incoming, "decimals": 6},
+            })
+            post_rows.append({
+                "accountIndex": sold_index, "mint": sold, "owner": who,
+                "uiTokenAmount": {"amount": "0", "decimals": 6},
+            })
+        return {
+            "slot": 6,
+            "transaction": signed_tx,
+            "meta": {"err": None, "fee": fee, "preTokenBalances": pre_rows, "postTokenBalances": post_rows},
+        }
+
+    def _ata_index(self, tx, mint: str) -> int:
+        ata = solana_tx.associated_token_address(tx.fee_payer, mint, solana_tx.TOKEN_PROGRAM)
+        return list(tx.static_keys).index(ata)
+
     def _prove_owned_reads(self, message: str) -> None:
         """Read Hermes, the Jupiter quote, and leave Helius up. The desk's own TLS records the proofs."""
         import json
@@ -348,6 +1198,9 @@ class LiveSubmitTests(unittest.TestCase):
         parsed = jupiter_route_v2.parse(route)
         quoted = str(parsed["quoted_out_amount"])
         amount = str(parsed["in_amount"])
+        hop = next(item for item in decoded.instructions if decoded.static_keys[item.program_index] == solana_jupiter.PROGRAM_ID)
+        left = decoded.static_keys[hop.account_indexes[3]]
+        right = decoded.static_keys[hop.account_indexes[4]]
         root = Path(tempfile.mkdtemp())
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(root / "ca.key"), "-out", str(root / "ca.pem"), "-days", "1", "-nodes", "-subj", "/CN=Desk Test CA"], check=True, capture_output=True)
         subprocess.run(["openssl", "req", "-newkey", "rsa:2048", "-keyout", str(root / "server.key"), "-out", str(root / "server.csr"), "-nodes", "-subj", "/CN=desk"], check=True, capture_output=True)
@@ -364,6 +1217,7 @@ class LiveSubmitTests(unittest.TestCase):
         listener.settimeout(0.5)
         port = listener.getsockname()[1]
         stop = threading.Event()
+        sent_tx = {"raw": None}
 
         def answer(head: bytes, rest: bytes) -> bytes:
             if b"hermes.pyth.network" in head:
@@ -376,17 +1230,74 @@ class LiveSubmitTests(unittest.TestCase):
                 }
                 return json.dumps(body).encode()
             if b"api.jup.ag" in head:
+                target = head.split(b"\r\n", 1)[0].decode("latin1")
+                query = {}
+                if "?" in target:
+                    import urllib.parse
+                    query = urllib.parse.parse_qs(target.split("?", 1)[1].split(" ", 1)[0])
+                input_mint = (query.get("inputMint") or [solana_tx.NATIVE_MINT])[0]
+                output_mint = (query.get("outputMint") or [MINT])[0]
                 body = {
-                    "inputMint": solana_tx.NATIVE_MINT,
-                    "outputMint": MINT,
+                    "inputMint": input_mint,
+                    "outputMint": output_mint,
                     "inAmount": amount,
                     "outAmount": quoted,
                     "expireAt": int(time.time()) + 120,
                 }
                 return json.dumps(body).encode()
             sent = json.loads(rest.decode() or "{}")
+            method = sent.get("method")
+            if method == "sendTransaction":
+                sent_tx["raw"] = sent["params"][0]
+                signature = solana_tx.first_signature(sent_tx["raw"])
+                return json.dumps({"jsonrpc": "2.0", "id": 1, "result": signature}).encode()
+            if method == "getSignatureStatuses":
+                return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"value": [{
+                    "confirmationStatus": "confirmed", "err": None, "slot": 9,
+                }]}}).encode()
+            if method == "getTransaction" and sent_tx["raw"]:
+                raw = sent_tx["raw"]
+                foreign = getattr(self, "_foreign_tx", None)
+                if isinstance(foreign, str) and foreign != "":
+                    raw = foreign
+                tx = solana_tx.decode_transaction(base64.b64decode(raw))
+                output = live_gate_proof._traded_output_mint(tx) or MINT
+                output_ata = solana_tx.associated_token_address(tx.fee_payer, output, solana_tx.TOKEN_PROGRAM)
+                output_index = list(tx.static_keys).index(output_ata)
+                forced = getattr(self, "_balance_index", None)
+                if isinstance(forced, int):
+                    output_index = forced
+                pre_rows = [{
+                    "accountIndex": output_index, "mint": output, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": "0", "decimals": 6},
+                }]
+                post_rows = [{
+                    "accountIndex": output_index, "mint": output, "owner": tx.fee_payer,
+                    "uiTokenAmount": {"amount": quoted, "decimals": 6},
+                }]
+                if output == solana_tx.NATIVE_MINT and not isinstance(forced, int):
+                    sold_ata = solana_tx.associated_token_address(tx.fee_payer, left, solana_tx.TOKEN_PROGRAM)
+                    sold_index = list(tx.static_keys).index(sold_ata)
+                    pre_rows.append({
+                        "accountIndex": sold_index, "mint": left, "owner": tx.fee_payer,
+                        "uiTokenAmount": {"amount": amount, "decimals": 6},
+                    })
+                    post_rows.append({
+                        "accountIndex": sold_index, "mint": left, "owner": tx.fee_payer,
+                        "uiTokenAmount": {"amount": "0", "decimals": 6},
+                    })
+                meta = {"err": None, "fee": 5000, "preTokenBalances": pre_rows, "postTokenBalances": post_rows}
+                loaded = getattr(self, "_loaded_addresses", None)
+                if isinstance(loaded, dict):
+                    meta["loadedAddresses"] = loaded
+                return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+                    "slot": 9,
+                    "transaction": raw,
+                    "meta": meta,
+                }}).encode()
             encoded = sent["params"][0]
             tx = solana_tx.decode_transaction(base64.b64decode(encoded))
+            output = live_gate_proof._traded_output_mint(tx) or MINT
             width = len(tx.static_keys)
             value = {
                 "err": None,
@@ -394,11 +1305,11 @@ class LiveSubmitTests(unittest.TestCase):
                 "unitsConsumed": 8000,
                 "fee": 5000,
                 "preTokenBalances": [{
-                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
+                    "accountIndex": 2, "mint": output, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": "0", "decimals": 6},
                 }],
                 "postTokenBalances": [{
-                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
+                    "accountIndex": 2, "mint": output, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": quoted, "decimals": 6},
                 }],
                 "preBalances": [1_000_000_000] + [1] * (width - 1),
@@ -474,16 +1385,16 @@ class LiveSubmitTests(unittest.TestCase):
         self.assertTrue(proved, status)
         self.assertTrue(live_gate_proof.closed("price_freshness_proven", MINT))
         quote = urllib.request.Request(
-            jupiter_swap_v2.order_url(solana_tx.NATIVE_MINT, MINT, amount),
+            jupiter_swap_v2.order_url(left, right, amount),
             headers={"accept": "application/json"},
         )
         status, _raw, proved = live_gate_proof.exchange(quote, 8, MINT)
         self.assertTrue(proved, status)
-        self.assertTrue(live_gate_proof.quote_ready(MINT, time.time(), input_mint=solana_tx.NATIVE_MINT, output_mint=MINT))
+        self.assertTrue(live_gate_proof.quote_ready(MINT, time.time(), input_mint=left, output_mint=right))
 
     def _rows(self):
         try:
-            return db.query("SELECT message_sha256, signature, status FROM live_submit")
+            return db.query("SELECT message_sha256, idempotency_key, signature, status FROM live_submit")
         except Exception:
             return []
 
@@ -495,32 +1406,42 @@ class LiveSubmitTests(unittest.TestCase):
         desk_loop.remaining_live_gates = lambda: [{"gate": "all", "closed": True}]
         self.assertTrue(live_submit.armed())
 
-    def _message(self, swap: bytes, price: int = 1_000, reserved: str = "1.00", when: float | None = None):
-        values, accounts = _pool(solana_tx.NATIVE_MINT, MINT)
-        message = _tx(_metas(solana_tx.NATIVE_MINT, MINT, values), swap, price=price, blockhash=BLOCK)
-        digest = live_submit.message_digest(message)
-        case_id = "case-%s-%s" % (digest[:8], reserved.replace(".", ""))
-        self._store(digest, message, case_id, reserved, when=NOW if when is None else when)
-        self._accounts = accounts
-        return case_id, message
-
-    def _store(self, digest: str, message: str, case_id: str, reserved: str = "1.00", when: float | None = None) -> None:
-        stamp = NOW if when is None else when
-        db.execute(
-            """
-            INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
-            VALUES (?, ?, 'protected', ?, 'paper', 'server', ?, ?)
-            """,
-            (case_id, MINT, '{"reserved_usd": "%s"}' % reserved, stamp, stamp),
+    def _message(self, swap: bytes, price: int = 1_000, reserved: str = "1.00", when: float | None = None, side: str = "entry", ledger: str = "paper", case_id: str | None = None, fund_mint: str | None = None, close_mint: str | None = None):
+        source, dest = (MINT, solana_tx.NATIVE_MINT) if side == "exit" else (solana_tx.NATIVE_MINT, MINT)
+        values, accounts = _pool(source, dest)
+        built = _tx(
+            _metas(source, dest, values), swap, price=price, blockhash=BLOCK,
+            side="sell" if side == "exit" else "buy", fund_mint=fund_mint, close_mint=close_mint,
         )
+        digest = live_submit.message_digest(built)
+        if case_id is None:
+            case_id = "case-%s-%s" % (digest[:8], reserved.replace(".", ""))
+        snapshot = '{"reserved_usd": "%s"}' % reserved
+        if side == "exit":
+            snapshot = '{"reserved_usd": "%s", "remaining_raw": %d}' % (reserved, int.from_bytes(swap[8:16], "little"))
+        self._store(digest, built, case_id, reserved, when=NOW if when is None else when, side=side, snapshot=snapshot, ledger=ledger)
+        self._accounts = accounts
+        return case_id, built
+
+    def _store(self, digest: str, message: str, case_id: str, reserved: str = "1.00", when: float | None = None, side: str = "entry", snapshot: str | None = None, ledger: str = "paper") -> None:
+        stamp = NOW if when is None else when
+        body = snapshot if snapshot is not None else '{"reserved_usd": "%s"}' % reserved
+        if db.query("SELECT id FROM memecoin_cases WHERE id = ?", (case_id,)) == []:
+            db.execute(
+                """
+                INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, ledger, ledger_provenance, created_at, updated_at)
+                VALUES (?, ?, 'protected', ?, ?, 'server', ?, ?)
+                """,
+                (case_id, MINT, body, ledger, stamp, stamp),
+            )
         db.execute(
             """
             INSERT INTO memecoin_reservations (
                 message_sha256, case_id, side, message_b64, router, blockhash, last_valid_block_height,
                 expire_at, ledger, ledger_provenance, created_at
-            ) VALUES (?, ?, 'entry', ?, 'jupiterz', ?, 200, ?, 'paper', 'server', ?)
+            ) VALUES (?, ?, ?, ?, 'jupiterz', ?, 200, ?, ?, 'server', ?)
             """,
-            (digest, case_id, message, BLOCK, stamp + 60, stamp),
+            (digest, case_id, side, message, BLOCK, stamp + 60, ledger, stamp),
         )
 
     def _reader(self):

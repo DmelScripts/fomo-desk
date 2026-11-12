@@ -186,6 +186,641 @@ def _one_owner_mint_delta(value: dict, owner: str, mint: str) -> int | None:
     return post[1] - pre[1]
 
 
+def _trade_legs(decoded):
+    """Source mint and destination mint on the single Jupiter hop."""
+    import solana_jupiter
+    found = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program != solana_jupiter.PROGRAM_ID:
+            continue
+        indexes = list(item.account_indexes)
+        if len(indexes) < 5:
+            return None
+        try:
+            source = decoded.static_keys[indexes[3]]
+            dest = decoded.static_keys[indexes[4]]
+        except (IndexError, TypeError):
+            return None
+        if found is not None:
+            return None
+        found = (source, dest)
+    return found
+
+
+def _route_amounts(decoded) -> tuple[int | None, int | None]:
+    import solana_jupiter
+    import jupiter_route_v2
+    route = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program == solana_jupiter.PROGRAM_ID and route is None:
+            route = bytes(item.data)
+    parsed = jupiter_route_v2.parse(route or b"")
+    if parsed.get("ok") is not True:
+        return None, None
+    incoming = parsed.get("in_amount")
+    quoted = parsed.get("quoted_out_amount")
+    if type(incoming) is not int or isinstance(incoming, bool) or incoming <= 0:
+        incoming = None
+    if type(quoted) is not int or isinstance(quoted, bool) or quoted <= 0:
+        quoted = None
+    return incoming, quoted
+
+
+def _sold_amount_matches(input_delta, in_amount) -> bool:
+    """A sell spends about the quoted input of the position mint."""
+    if type(input_delta) is not int or isinstance(input_delta, bool) or input_delta >= 0:
+        return False
+    if type(in_amount) is not int or isinstance(in_amount, bool) or in_amount <= 0:
+        return False
+    dropped = -input_delta
+    slack = max(1, in_amount // 100)
+    return abs(dropped - in_amount) <= slack
+
+
+def _loaded_lists(meta, decoded):
+    """Writable then readonly addresses the signed message is allowed to load.
+
+    A legacy message, or a v0 message with no lookup tables, rejects any loaded
+    address. A v0 message loads only as many addresses as its tables declare.
+    """
+    loaded = meta.get("loadedAddresses") if type(meta) is dict else None
+    if loaded is None:
+        writable, readonly = [], []
+    elif type(loaded) is not dict:
+        return None
+    else:
+        writable = loaded.get("writable") if "writable" in loaded else []
+        readonly = loaded.get("readonly") if "readonly" in loaded else []
+        if type(writable) is not list or type(readonly) is not list:
+            return None
+        if any(type(item) is not str or item == "" for item in writable + readonly):
+            return None
+    declared_w = sum(len(item.writable) for item in decoded.lookups)
+    declared_r = sum(len(item.readonly) for item in decoded.lookups)
+    if decoded.version != "v0" or not decoded.lookups:
+        if writable or readonly:
+            return None
+        return [], []
+    if len(writable) != declared_w or len(readonly) != declared_r:
+        return None
+    return writable, readonly
+
+
+def _keys_for(decoded, meta):
+    """Static keys from the signed message, then loaded writable, then readonly."""
+    lists = _loaded_lists(meta, decoded)
+    if lists is None:
+        return None
+    writable, readonly = lists
+    non_signers = len(decoded.static_keys) - decoded.required_signatures
+    if (
+        decoded.required_signatures < 1
+        or non_signers < 0
+        or decoded.readonly_signed > decoded.required_signatures
+        or decoded.readonly_unsigned > non_signers
+    ):
+        return None
+    return list(decoded.static_keys) + list(writable) + list(readonly), len(writable)
+
+
+def _is_writable(decoded, index: int, n_static: int, n_loaded_writable: int) -> bool:
+    if type(index) is not int or isinstance(index, bool) or index < 0:
+        return False
+    if index < n_static:
+        if index < decoded.required_signatures:
+            return index < decoded.required_signatures - decoded.readonly_signed
+        return index < n_static - decoded.readonly_unsigned
+    return index < n_static + n_loaded_writable
+
+
+def _ata_addresses(owner: str, mint: str) -> set[str]:
+    import solana_tx
+    found = set()
+    for program in (solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022):
+        try:
+            found.add(solana_tx.associated_token_address(owner, mint, program))
+        except Exception:
+            continue
+    return found
+
+
+def _resolved_delta(meta, decoded, keys, n_loaded_writable: int, owner: str, mint: str) -> int | None:
+    """One pre row and one post row for this owner and mint, on the same writable ATA.
+
+    A missing pre row is zero only when this transaction creates that ATA and the
+    account did not exist before. Any other gap is not a delta.
+    """
+    atas = _ata_addresses(owner, mint)
+    if not atas:
+        return None
+    pre_rows = meta.get("preTokenBalances")
+    post_rows = meta.get("postTokenBalances")
+    if not isinstance(pre_rows, list) or not isinstance(post_rows, list):
+        return None
+    n_static = len(decoded.static_keys)
+
+    def one(rows):
+        match = None
+        saw = False
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            if row.get("owner") != owner or row.get("mint") != mint:
+                continue
+            saw = True
+            parsed = _token_amount(row)
+            if parsed is None:
+                return None
+            index, amount = parsed
+            if index >= len(keys) or not _is_writable(decoded, index, n_static, n_loaded_writable):
+                return None
+            address = keys[index]
+            if address not in atas:
+                return None
+            if match is not None:
+                return None
+            match = (address, index, amount)
+        if saw and match is None:
+            return None
+        return match
+
+    pre = one(pre_rows)
+    post = one(post_rows)
+    if post is None:
+        return None
+    if pre is None:
+        if _owner_mint_rows(meta, owner, mint) and not _post_only(meta, owner, mint):
+            return None
+        if not _post_only(meta, owner, mint):
+            return None
+        if not _created_empty(meta, decoded, keys, post[0], post[1], owner, mint):
+            return None
+        return post[2]
+    if pre[0] != post[0]:
+        return None
+    return post[2] - pre[2]
+
+
+def _post_only(meta, owner: str, mint: str) -> bool:
+    """A post row for this owner and mint, and no pre row."""
+    pre = False
+    post = False
+    for name, flag in (("preTokenBalances", "pre"), ("postTokenBalances", "post")):
+        rows = meta.get(name)
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if isinstance(row, dict) and row.get("owner") == owner and row.get("mint") == mint:
+                if flag == "pre":
+                    pre = True
+                else:
+                    post = True
+    return post and not pre
+
+
+def _created_empty(meta, decoded, keys, address: str, index: int, owner: str, mint: str) -> bool:
+    """The signed message creates this ATA, and it held no lamports before."""
+    if keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return False
+    if not _message_creates_ata(decoded, address, owner, mint):
+        return False
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return False
+    pre, _post = balances
+    return pre[index] == 0
+
+
+def _message_creates_ata(decoded, address: str, owner: str, mint: str) -> bool:
+    """One create or createIdempotent for this ATA, owner, mint, and token program."""
+    import solana_tx
+    found = False
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            accounts = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return False
+        data = bytes(instruction.data)
+        if program != solana_tx.ASSOCIATED_TOKEN or data not in {bytes([0]), bytes([1])} or len(accounts) != 6:
+            continue
+        payer, ata, row_owner, row_mint, system, token_program = accounts
+        if system != solana_tx.SYSTEM_PROGRAM or token_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+            continue
+        if payer != owner or row_owner != owner or row_mint != mint or ata != address:
+            continue
+        try:
+            derived = solana_tx.associated_token_address(owner, mint, token_program)
+        except Exception:
+            return False
+        if derived != address:
+            continue
+        if found:
+            return False
+        found = True
+    return found
+
+
+def _lamport_table(meta, nkeys: int):
+    pre = meta.get("preBalances")
+    post = meta.get("postBalances")
+    if not isinstance(pre, list) or not isinstance(post, list) or len(pre) != nkeys or len(post) != nkeys:
+        return None
+    before, after = [], []
+    for left, right in zip(pre, post):
+        if type(left) is not int or type(right) is not int or isinstance(left, bool) or isinstance(right, bool):
+            return None
+        if left < 0 or right < 0:
+            return None
+        before.append(left)
+        after.append(right)
+    return before, after
+
+
+def _native_sol_output(meta, decoded, keys) -> int | None:
+    parts = _lamport_parts(meta, decoded, keys)
+    if parts is None:
+        return None
+    return parts["output"]
+
+
+def _lamport_parts(meta, decoded, keys):
+    """SOL unwrapped to the fee payer. None when the lamports are not attributable.
+
+    output = (post - pre) + fee - rent refunded by closing accounts that already
+    existed + rent left in accounts this transaction created and did not close.
+    A wSOL account created and closed here contributes no rent.
+    """
+    import solana_tx
+    if not keys or keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return None
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return None
+    pre, post = balances
+    fee = meta.get("fee")
+    if type(fee) is not int or isinstance(fee, bool) or fee < 0:
+        return None
+    try:
+        wsol = solana_tx.associated_token_address(decoded.fee_payer, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+    except Exception:
+        return None
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if creates is None or closes is None:
+        return None
+    attributed = set()
+    refund = 0
+    opened = 0
+    for address in set(creates) | set(closes):
+        if keys.count(address) != 1:
+            return None
+        index = keys.index(address)
+        before, after = pre[index], post[index]
+        if address in creates and address in closes:
+            if before != 0 or after != 0:
+                return None
+            attributed.add(index)
+            continue
+        if address in closes:
+            if after != 0:
+                return None
+            if before == 0:
+                attributed.add(index)
+                continue
+            if address == wsol and _token_amount_of(meta, "preTokenBalances", decoded.fee_payer, solana_tx.NATIVE_MINT) not in {None, 0}:
+                return None
+            refund += before
+            attributed.add(index)
+            continue
+        if before != 0 or after <= 0 or address == wsol:
+            return None
+        opened += after
+        attributed.add(index)
+    for index, (before, after) in enumerate(zip(pre, post)):
+        if index != 0 and index not in attributed and before != after:
+            return None
+    output = (post[0] - pre[0]) + fee - refund + opened
+    if output < 0:
+        return None
+    return {"output": output, "refund": refund, "opened": opened}
+
+
+def _ata_touches(decoded, owner: str, close: bool):
+    """ATA addresses this message creates, or closes back to the owner. None is ambiguous."""
+    import solana_tx
+    found = []
+    for instruction in decoded.instructions:
+        try:
+            program = decoded.static_keys[instruction.program_index]
+            accounts = [decoded.static_keys[item] for item in instruction.account_indexes]
+        except (IndexError, TypeError):
+            return None
+        data = bytes(instruction.data)
+        if not close and program == solana_tx.ASSOCIATED_TOKEN and data in {bytes([0]), bytes([1])} and len(accounts) == 6:
+            payer, ata, row_owner, _mint, system, token_program = accounts
+            if system != solana_tx.SYSTEM_PROGRAM or token_program not in {solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022}:
+                return None
+            if payer != owner or row_owner != owner:
+                return None
+            try:
+                derived = solana_tx.associated_token_address(owner, _mint, token_program)
+            except Exception:
+                return None
+            if ata != derived:
+                return None
+            found.append(ata)
+        elif close and program == solana_tx.TOKEN_PROGRAM and data == bytes([9]) and len(accounts) == 3:
+            account, dest, row_owner = accounts
+            if dest != owner or row_owner != owner:
+                return None
+            found.append(account)
+    if len(found) != len(set(found)):
+        return None
+    return found
+
+
+def _token_amount_of(meta, name: str, owner: str, mint: str):
+    rows = meta.get(name)
+    if not isinstance(rows, list):
+        return None
+    found = None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("owner") != owner or row.get("mint") != mint:
+            continue
+        parsed = _token_amount(row)
+        if parsed is None:
+            return None
+        if found is not None:
+            return None
+        found = parsed[1]
+    return found
+
+
+def _locked_ata(meta, decoded, keys, mint: str) -> str | None:
+    """The traded-mint ATA this message created and left open, if the lamports show it."""
+    import solana_tx
+    if not keys or type(mint) is not str or mint == "":
+        return None
+    balances = _lamport_table(meta, len(keys))
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if balances is None or creates is None or closes is None:
+        return None
+    pre, post = balances
+    for program in (solana_tx.TOKEN_PROGRAM, solana_tx.TOKEN_2022):
+        try:
+            ata = solana_tx.associated_token_address(decoded.fee_payer, mint, program)
+        except Exception:
+            continue
+        if ata not in creates or ata in closes or keys.count(ata) != 1:
+            continue
+        index = keys.index(ata)
+        if pre[index] == 0 and post[index] > 0:
+            return ata
+    return None
+
+
+def _ata_closed_out(meta, decoded, keys, address: str) -> bool:
+    """True when this exact account is closed to the fee payer and ends at zero lamports."""
+    if type(address) is not str or address == "" or not keys or keys.count(address) != 1:
+        return False
+    if keys[0] != decoded.fee_payer or decoded.static_keys[0] != decoded.fee_payer:
+        return False
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if not closes or address not in closes:
+        return False
+    balances = _lamport_table(meta, len(keys))
+    if balances is None:
+        return False
+    _before, after = balances
+    return after[keys.index(address)] == 0
+
+
+def _closed_accounts(meta, decoded, keys) -> list[str]:
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True) if keys else None
+    if not closes:
+        return []
+    return [address for address in closes if _ata_closed_out(meta, decoded, keys, address)]
+
+
+def _open_rent(meta, decoded, keys) -> int:
+    """Lamports left in ATAs this message created and did not close. Not a trade loss."""
+    if not keys:
+        return 0
+    balances = _lamport_table(meta, len(keys))
+    creates = _ata_touches(decoded, decoded.fee_payer, close=False)
+    closes = _ata_touches(decoded, decoded.fee_payer, close=True)
+    if balances is None or creates is None or closes is None:
+        return 0
+    pre, post = balances
+    total = 0
+    for address in creates:
+        if address in closes or keys.count(address) != 1:
+            continue
+        index = keys.index(address)
+        if pre[index] == 0 and post[index] > 0:
+            total += post[index]
+    return total
+
+
+def _fill_summary(result) -> dict | None:
+    """Owner+mint deltas for the hop. An index outside the signed keys is not a fill."""
+    if type(result) is not dict:
+        return None
+    meta = result.get("meta")
+    if type(meta) is not dict or meta.get("err") is not None:
+        return None
+    try:
+        import base64
+        import solana_tx
+        encoded = _transaction_b64(result)
+        if encoded is None:
+            return None
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return None
+    legs = _trade_legs(decoded)
+    if legs is None:
+        return None
+    source, dest = legs
+    fee = meta.get("fee")
+    if type(fee) is not int or isinstance(fee, bool) or fee < 0:
+        fee = None
+    keyed = _keys_for(decoded, meta)
+    accounts_ok = keyed is not None
+    output_delta = None
+    input_delta = None
+    rent_lamports = 0
+    rent_account = None
+    closed_accounts = []
+    if keyed is not None:
+        keys, n_loaded_writable = keyed
+        output_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest)
+        input_delta = _resolved_delta(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, source)
+        parts = _lamport_parts(meta, decoded, keys)
+        rent_lamports = parts["opened"] if parts is not None else _open_rent(meta, decoded, keys)
+        rent_account = _locked_ata(meta, decoded, keys, dest)
+        closed_accounts = _closed_accounts(meta, decoded, keys)
+        if dest == solana_tx.NATIVE_MINT and output_delta is None and not _bad_token_rows(meta, decoded, keys, n_loaded_writable, decoded.fee_payer, dest):
+            native = None if parts is None else parts["output"]
+            if native is None:
+                accounts_ok = False
+            else:
+                output_delta = native
+        elif _owner_mint_rows(meta, decoded.fee_payer, dest) and output_delta is None:
+            accounts_ok = False
+        if dest == solana_tx.NATIVE_MINT and _owner_mint_rows(meta, decoded.fee_payer, source) and input_delta is None:
+            accounts_ok = False
+    in_amount, quoted = _route_amounts(decoded)
+    positive = accounts_ok and type(output_delta) is int and not isinstance(output_delta, bool) and output_delta > 0
+    if positive and dest == solana_tx.NATIVE_MINT:
+        positive = type(input_delta) is int and not isinstance(input_delta, bool) and _sold_amount_matches(input_delta, in_amount)
+    return {
+        "mint": dest,
+        "input_mint": source,
+        "output_delta": output_delta,
+        "input_delta": input_delta,
+        "in_amount": in_amount,
+        "quoted_out": quoted,
+        "fee_lamports": fee,
+        "rent_lamports": rent_lamports,
+        "rent_account": rent_account,
+        "closed_accounts": closed_accounts,
+        "accounts_ok": accounts_ok,
+        "positive": positive is True,
+    }
+
+
+def _bad_token_rows(meta, decoded, keys, n_loaded_writable: int, owner: str, mint: str) -> bool:
+    """A present owner+mint row that does not resolve. Absence is not this failure."""
+    if not _owner_mint_rows(meta, owner, mint):
+        return False
+    return _resolved_delta(meta, decoded, keys, n_loaded_writable, owner, mint) is None
+
+
+def _owner_mint_rows(meta, owner: str, mint: str) -> bool:
+    for name in ("preTokenBalances", "postTokenBalances"):
+        rows = meta.get(name)
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if isinstance(row, dict) and row.get("owner") == owner and row.get("mint") == mint:
+                return True
+    return False
+
+
+def _result_signature(result) -> str | None:
+    """signatures[0] of a getTransaction body. Bytes and a listed signature must agree."""
+    transaction = result.get("transaction") if type(result) is dict else None
+    listed = None
+    if type(transaction) is dict:
+        sigs = transaction.get("signatures")
+        if type(sigs) is list and sigs and type(sigs[0]) is str and sigs[0] != "":
+            listed = sigs[0]
+    encoded = _transaction_b64(result)
+    embedded = None
+    if encoded is not None:
+        try:
+            import solana_tx
+            embedded = solana_tx.first_signature(encoded)
+        except Exception:
+            embedded = None
+    if listed is not None and embedded is not None and listed != embedded:
+        return None
+    return embedded if embedded is not None else listed
+
+
+def _tx_bound(result, signature: str, reference_b64: str) -> bool:
+    """The returned transaction is the one we signed, not another signature's fill."""
+    if type(result) is not dict or type(signature) is not str or signature == "" or type(reference_b64) is not str or reference_b64 == "":
+        return False
+    encoded = _transaction_b64(result)
+    if encoded is None or _result_signature(result) != signature:
+        return False
+    try:
+        import base64
+        import solana_tx
+        if solana_tx.message_bytes(encoded) != solana_tx.message_bytes(reference_b64):
+            return False
+        returned = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+        reference = solana_tx.decode_transaction(base64.b64decode(reference_b64, validate=True))
+    except Exception:
+        return False
+    if returned.fee_payer != reference.fee_payer:
+        return False
+    return list(returned.static_keys) == list(reference.static_keys)
+
+
+def _sent_binding(payload: str) -> dict | None:
+    """Message hash, fee payer, and account keys of the transaction we asked Helius to send."""
+    if type(payload) is not str or payload == "":
+        return None
+    try:
+        import base64
+        import hashlib
+        import solana_tx
+        decoded = solana_tx.decode_transaction(base64.b64decode(payload, validate=True))
+        local = solana_tx.first_signature(payload)
+        digest = hashlib.sha256(solana_tx.message_bytes(payload)).hexdigest()
+    except Exception:
+        return None
+    if local == "" or decoded.fee_payer == "":
+        return None
+    return {
+        "signature": local,
+        "message_sha256": digest,
+        "fee_payer": decoded.fee_payer,
+        "keys": list(decoded.static_keys),
+    }
+
+
+def _bound_to_note(result, signature: str, sent_body) -> bool:
+    """A getTransaction read matches the send this process recorded for that signature."""
+    if not isinstance(sent_body, dict) or _result_signature(result) != signature:
+        return False
+    encoded = _transaction_b64(result)
+    if encoded is None:
+        return False
+    try:
+        import base64
+        import hashlib
+        import solana_tx
+        digest = hashlib.sha256(solana_tx.message_bytes(encoded)).hexdigest()
+        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return False
+    keys = sent_body.get("keys")
+    return (
+        digest == sent_body.get("message_sha256")
+        and decoded.fee_payer == sent_body.get("fee_payer")
+        and type(keys) is list
+        and list(decoded.static_keys) == keys
+    )
+
+
+def _fill_matches(result) -> bool:
+    """A buy gained the traded mint. A sell gained wSOL and spent about the quoted input."""
+    summary = _fill_summary(result)
+    return isinstance(summary, dict) and summary.get("positive") is True
+
+
+def _transaction_b64(result) -> str | None:
+    transaction = result.get("transaction") if type(result) is dict else None
+    if type(transaction) is str and transaction != "":
+        return transaction
+    if type(transaction) is list and transaction and type(transaction[0]) is str and transaction[0] != "":
+        return transaction[0]
+    if type(transaction) is not dict:
+        return None
+    message = transaction.get("message")
+    if type(message) is str and message != "":
+        return message
+    return None
+
+
 def quote_age_ok(row, now, limit) -> bool:
     """The owned-read timestamp, not a caller clock planted in the body."""
     if not isinstance(row, dict) or row.get("ok") is not True:
@@ -533,7 +1168,7 @@ def _wire():
     global _CLOSED, _RESET, _EXCHANGE, _OWNED, _SEEN, _commit_verified, _handshake_host, _stack_intact, _NOTES
     global attributes_intact, monitored
     global _fresh, _lp_ok, _plan, _plan_dev, _plan_history
-    global quote_ready, preflight_observed
+    global quote_ready, preflight_observed, real_submit_observed, fresh_sol_leg
     secret = os.urandom(32)
     notes = {}
     lock = threading.Lock()
@@ -752,6 +1387,55 @@ def _wire():
                 ok = _sim_within_caps(params[0], value, now, seen(), fresh)
         return [(("preflight_ready", digest), {"at": now, "ok": ok is True, "until": None})]
 
+    def submit_rows(raw, parsed, now):
+        """A Helius send or confirmation this socket just read. The URL is not stored."""
+        if not isinstance(raw, (bytes, bytearray)) or type(parsed) is not dict or "error" in parsed:
+            return []
+        try:
+            sent = loads(bytes(raw))
+        except Exception:
+            return []
+        if type(sent) is not dict:
+            return []
+        method = sent.get("method")
+        params = sent.get("params")
+        if method == "sendTransaction" and type(params) is list and params and type(params[0]) is str:
+            binding = _sent_binding(params[0])
+            result_sig = parsed.get("result")
+            if binding is None:
+                return []
+            local = binding["signature"]
+            body = {
+                "message_sha256": binding["message_sha256"],
+                "fee_payer": binding["fee_payer"],
+                "keys": binding["keys"],
+            }
+            ok = type(result_sig) is str and result_sig == local
+            return [(("submit_sent", local), {"at": now, "ok": ok, "until": None, "body": body})]
+        if method == "getSignatureStatuses" and type(params) is list and params and type(params[0]) is list and params[0]:
+            signature = params[0][0]
+            if type(signature) is not str or signature == "":
+                return []
+            result = parsed.get("result")
+            values = result.get("value") if type(result) is dict else None
+            item = values[0] if type(values) is list and values else None
+            ok = (
+                type(item) is dict
+                and item.get("err") is None
+                and item.get("confirmationStatus") in {"confirmed", "finalized"}
+            )
+            return [(("submit_status", signature), {"at": now, "ok": ok, "until": None})]
+        if method == "getTransaction" and type(params) is list and params and type(params[0]) is str:
+            signature = params[0]
+            result = parsed.get("result")
+            sent = seen().get(("submit_sent", signature))
+            sent_body = sent.get("body") if isinstance(sent, dict) else None
+            bound = _bound_to_note(result, signature, sent_body)
+            summary = _fill_summary(result) if bound else None
+            ok = bound and isinstance(summary, dict) and summary.get("positive") is True
+            return [(("real_submit", signature), {"at": now, "ok": ok, "until": None, "body": summary if ok else None})]
+        return []
+
     def seal(url, parsed, mint, history, request_body=None) -> None:
         if not check():
             return
@@ -760,8 +1444,11 @@ def _wire():
         host = split(url).hostname if type(url) is str else None
         if host == "mainnet.helius-rpc.com":
             rows.extend(sim_rows(request_body, parsed, moment))
+            rows.extend(submit_rows(request_body, parsed, moment))
         if rows:
             save(rows)
+        if _submit_ready(seen(), moment):
+            submit_mark["closed"] = True
 
     def commit(sock, url, parsed, mint, history) -> None:
         host = split(url).hostname if type(url) is str else None
@@ -878,9 +1565,57 @@ def _wire():
                 return True
         return False
 
+    submit_mark = {"closed": False}
+
+    def _submit_ready(current, moment) -> bool:
+        """Send, confirmed status, and one owner+mint fill, all from this socket."""
+        if not isinstance(current, dict):
+            return False
+        for key, row in current.items():
+            if type(key) is not tuple or len(key) != 2 or key[0] != "real_submit":
+                continue
+            if not fresh(row, moment) or row.get("ok") is not True:
+                continue
+            signature = key[1]
+            if not isinstance(signature, str) or signature == "":
+                continue
+            sent = current.get(("submit_sent", signature))
+            status = current.get(("submit_status", signature))
+            if fresh(sent, moment) and sent.get("ok") is True and fresh(status, moment) and status.get("ok") is True:
+                return True
+        return False
+
+    def real_submit_observed(mint=None, now=None) -> bool:
+        """Closed only after seal saw a confirmed fill. A note write does not flip this."""
+        return submit_mark["closed"] is True
+
+    def fresh_sol_leg(now=None):
+        """The SOL/USD note this process read. A caller-supplied price is not a leg."""
+        moment = clock() if now is None else now
+        if isinstance(moment, bool) or not isinstance(moment, (int, float)):
+            return None
+        current = seen()
+        for key, row in current.items():
+            if type(key) is not tuple or len(key) != 2 or key[0] != "price_freshness_proven":
+                continue
+            if not fresh(row, moment):
+                continue
+            body = row.get("body")
+            if not isinstance(body, dict):
+                continue
+            return {
+                "fresh": True,
+                "used": True,
+                "price": body.get("price"),
+                "conf": body.get("conf"),
+                "expo": body.get("expo"),
+            }
+        return None
+
     def reset() -> None:
         with lock:
             notes.clear()
+        submit_mark["closed"] = False
 
     view = types.MappingProxyType(notes)
     snapshots = {"classes": (), "functions": (), "methods": ()}
@@ -1063,6 +1798,8 @@ def _wire():
     monitored = names
     quote_ready = quote_ready
     preflight_observed = preflight_observed
+    real_submit_observed = real_submit_observed
+    fresh_sol_leg = fresh_sol_leg
     _OwnedTransport._note = note
     _OwnedTransport.handle_request = handle
     mod = sys.modules[__name__]
