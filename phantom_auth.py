@@ -268,31 +268,54 @@ def _watch(child: subprocess.Popen, home: Path, timeout_s: float) -> None:
     _verify()
 
 
-def _verify() -> None:
-    global _VERIFIED_BY_RUN
-    if subprocess.run is not _RUN:
-        _VERIFIED_BY_RUN = False
-        return
-    binary = _binary()
-    home = _home()
-    try:
-        done = _RUN(
-            [binary, "wallet", "addresses", "--format", "json"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_child_env(home, binary),
-            cwd=str(home),
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        with _LOCK:
-            _FLOW["state"] = "failed"
-        log.info("phantom login failed")
-        return
-    text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
-    _apply_classification(_classify(text, done.returncode), from_run=True)
+def _bind_address_check():
+    """The gate bit lives here. Only this function's subprocess call can set it."""
+    run = subprocess.run
+    proof = {"mark": None}
+
+    def verify() -> None:
+        if subprocess.run is not run:
+            proof["mark"] = None
+            return
+        binary = _binary()
+        home = _home()
+        try:
+            done = run(
+                [binary, "wallet", "addresses", "--format", "json"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_child_env(home, binary),
+                cwd=str(home),
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proof["mark"] = None
+            with _LOCK:
+                _FLOW["state"] = "failed"
+            log.info("phantom login failed")
+            return
+        text = (done.stdout + done.stderr).decode("utf-8", "replace")[:MAX_CAPTURE]
+        result = _classify(text, done.returncode)
+        _apply_classification(result)
+        if (
+            subprocess.run is run
+            and result.get("state") == "observed"
+            and result.get("wallet_id") == phantom_transport.REQUIRED_WALLET_ID
+            and result.get("address") == phantom_transport.REQUIRED_WALLET
+        ):
+            proof["mark"] = object()
+        else:
+            proof["mark"] = None
+
+    def from_subprocess() -> bool:
+        return subprocess.run is run and proof["mark"] is not None
+
+    def clear() -> None:
+        proof["mark"] = None
+
+    return verify, from_subprocess, clear
 
 
 def _append(raw: str, chunk: bytes) -> str:
@@ -342,9 +365,8 @@ def _fail_closed(child: subprocess.Popen) -> None:
     log.info("phantom login failed")
 
 
-def _apply_classification(result: dict, from_run: bool = False) -> None:
-    global _VERIFIED_BY_RUN
-    _VERIFIED_BY_RUN = bool(from_run) and result.get("state") == "observed" and subprocess.run is _RUN
+def _apply_classification(result: dict) -> None:
+    """Update the view. This does not close the readiness gate."""
     with _LOCK:
         _FLOW["verify"] = result["verify"]
         _FLOW["approval_url"] = None
@@ -550,8 +572,7 @@ def _cached_evidence() -> dict | None:
     return {"state": body["state"], "source": body["source"], "at": body["at"]}
 
 
-_RUN = subprocess.run
-_VERIFIED_BY_RUN = False
+_verify, _auth_from_subprocess, _clear_auth_proof = _bind_address_check()
 
 
 def reverify_on_startup() -> dict:
@@ -566,7 +587,7 @@ def reverify_on_startup() -> dict:
 
 def server_auth_closed(now: float | None = None) -> bool:
     """The readiness gate. A cached, stale, or stand-in identity check stays open."""
-    if subprocess.run is not _RUN or _VERIFIED_BY_RUN is not True:
+    if _auth_from_subprocess() is not True:
         return False
     try:
         view = account_view()
@@ -678,8 +699,7 @@ def _kill(proc: subprocess.Popen | None) -> None:
 
 
 def reset_for_tests() -> None:
-    global _VERIFIED_BY_RUN
-    _VERIFIED_BY_RUN = False
+    _clear_auth_proof()
     with _LOCK:
         proc = _FLOW["process"]
         _FLOW.update({

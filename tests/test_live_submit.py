@@ -394,11 +394,11 @@ class LiveSubmitTests(unittest.TestCase):
                 "unitsConsumed": 8000,
                 "fee": 5000,
                 "preTokenBalances": [{
-                    "mint": MINT, "owner": tx.fee_payer,
+                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": "0", "decimals": 6},
                 }],
                 "postTokenBalances": [{
-                    "mint": MINT, "owner": tx.fee_payer,
+                    "accountIndex": 2, "mint": MINT, "owner": tx.fee_payer,
                     "uiTokenAmount": {"amount": quoted, "decimals": 6},
                 }],
                 "preBalances": [1_000_000_000] + [1] * (width - 1),

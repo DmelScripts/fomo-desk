@@ -731,10 +731,75 @@ class LiveGateTests(unittest.TestCase):
             self.assertFalse(gate["closed"])
         finally:
             phantom_auth.subprocess.run = original_run
-        phantom_auth._apply_classification({
+        observed = {
             "state": "observed",
             "wallet_id": "eba28e4f-6b99-4543-af72-c7d1b008ce4e",
             "address": "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t",
             "verify": {},
-        })
+        }
+        phantom_auth._apply_classification(observed)
         self.assertFalse(phantom_auth.server_auth_closed())
+        try:
+            phantom_auth._apply_classification(observed, from_run=True)
+        except TypeError:
+            pass
+        self.assertFalse(phantom_auth.server_auth_closed())
+
+    def test_simulation_output_is_the_traded_mint_not_the_first_row(self):
+        from tests.test_jupiter_route_v2 import _metas, _pool, _route, _tx
+        token = solana_tx.b58encode(b"\x55" * 32)
+        owner = "7AFJbqsX2UeK7ZW5M1gbXWjiKCai2CJWHpCzXe7woC7t"
+        wsol = solana_tx.NATIVE_MINT
+        now = 1_700_000_000.0
+        notes = {("price_freshness_proven", token): {"ok": True, "at": now, "body": {"price": 100, "conf": 0, "expo": 0}}}
+
+        def fresh(row, moment):
+            return isinstance(row, dict) and row.get("ok") is True
+
+        def balances(rows):
+            return {
+                "err": None,
+                "logs": ["Program log: Instruction: Swap"],
+                "unitsConsumed": 8000,
+                "fee": 5000,
+                "preTokenBalances": [item[0] for item in rows],
+                "postTokenBalances": [item[1] for item in rows],
+            }
+
+        def pair(mint, pre, post, index):
+            def row(amount):
+                return {
+                    "accountIndex": index, "mint": mint, "owner": owner,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6},
+                }
+            return row(pre), row(post)
+
+        def check(message, rows):
+            return live_gate_proof._sim_within_caps(message, balances(rows), now, notes, fresh)
+
+        buy_values, _accounts = _pool(wsol, token)
+        buy = _tx(_metas(wsol, token, buy_values), _route(100, 50))
+        wsol_big = pair(wsol, 0, 5_000_000, 1)
+        token_good = pair(token, 0, 100, 2)
+        token_tiny = pair(token, 0, 1, 2)
+        self.assertTrue(check(buy, [wsol_big, token_good]))
+        self.assertTrue(check(buy, [token_good, wsol_big]))
+        self.assertFalse(check(buy, [wsol_big, token_tiny]))
+        self.assertFalse(check(buy, [token_tiny, wsol_big]))
+        self.assertFalse(check(buy, [wsol_big]))
+        self.assertFalse(check(buy, [token_good, token_good]))
+        self.assertFalse(check(buy, []))
+        shifted = pair(token, 0, 100, 3)
+        self.assertFalse(check(buy, [(token_good[0], shifted[1])]))
+
+        sell_values, _sell_accounts = _pool(token, wsol)
+        sell = _tx(_metas(token, wsol, sell_values), _route(100, 50), side="exit")
+        wsol_good = pair(wsol, 0, 100, 4)
+        wsol_tiny = pair(wsol, 0, 1, 4)
+        token_big = pair(token, 0, 5_000_000, 5)
+        self.assertTrue(check(sell, [token_big, wsol_good]))
+        self.assertTrue(check(sell, [wsol_good, token_big]))
+        self.assertFalse(check(sell, [token_big, wsol_tiny]))
+        self.assertFalse(check(sell, [wsol_tiny, token_big]))
+        self.assertFalse(check(sell, [token_big]))
+        self.assertFalse(check(sell, [wsol_good, pair(wsol, 0, 100, 6)]))

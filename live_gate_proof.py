@@ -50,7 +50,6 @@ def quote_max_age() -> float:
 def _sim_within_caps(transaction_b64: str, value: dict, now, notes, fresh_row) -> bool:
     """Fee and output from the transaction that was simulated. No URL, no key."""
     import base64
-    from decimal import Decimal
     try:
         import jupiter_route_v2
         import memecoin_desk
@@ -94,34 +93,97 @@ def _sim_within_caps(transaction_b64: str, value: dict, now, notes, fresh_row) -
         break
     if sol is None:
         return False
-    mint = None
-    decimals = None
-    for row in value.get("postTokenBalances") or []:
-        if not isinstance(row, dict) or row.get("owner") != decoded.fee_payer:
-            continue
-        if isinstance(row.get("mint"), str) and row["mint"] != "":
-            mint = row["mint"]
-            ui = row.get("uiTokenAmount") if isinstance(row.get("uiTokenAmount"), dict) else {}
-            if type(ui.get("decimals")) is int and not isinstance(ui.get("decimals"), bool):
-                decimals = ui["decimals"]
-            break
-    if mint is None:
+    output_mint = _traded_output_mint(decoded)
+    if output_mint is None:
         return False
-    checked = preflight_sim.assess(
-        value,
-        output_mint=mint,
-        owner=decoded.fee_payer,
-        account_count=len(decoded.static_keys),
-        quoted_out=quoted,
-        sol=sol,
-        dex_fee_usd=Decimal("0"),
-        outflow_lamports=0,
-        reserved_usd=None,
-        cu_price=cu_price,
-        cu_limit=cu_limit,
-        mint_decimals=decimals,
-    )
-    return checked.get("ok") is True
+    delta = _one_owner_mint_delta(value, decoded.fee_payer, output_mint)
+    if delta is None:
+        return False
+    minimum = jupiter_route_v2.minimum_out(quoted, 50)
+    if minimum is None or delta < minimum:
+        return False
+    fee = preflight_sim._simulated_fee(value, cu_price, cu_limit)
+    if fee is None:
+        return False
+    network = pyth_sponsored.lamports_usd(fee, sol)
+    if network is None or network > memecoin_desk.MAX_FEE:
+        return False
+    return True
+
+
+def _traded_output_mint(decoded) -> str | None:
+    """Buy output is the non-wSOL destination. Sell output is wSOL, not the fee payer's lamports."""
+    import solana_jupiter
+    import solana_tx
+    found = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program != solana_jupiter.PROGRAM_ID:
+            continue
+        indexes = list(item.account_indexes)
+        if len(indexes) < 5:
+            return None
+        try:
+            source = decoded.static_keys[indexes[3]]
+            dest = decoded.static_keys[indexes[4]]
+        except (IndexError, TypeError):
+            return None
+        if found is not None:
+            return None
+        found = (source, dest)
+    if found is None:
+        return None
+    source, dest = found
+    if source == solana_tx.NATIVE_MINT and dest != solana_tx.NATIVE_MINT:
+        return dest
+    if dest == solana_tx.NATIVE_MINT and source != solana_tx.NATIVE_MINT:
+        return dest
+    return None
+
+
+def _token_amount(row: dict) -> tuple[int, int] | None:
+    ui = row.get("uiTokenAmount")
+    if not isinstance(ui, dict):
+        return None
+    amount = ui.get("amount")
+    decimals = ui.get("decimals")
+    if type(amount) is not str or not amount.isdigit():
+        return None
+    if type(decimals) is not int or isinstance(decimals, bool) or decimals < 0:
+        return None
+    index = row.get("accountIndex")
+    if type(index) is not int or isinstance(index, bool) or index < 0:
+        return None
+    return index, int(amount)
+
+
+def _one_owner_mint_delta(value: dict, owner: str, mint: str) -> int | None:
+    """Exactly one pre row and one post row, same account, this owner and mint."""
+    pre_rows = value.get("preTokenBalances")
+    post_rows = value.get("postTokenBalances")
+    if not isinstance(pre_rows, list) or not isinstance(post_rows, list):
+        return None
+
+    def one(rows):
+        match = None
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            if row.get("owner") != owner or row.get("mint") != mint:
+                continue
+            parsed = _token_amount(row)
+            if parsed is None:
+                return None
+            if match is not None:
+                return None
+            match = parsed
+        return match
+
+    pre = one(pre_rows)
+    post = one(post_rows)
+    if pre is None or post is None or pre[0] != post[0]:
+        return None
+    return post[1] - pre[1]
 
 
 def quote_age_ok(row, now, limit) -> bool:

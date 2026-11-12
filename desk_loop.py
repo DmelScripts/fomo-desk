@@ -2787,16 +2787,24 @@ def live_simulate(case_id: str, message_sha256: str, now: float) -> dict:
     if info.get("ok") is not True:
         return quiet | {"reason": info.get("reason") or "helius_api_key_missing"}
     try:
-        rows = db.query("SELECT message_b64 FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?", (message_sha256, case_id))
+        rows = db.query(
+            "SELECT message_b64, side FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?",
+            (message_sha256, case_id),
+        )
     except Exception:
         return quiet | {"reason": "simulation_message"}
-    if len(rows) != 1 or not isinstance(rows[0]["message_b64"], str):
+    if len(rows) != 1 or not isinstance(rows[0]["message_b64"], str) or rows[0]["side"] not in {"entry", "exit"}:
         return quiet | {"reason": "simulation_message"}
     encoded = rows[0]["message_b64"]
     try:
+        import memecoin_desk
         import solana_tx
+        case = memecoin_desk._case(case_id)
+        if case is None or not isinstance(case["mint"], str):
+            return quiet | {"reason": "simulation_message"}
+        output_mint = case["mint"] if rows[0]["side"] == "entry" else solana_tx.NATIVE_MINT
         decoded = solana_tx.decode_transaction(__import__("base64").b64decode(encoded, validate=True))
-        output_account = solana_tx.associated_token_address(decoded.fee_payer, solana_tx.NATIVE_MINT, solana_tx.TOKEN_PROGRAM)
+        output_account = solana_tx.associated_token_address(decoded.fee_payer, output_mint, solana_tx.TOKEN_PROGRAM)
     except Exception:
         return quiet | {"reason": "simulation_message"}
     payload = preflight_sim.rpc_body(encoded, output_account)
