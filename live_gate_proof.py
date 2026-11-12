@@ -186,45 +186,104 @@ def _one_owner_mint_delta(value: dict, owner: str, mint: str) -> int | None:
     return post[1] - pre[1]
 
 
-def _fill_matches(result) -> bool:
-    """One owner+mint+accountIndex pair on the confirmed transaction. Fee-payer lamports are not the fill."""
-    if type(result) is not dict:
+def _trade_legs(decoded):
+    """Source mint and destination mint on the single Jupiter hop."""
+    import solana_jupiter
+    found = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program != solana_jupiter.PROGRAM_ID:
+            continue
+        indexes = list(item.account_indexes)
+        if len(indexes) < 5:
+            return None
+        try:
+            source = decoded.static_keys[indexes[3]]
+            dest = decoded.static_keys[indexes[4]]
+        except (IndexError, TypeError):
+            return None
+        if found is not None:
+            return None
+        found = (source, dest)
+    return found
+
+
+def _route_amounts(decoded) -> tuple[int | None, int | None]:
+    import solana_jupiter
+    import jupiter_route_v2
+    route = None
+    for item in decoded.instructions:
+        program = decoded.static_keys[item.program_index]
+        if program == solana_jupiter.PROGRAM_ID and route is None:
+            route = bytes(item.data)
+    parsed = jupiter_route_v2.parse(route or b"")
+    if parsed.get("ok") is not True:
+        return None, None
+    incoming = parsed.get("in_amount")
+    quoted = parsed.get("quoted_out_amount")
+    if type(incoming) is not int or isinstance(incoming, bool) or incoming <= 0:
+        incoming = None
+    if type(quoted) is not int or isinstance(quoted, bool) or quoted <= 0:
+        quoted = None
+    return incoming, quoted
+
+
+def _sold_amount_matches(input_delta, in_amount) -> bool:
+    """A sell spends about the quoted input of the position mint."""
+    if type(input_delta) is not int or isinstance(input_delta, bool) or input_delta >= 0:
         return False
+    if type(in_amount) is not int or isinstance(in_amount, bool) or in_amount <= 0:
+        return False
+    dropped = -input_delta
+    slack = max(1, in_amount // 100)
+    return abs(dropped - in_amount) <= slack
+
+
+def _fill_summary(result) -> dict | None:
+    """Owner+mint deltas for the hop. A missing pair is not a positive fill."""
+    if type(result) is not dict:
+        return None
     meta = result.get("meta")
     if type(meta) is not dict or meta.get("err") is not None:
-        return False
+        return None
     try:
         import base64
         import solana_tx
         encoded = _transaction_b64(result)
         if encoded is None:
-            return False
-        decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
-    except Exception:
-        return False
-    mint = _traded_output_mint(decoded)
-    if mint is None:
-        return False
-    return _one_owner_mint_delta(meta, decoded.fee_payer, mint) is not None
-
-
-def _fill_summary(result) -> dict | None:
-    try:
-        import base64
-        import solana_tx
-        encoded = _transaction_b64(result)
+            return None
         decoded = solana_tx.decode_transaction(base64.b64decode(encoded, validate=True))
     except Exception:
         return None
-    mint = _traded_output_mint(decoded)
-    meta = result.get("meta") if type(result) is dict else None
-    if mint is None or type(meta) is not dict:
+    legs = _trade_legs(decoded)
+    if legs is None:
         return None
-    delta = _one_owner_mint_delta(meta, decoded.fee_payer, mint)
+    source, dest = legs
     fee = meta.get("fee")
-    if delta is None or type(fee) is not int or isinstance(fee, bool) or fee < 0:
-        return None
-    return {"mint": mint, "output_delta": delta, "fee_lamports": fee}
+    if type(fee) is not int or isinstance(fee, bool) or fee < 0:
+        fee = None
+    output_delta = _one_owner_mint_delta(meta, decoded.fee_payer, dest)
+    input_delta = _one_owner_mint_delta(meta, decoded.fee_payer, source)
+    in_amount, quoted = _route_amounts(decoded)
+    positive = type(output_delta) is int and not isinstance(output_delta, bool) and output_delta > 0
+    if positive and dest == solana_tx.NATIVE_MINT:
+        positive = _sold_amount_matches(input_delta, in_amount)
+    return {
+        "mint": dest,
+        "input_mint": source,
+        "output_delta": output_delta,
+        "input_delta": input_delta,
+        "in_amount": in_amount,
+        "quoted_out": quoted,
+        "fee_lamports": fee,
+        "positive": positive is True,
+    }
+
+
+def _fill_matches(result) -> bool:
+    """A buy gained the traded mint. A sell gained wSOL and spent about the quoted input."""
+    summary = _fill_summary(result)
+    return isinstance(summary, dict) and summary.get("positive") is True
 
 
 def _transaction_b64(result) -> str | None:

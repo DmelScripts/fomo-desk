@@ -187,7 +187,7 @@ def _poll_status(signature: str) -> dict:
         time.sleep(0.25)
 
 
-def _pull_fill(signature: str) -> dict | None:
+def _pull_result(signature: str):
     posted = _rpc({
         "jsonrpc": "2.0",
         "id": 1,
@@ -197,9 +197,13 @@ def _pull_fill(signature: str) -> dict | None:
     if posted.get("ok") is not True or not isinstance(posted.get("body"), dict):
         return None
     result = posted["body"].get("result")
-    import live_gate_proof
-    if not live_gate_proof._fill_matches(result):
+    return result if isinstance(result, dict) else None
+
+
+def _observed_fill(result):
+    if not isinstance(result, dict):
         return None
+    import live_gate_proof
     summary = live_gate_proof._fill_summary(result)
     return summary if isinstance(summary, dict) else None
 
@@ -222,18 +226,41 @@ def _reconcile(case_id: str, message_sha256: str, signature: str, status: str, n
             value = _status_value(posted)
             confirmed = isinstance(value, dict) and value.get("err") is None and value.get("confirmationStatus") in _CONFIRMED
         if not confirmed:
-            summary = _pull_fill(signature)
-            if summary is None:
-                return refused | {"reason": "open_liability"}
-            return _commit(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, summary)
+            _pull_result(signature)
+            return refused | {"reason": "open_liability"}
     if not confirmed:
         return refused | {"reason": "confirmation_pending"}
-    summary = _pull_fill(signature)
-    return _commit(case_id, message_sha256, signature, value, now, summary)
+    summary = _observed_fill(_pull_result(signature))
+    if isinstance(summary, dict) and summary.get("positive") is True:
+        return _commit(case_id, message_sha256, signature, value, now, summary)
+    return _open_liability(case_id, message_sha256, signature, value if isinstance(value, dict) else {}, now, summary)
+
+
+def _liability_reason(summary) -> str:
+    delta = None if not isinstance(summary, dict) else summary.get("output_delta")
+    if type(delta) is int and not isinstance(delta, bool) and delta <= 0:
+        return "fill_anomaly"
+    if isinstance(summary, dict) and summary.get("positive") is not True and type(summary.get("output_delta")) is int:
+        return "fill_anomaly"
+    return "fill_unmatched"
+
+
+def _open_liability(case_id: str, message_sha256: str, signature: str, value: dict, now: float, summary) -> dict:
+    """Confirmed on the status RPC, but not a positive fill. The claim stays unknown."""
+    refused = _blank() | {"sign": True, "signature": signature, "reconciled": False}
+    reason = _liability_reason(summary)
+    try:
+        db.exclusive(lambda conn: _book_anomaly(conn, case_id, message_sha256, signature, value, now, summary, reason))
+    except Exception:
+        _mark_unknown(message_sha256, signature)
+        return refused | {"reason": "receipt_unrecorded"}
+    return refused | {"reason": reason}
 
 
 def _commit(case_id: str, message_sha256: str, signature: str, value: dict, now: float, summary) -> dict:
     refused = _blank() | {"sign": True, "signature": signature}
+    if not isinstance(summary, dict) or summary.get("positive") is not True:
+        return _open_liability(case_id, message_sha256, signature, value, now, summary)
     evidence = {
         "message_sha256": message_sha256,
         "signature": signature,
@@ -276,10 +303,159 @@ def _finish(conn, case_id: str, mint, message_sha256: str, signature: str, evide
     )
     if cursor.rowcount != 1:
         return False
+    if not isinstance(summary, dict) or summary.get("positive") is not True:
+        return False
     memecoin_desk._log(conn, case_id, mint, "live_submit", "pass", None, "sendTransaction", evidence, float(now))
-    if isinstance(summary, dict):
-        _book_fill(conn, case_id, mint, message_sha256, signature, evidence, now, summary)
+    _book_fill(conn, case_id, mint, message_sha256, signature, evidence, now, summary)
     return True
+
+
+def _slippage_bps(quoted, delta):
+    """Basis points given up versus the quote. A missing or non-positive output is the whole quote."""
+    from decimal import Decimal
+    if type(quoted) is not int or isinstance(quoted, bool) or quoted <= 0:
+        return None
+    if type(delta) is not int or isinstance(delta, bool):
+        return 10_000
+    if delta >= quoted:
+        return 0
+    return int((Decimal(quoted - delta) * Decimal(10_000) / Decimal(quoted)).to_integral_value(rounding="ROUND_CEILING"))
+
+
+def _book_anomaly(conn, case_id: str, message_sha256: str, signature: str, value: dict, now: float, summary, reason: str) -> None:
+    """A confirmed status that is not a positive fill. Loss is booked and new entries stop."""
+    import json
+    from decimal import Decimal
+    import live_gate_proof
+    import pyth_sponsored
+    reservation = conn.execute(
+        "SELECT side, message_b64, ledger, ledger_provenance FROM memecoin_reservations WHERE message_sha256 = ?",
+        (message_sha256,),
+    ).fetchone()
+    side = reservation["side"] if reservation is not None else "entry"
+    route = {}
+    if reservation is not None:
+        try:
+            decoded = solana_tx.decode_transaction(__import__("base64").b64decode(reservation["message_b64"], validate=True))
+            route = _route(decoded)
+        except Exception:
+            route = {}
+    delta = None if not isinstance(summary, dict) else summary.get("output_delta")
+    if type(delta) is not int or isinstance(delta, bool):
+        delta = None
+    fee_lamports = None if not isinstance(summary, dict) else summary.get("fee_lamports")
+    if type(fee_lamports) is not int or isinstance(fee_lamports, bool) or fee_lamports < 0:
+        fee_lamports = None
+    quoted = None if not isinstance(summary, dict) else summary.get("quoted_out")
+    if type(quoted) is not int or isinstance(quoted, bool):
+        quoted = route.get("quoted_out_amount") if route.get("ok") is True else None
+    amount_in = None if not isinstance(summary, dict) else summary.get("in_amount")
+    if type(amount_in) is not int or isinstance(amount_in, bool) or amount_in <= 0:
+        amount_in = route.get("in_amount") if route.get("ok") is True else None
+    leg = live_gate_proof.fresh_sol_leg(now)
+    slippage_bps = _slippage_bps(quoted, delta)
+    fee_usd = pyth_sponsored.lamports_usd(fee_lamports, leg) if isinstance(leg, dict) and type(fee_lamports) is int else None
+    loss = None
+    if side == "entry" and isinstance(leg, dict) and type(amount_in) is int and amount_in > 0:
+        spent = pyth_sponsored.lamports_usd(amount_in, leg)
+        if spent is not None:
+            loss = spent if fee_usd is None else (spent + fee_usd).quantize(Decimal("0.01"))
+    receipt = {
+        "signature": signature,
+        "side": side,
+        "mint": None if not isinstance(summary, dict) else summary.get("mint"),
+        "amount_in": amount_in,
+        "amount_out": delta,
+        "quoted_out": quoted,
+        "fee_lamports": fee_lamports,
+        "fee_usd": None if fee_usd is None else format(fee_usd, "f"),
+        "loss_usd": None if loss is None else format(loss, "f"),
+        "slippage_bps": slippage_bps,
+        "anomalous": True,
+        "halt_new_entries": True,
+        "reason": reason,
+    }
+    if _leaks(receipt):
+        raise RuntimeError("receipt_unrecorded")
+    conn.execute(
+        "UPDATE live_submit SET status = 'unknown' WHERE message_sha256 = ? AND signature = ? AND status != 'confirmed'",
+        (message_sha256, signature),
+    )
+    already = conn.execute(
+        "SELECT evidence_json FROM memecoin_log WHERE case_id = ? AND stage = 'live_fill'",
+        (case_id,),
+    ).fetchall()
+    if any(signature in (row["evidence_json"] or "") for row in already):
+        _halt_entries(conn, now)
+        return
+    case_row = conn.execute("SELECT mint FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
+    mint = None if case_row is None else case_row["mint"]
+    memecoin_desk._log(conn, case_id, mint, "live_fill", "fail", reason, "getTransaction", receipt, float(now))
+    memecoin_desk._log(
+        conn, case_id, mint, "live_halt_review", "fail", reason, "getTransaction",
+        {"fee_usd": receipt["fee_usd"], "slippage_bps": slippage_bps, "loss_usd": receipt["loss_usd"], "anomalous": True},
+        float(now),
+    )
+    _halt_entries(conn, now)
+    if loss is None:
+        return
+    case_ledger = conn.execute("SELECT ledger, ledger_provenance, snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
+    live_book = (
+        case_ledger is not None and reservation is not None
+        and case_ledger["ledger"] == "live" and case_ledger["ledger_provenance"] == "server"
+        and reservation["ledger"] == "live" and reservation["ledger_provenance"] == "server"
+    )
+    body = {}
+    if case_ledger is not None:
+        try:
+            body = json.loads(case_ledger["snapshot_json"])
+        except Exception:
+            body = {}
+    if not isinstance(body, dict):
+        body = {}
+    body["realized_pnl"] = format(-loss, "f")
+    body["pnl_live"] = True
+    body["reserved_usd"] = format(loss, "f")
+    body["entry_funding"] = {
+        "signature": signature,
+        "source": "entry_receipt",
+        "proven": False,
+        "anomalous": True,
+        "tokens_out": 0,
+        "fee_usd": format(fee_usd, "f") if fee_usd is not None else "0.00",
+    }
+    conn.execute(
+        "UPDATE memecoin_cases SET snapshot_json = ?, stage = 'entry_failed', updated_at = ? WHERE id = ?",
+        (json.dumps(body, sort_keys=True), float(now), case_id),
+    )
+    if not live_book or side != "entry":
+        return
+    slot = value.get("slot") if isinstance(value, dict) else 0
+    if type(slot) is not int or isinstance(slot, bool) or slot < 0:
+        slot = 0
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO memecoin_entry_receipts (
+            signature, case_id, message_sha256, slot, qty, cost_basis_lamports, network_fee_lamports,
+            dex_fee_lamports, fee_usd, failed, ledger, ledger_provenance
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, 0, ?, 1, 'live', 'server')
+        """,
+        (
+            signature, case_id, message_sha256, slot, amount_in,
+            fee_lamports if type(fee_lamports) is int else 0,
+            format(fee_usd, "f") if fee_usd is not None else "0.00",
+        ),
+    )
+
+
+def _halt_entries(conn, now: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO settings (key, value, updated_at) VALUES ('live_halt_review', '1', ?)
+        ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at
+        """,
+        (float(now),),
+    )
 
 
 def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, evidence: dict, now: float, summary: dict) -> None:
@@ -291,8 +467,10 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
     delta = summary.get("output_delta")
     fee_lamports = summary.get("fee_lamports")
     output_mint = summary.get("mint")
-    if type(delta) is not int or isinstance(delta, bool) or type(fee_lamports) is not int or isinstance(fee_lamports, bool):
+    if type(delta) is not int or isinstance(delta, bool):
         return
+    if type(fee_lamports) is not int or isinstance(fee_lamports, bool) or fee_lamports < 0:
+        fee_lamports = None
     reservation = conn.execute(
         "SELECT side, message_b64 FROM memecoin_reservations WHERE message_sha256 = ?",
         (message_sha256,),
@@ -305,17 +483,22 @@ def _book_fill(conn, case_id: str, mint, message_sha256: str, signature: str, ev
             route = _route(decoded)
         except Exception:
             route = {}
-    quoted = route.get("quoted_out_amount") if route.get("ok") is True else None
-    amount_in = route.get("in_amount") if route.get("ok") is True else None
+    quoted = summary.get("quoted_out")
+    if type(quoted) is not int or isinstance(quoted, bool):
+        quoted = route.get("quoted_out_amount") if route.get("ok") is True else None
+    amount_in = summary.get("in_amount")
+    if type(amount_in) is not int or isinstance(amount_in, bool):
+        amount_in = route.get("in_amount") if route.get("ok") is True else None
     leg = live_gate_proof.fresh_sol_leg(now)
-    fee_usd = pyth_sponsored.lamports_usd(fee_lamports, leg) if isinstance(leg, dict) else None
-    slippage_bps = None
-    if type(quoted) is int and not isinstance(quoted, bool) and quoted > 0 and delta >= 0:
-        if delta >= quoted:
-            slippage_bps = 0
-        else:
-            slippage_bps = int((Decimal(quoted - delta) * Decimal(10_000) / Decimal(quoted)).to_integral_value(rounding="ROUND_CEILING"))
-    halt = fee_usd is None or fee_usd > memecoin_desk.MAX_FEE or (slippage_bps is not None and slippage_bps > owner_slippage.BPS)
+    fee_usd = pyth_sponsored.lamports_usd(fee_lamports, leg) if isinstance(leg, dict) and type(fee_lamports) is int else None
+    slippage_bps = _slippage_bps(quoted, delta)
+    halt = (
+        summary.get("positive") is not True
+        or fee_usd is None
+        or fee_usd > memecoin_desk.MAX_FEE
+        or slippage_bps is None
+        or slippage_bps > owner_slippage.BPS
+    )
     receipt = {
         "signature": signature,
         "side": side,
