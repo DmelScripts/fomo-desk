@@ -44,7 +44,7 @@ class TestExitPolicy(unittest.TestCase):
         self.assertTrue(body["approved"])
         self.assertTrue(body["effective"])
         self.assertEqual(body["rules"]["stop_pct_from_entry"], "6")
-        self.assertEqual(body["rules"]["trail_arm_profit_pct"], "20")
+        self.assertEqual(body["rules"]["trail_arm_profit_pct"], "12")
         self.assertEqual(body["rules"]["trail_drop_from_peak_pct"], "12")
         self.assertEqual(body["rules"]["timeout_h"], "3")
         self.assertEqual(body["rules"]["timeout_min_profit_pct"], "5")

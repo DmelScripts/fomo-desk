@@ -1,4 +1,8 @@
-"""One server-owned pass of the six-role desk. It is not armed and it does not send.
+"""One server-owned pass of the six-role desk.
+
+The loop arms only when the owner has authorized it and RugCheck, Helius, and
+Solana Tracker are configured in this process. Arming does not sign or send.
+Per-token reads still fail closed when that mint's data is missing.
 
 Scout reads DexScreener's documented token-pairs response. Filter reads the
 mint account from the public RPC. LP lock, rug history, holder growth,
@@ -35,22 +39,47 @@ def _authorized() -> bool:
 
 
 def _ready_reasons() -> list[str]:
-    """Missing evidence. A test cannot delete these by replacing this function's constant result."""
+    """Provider configuration for the loop. A missing per-token read is not one of these.
+
+    LP comes from the wired RugCheck adapter. Rug history also needs the Helius
+    key. Holder growth needs the Solana Tracker key. StalkChain is not a
+    readiness input. The live gates stay on their own observed reads.
+    """
     reasons = []
     import owner_slippage
     if owner_slippage.ceiling_bps() != owner_slippage.BPS:
         reasons.append("owner_slippage_unapproved")
-    if stalkchain_adapter.UNPROVEN:
-        reasons.append("lp_fields_unpublished")
-        reasons.append("rug_history_unpublished")
-    reasons.append("holder_growth_unproven")
+    providers = _scheduler_providers()
+    if not providers["lp"]:
+        reasons.append("lp_provider_unready")
+    if not providers["rug_history"]:
+        reasons.append("rug_history_provider_unready")
+    if not providers["holder_growth"]:
+        reasons.append("holder_growth_provider_unready")
     if db_setting("memecoin_entry_halt") == "1":
         reasons.append("entry_halt")
-    if not _process_has_env("HELIUS_API_KEY"):
+    if not providers["helius_key"]:
         reasons.append("helius_api_key_missing")
-    if not _process_has_env("SOLANA_TRACKER_API_KEY"):
+    if not providers["tracker_key"]:
         reasons.append("solana_tracker_api_key_missing")
     return reasons
+
+
+def _scheduler_providers() -> dict:
+    """Which readers this process can call. A key is not a per-token proof."""
+    import cross_source
+    import desk_providers
+    wired = cross_source.fetcher_is(desk_providers.production_fetch)
+    tracker_key = _process_has_env("SOLANA_TRACKER_API_KEY")
+    helius_key = _process_has_env("HELIUS_API_KEY")
+    rugcheck = wired and desk_providers.configured().get("rugcheck") is True
+    return {
+        "lp": rugcheck,
+        "rug_history": rugcheck and helius_key,
+        "holder_growth": wired and tracker_key,
+        "helius_key": helius_key,
+        "tracker_key": tracker_key,
+    }
 
 
 def _process_has_env(name: str) -> bool:
@@ -5438,14 +5467,60 @@ def _open_no_redirect(req):
         return exc.code, payload
 
 
+def _paper_dry_run() -> bool:
+    """PAPER plus the explicit dry-run flag. LIVE never uses this path."""
+    import os
+    if os.environ.get("DESK_SIM_DRY_RUN") != "1":
+        return False
+    try:
+        import db
+        return db.get_setting("mode", "PAPER") != "LIVE"
+    except Exception:
+        return False
+
+
+def _paper_dry_simulate(request: dict) -> dict:
+    """simulateTransaction only. The body is built here so it cannot be a send."""
+    if not _paper_dry_run():
+        raise RuntimeError("method_refused")
+    transaction = request.get("transaction")
+    if not isinstance(transaction, str) or transaction.strip() == "" or len(transaction) > 20000:
+        raise RuntimeError("method_refused")
+    if request.get("sigVerify") is True:
+        raise RuntimeError("method_refused")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "simulateTransaction",
+        "params": [transaction, {
+            "encoding": "base64",
+            "sigVerify": False,
+            "replaceRecentBlockhash": True,
+            "commitment": "processed",
+        }],
+    }
+    import solana_rpc
+    try:
+        return solana_rpc.post(payload)
+    except solana_rpc.RpcRefused as exc:
+        raise RuntimeError(exc.reason) from None
+
+
 def public_reader(request: dict) -> dict:
-    """Documented public reads. StalkChain is one POST to a known tool, not an open URL."""
+    """Documented public reads. StalkChain is one POST to a known tool, not an open URL.
+
+    PAPER with DESK_SIM_DRY_RUN=1 may simulate. Sending stays refused.
+    """
     import json
     import os
     import urllib.request
     if not isinstance(request, dict):
         raise RuntimeError("host_refused")
-    if request.get("method") in {"simulateTransaction", "getFeeForMessage"} or request.get("purpose") in {"whirlpool_pool", "whirlpool_tick_array", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
+    if request.get("method") in {"sendTransaction", "signTransaction"}:
+        raise RuntimeError("method_refused")
+    if request.get("method") == "simulateTransaction":
+        return _paper_dry_simulate(request)
+    if request.get("method") == "getFeeForMessage" or request.get("purpose") in {"whirlpool_pool", "whirlpool_tick_array", "token_deposit", "rent_exemption", "mint_decimals", "token_account"}:
         raise RuntimeError("method_refused")
     url = request.get("url")
     if isinstance(url, str) and url.startswith("https://data.stalkchain.com"):

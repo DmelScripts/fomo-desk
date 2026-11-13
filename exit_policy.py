@@ -17,7 +17,7 @@ import db
 _KEY = "exit_policy_approval"
 _RULES = {
     "stop_pct_from_entry": "6",
-    "trail_arm_profit_pct": "20",
+    "trail_arm_profit_pct": "12",
     "trail_drop_from_peak_pct": "12",
     "timeout_h": "3",
     "timeout_min_profit_pct": "5",
@@ -26,7 +26,7 @@ _RULES = {
 }
 _SETTINGS = (
     ("stop_pct", "6"),
-    ("trail_start_pct", "20"),
+    ("trail_start_pct", "12"),
     ("trail_pct", "12"),
     ("timeout_h", "3"),
     ("timeout_min_gain_pct", "5"),

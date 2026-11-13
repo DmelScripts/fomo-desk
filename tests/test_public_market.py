@@ -312,7 +312,8 @@ class PublicAdapterTests(unittest.TestCase):
         raw = base64.b64decode(bought["instruction_data_b64"])
         self.assertEqual(raw, provided[-1])
         self.assertEqual(__import__("hashlib").sha256(raw).hexdigest(), bought["instruction_sha256"])
-        self.assertIn("lp_fields_unpublished", desk_loop.scheduler_status()["ready_because"])
+        self.assertNotIn("lp_fields_unpublished", desk_loop.scheduler_status()["ready_because"])
+        self.assertIn("holder_growth_provider_unready", desk_loop.scheduler_status()["ready_because"])
         self.assertFalse(desk_loop.scheduler_status()["armed"])
 
         opened = memecoin_desk.scout({
