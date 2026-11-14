@@ -87,6 +87,8 @@ async def lifespan(_app: FastAPI):
     ensure_data_dir()
     init_db()
     install_secret_redaction()
+    import desk_loop
+    desk_loop.configure_observe_logs()
     import phantom_auth
     phantom_auth.reverify_on_startup()
     import desk_providers

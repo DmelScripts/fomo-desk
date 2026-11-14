@@ -83,57 +83,69 @@ def parse_boost_mint(payload) -> dict:
 
 
 def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
-    """One Solana pair for this mint. FDV is reported and then ignored."""
-    refused = {"ok": False, "source": SOURCE, "mint": mint, "fdv_used_as_market_cap": False, "not_proven": list(NOT_PROVEN)}
+    """The deepest Solana wSOL pair for this mint. FDV is reported and then ignored."""
+    refused = {"ok": False, "source": SOURCE, "mint": mint, "fdv_used_as_market_cap": False, "not_proven": list(NOT_PROVEN), "stage": "scout"}
     if not isinstance(payload, list):
         return refused | {"reason": "pairs_shape"}
-    chosen = None
+    import cross_source
+    bases = []
+    rejected_chain = False
     for pair in payload:
-        if not isinstance(pair, dict) or pair.get("chainId") != "solana":
+        if not isinstance(pair, dict):
             continue
         base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
-        if base.get("address") == mint:
-            chosen = pair
-            break
-    if chosen is None:
-        return refused | {"reason": "pair_missing"}
-    import cross_source
+        if base.get("address") != mint:
+            continue
+        if not cross_source.chain_ok(pair):
+            rejected_chain = True
+            continue
+        bases.append(pair)
+    if not bases:
+        if rejected_chain:
+            return refused | {"reason": "chain_rejected", "candidate_pools": 0}
+        return refused | {"reason": "pair_missing", "candidate_pools": 0}
     selected, why = cross_source.select_pair(payload, mint, "")
+    count = len(cross_source.sol_pairs(payload, mint))
     if selected is None:
-        quote = chosen.get("quoteToken")
+        quote = bases[0].get("quoteToken")
         if not isinstance(quote, dict) or not isinstance(quote.get("address"), str) or quote.get("address") == "":
-            return refused | {"reason": "quote_unknown"}
+            return refused | {"reason": "quote_unknown", "candidate_pools": count}
         if why == "pool_ambiguous":
-            return refused | {"reason": "pool_ambiguous"}
-        if quote.get("address") != __import__("solana_tx").NATIVE_MINT:
-            return refused | {"reason": "quote_not_sol"}
-        return refused | {"reason": why or "pool_missing"}
+            return refused | {"reason": "pool_ambiguous", "candidate_pools": count}
+        if not cross_source.quote_is_sol(quote) and count == 0:
+            return refused | {"reason": "quote_not_sol", "candidate_pools": 0}
+        return refused | {"reason": why or "pool_missing", "candidate_pools": count}
     chosen = selected
+    noted = _pair_note(chosen, count)
+
+    def stop(reason, **extra):
+        return refused | noted | {"reason": reason, "fdv_present": chosen.get("fdv") is not None} | extra
+
     created = chosen.get("pairCreatedAt")
     if isinstance(created, bool) or not isinstance(created, int):
-        return refused | {"reason": "pair_created_at"}
+        return stop("pair_created_at")
     change = _nested(chosen.get("priceChange"), "h1")
     liquidity = chosen.get("liquidity")
     txns = chosen.get("txns") if isinstance(chosen.get("txns"), dict) else {}
     hour = txns.get("h1") if isinstance(txns.get("h1"), dict) else {}
     if chosen.get("marketCap") is None:
-        return refused | {"reason": "market_cap_missing", "fdv_present": chosen.get("fdv") is not None}
+        return stop("market_cap_missing")
     market_cap = _num(chosen.get("marketCap"))
     if market_cap is None:
-        return refused | {"reason": "market_cap"}
-    if liquidity is None:
-        return refused | {"reason": "liquidity_missing", "fdv_present": chosen.get("fdv") is not None}
-    liq = _num(_nested(liquidity, "usd"))
+        return stop("market_cap")
+    if liquidity is None or not isinstance(liquidity, dict) or "usd" not in liquidity:
+        return stop("liquidity_missing")
+    liq = _num(liquidity.get("usd"))
     if liq is None:
-        return refused | {"reason": "liquidity"}
+        return stop("liquidity")
     price = _num(chosen.get("priceUsd"))
     if price is None:
-        return refused | {"reason": "price"}
+        return stop("price")
     if change is None:
-        return refused | {"reason": "price_change_h1_missing"}
+        return stop("price_change_h1_missing")
     move = _num(change)
     if move is None:
-        return refused | {"reason": "price"}
+        return stop("price")
     return {
         "ok": True,
         "reason": None,
@@ -154,6 +166,7 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             "liquidity_usd": format(liq, "f"),
             "price_usd": format(price, "f"),
             "price_change_h1": format(move, "f"),
+            "candidate_pools": count,
         },
         "evidence": {
             "pair_address": chosen.get("pairAddress") if isinstance(chosen.get("pairAddress"), str) else None,
@@ -162,6 +175,17 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
             "h1_sells": hour.get("sells"),
             "fdv": chosen.get("fdv"),
         },
+    }
+
+
+def _pair_note(chosen: dict, count: int) -> dict:
+    liquidity = chosen.get("liquidity") if isinstance(chosen.get("liquidity"), dict) else {}
+    usd = liquidity.get("usd") if isinstance(liquidity, dict) else None
+    return {
+        "pair_address": chosen.get("pairAddress") if isinstance(chosen.get("pairAddress"), str) else None,
+        "liquidity_usd": None if usd is None else str(usd),
+        "candidate_pools": count,
+        "fdv_used_as_market_cap": False,
     }
 
 

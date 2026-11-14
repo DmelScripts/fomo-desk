@@ -139,9 +139,15 @@ def arm_test_fetcher() -> None:
             }
             return bundle.get(mapped.get(kind, kind))
         cap = _TEST_CAPS.get(mint, "1000000")
-        pid = pair_id if isinstance(pair_id, str) and pair_id else pair_id_for(mint or "")
+        extra = _TEST_DEX.get(mint, {})
+        noted = extra.get("pairAddress")
+        if isinstance(pair_id, str) and pair_id:
+            pid = pair_id
+        elif isinstance(noted, str) and noted != "":
+            pid = noted
+        else:
+            pid = pair_id_for(mint or "")
         if kind == "dex":
-            extra = _TEST_DEX.get(mint, {})
             row = {
                 "pairAddress": pid,
                 "baseToken": {"address": mint},
@@ -331,17 +337,46 @@ def _iter_pairs(dex_body):
             yield pair
 
 
-def select_pair(dex_body, mint: str, pair_id: str = ""):
-    """The one native-wSOL pool for this mint.
+def _pair_liquidity_usd(pair: dict):
+    box = pair.get("liquidity") if isinstance(pair.get("liquidity"), dict) else None
+    if not isinstance(box, dict) or "usd" not in box:
+        return None
+    return _money(box.get("usd"))
 
-    More than one such pool is pool_ambiguous. None is pool_missing. A supplied
-    pair id must equal that pool's pairAddress exactly; base58 is not case-folded.
+
+def _pair_volume_h24(pair: dict):
+    box = pair.get("volume") if isinstance(pair.get("volume"), dict) else None
+    if not isinstance(box, dict) or "h24" not in box:
+        return None
+    return _money(box.get("h24"))
+
+
+def chain_ok(pair: dict) -> bool:
+    """Solana only.
+
+    DexScreener's token-pairs payload sometimes omits chainId. A missing key,
+    or a JSON null, is that omission and stays eligible. Any other value,
+    including a non-string such as 1, is rejected.
+    """
+    if not isinstance(pair, dict):
+        return False
+    if "chainId" not in pair or pair.get("chainId") is None:
+        return True
+    return pair.get("chainId") == "solana"
+
+
+def sol_pairs(dex_body, mint: str) -> list:
+    """Solana pairs whose base is this mint and whose quote is wSOL.
+
+    Duplicate pair addresses are dropped. chain_ok decides the chain.
     """
     if not isinstance(mint, str) or mint == "":
-        return None, "pool_missing"
+        return []
     matched = []
     seen = set()
     for pair in _iter_pairs(dex_body):
+        if not chain_ok(pair):
+            continue
         base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
         address = pair.get("pairAddress")
         if base.get("address") != mint or not isinstance(address, str) or address in seen:
@@ -350,14 +385,63 @@ def select_pair(dex_body, mint: str, pair_id: str = ""):
             continue
         seen.add(address)
         matched.append(pair)
+    return matched
+
+
+def select_pinned_pair(dex_body, pair_address: str):
+    """The pair already chosen. This does not rank a replacement.
+
+    A pin that is absent, on the wrong chain, or not quoted in wSOL is
+    pinned_pair_missing.
+    """
+    if not isinstance(pair_address, str) or pair_address == "":
+        return None, "pinned_pair_missing"
+    found = None
+    for pair in _iter_pairs(dex_body):
+        if pair.get("pairAddress") != pair_address:
+            continue
+        found = pair
+        break
+    if not isinstance(found, dict) or not chain_ok(found) or not quote_is_sol(found.get("quoteToken")):
+        return None, "pinned_pair_missing"
+    return found, None
+
+
+def select_pair(dex_body, mint: str, pair_id: str = ""):
+    """The SOL pool this mint will be judged on.
+
+    A supplied pair id must be that exact pairAddress. Otherwise the SOL pair
+    with the highest liquidity.usd wins, then the higher 24h volume, then the
+    greater pairAddress. A pair that cannot be ranked because no SOL pool has
+    liquidity.usd is pool_ambiguous when more than one SOL pool exists, and
+    the lone pool when only one exists so the caller can report the missing
+    field. None of the SOL pools is pool_missing. FDV is not liquidity.
+    """
+    if not isinstance(mint, str) or mint == "":
+        return None, "pool_missing"
+    matched = sol_pairs(dex_body, mint)
+    if isinstance(pair_id, str) and pair_id != "":
+        for pair in matched:
+            if pair.get("pairAddress") == pair_id:
+                return pair, None
+        return None, "pool_missing"
     if not matched:
         return None, "pool_missing"
-    if len(matched) > 1:
+    ranked = [pair for pair in matched if _pair_liquidity_usd(pair) is not None]
+    if not ranked:
+        if len(matched) == 1:
+            return matched[0], None
         return None, "pool_ambiguous"
-    only = matched[0]
-    if isinstance(pair_id, str) and pair_id != "" and only.get("pairAddress") != pair_id:
-        return None, "pool_missing"
-    return only, None
+
+    def rank(pair):
+        volume = _pair_volume_h24(pair)
+        return (
+            _pair_liquidity_usd(pair),
+            volume if volume is not None else Decimal("-1"),
+            pair.get("pairAddress") or "",
+        )
+
+    return max(ranked, key=rank), None
 
 
 def _matched_market(rugcheck_body, pool_id):
@@ -401,7 +485,10 @@ def liquidity_check(dex_body, rugcheck_body, tracker_body, mint: str = "", pair_
     DexScreener marketCap and the Solana Tracker pool marketCap.usd, and only
     after those two caps agree within MCAP_SOURCE_TOLERANCE.
     """
-    pair, why = select_pair(dex_body, mint, pair_id)
+    if isinstance(pair_id, str) and pair_id != "":
+        pair, why = select_pinned_pair(dex_body, pair_id)
+    else:
+        pair, why = select_pair(dex_body, mint, "")
     if pair is None:
         return {"status": "FAIL-CLOSED", "reason": why or "pool_missing"}
     pool_id = pair["pairAddress"]
@@ -656,8 +743,12 @@ def judge(bundle: dict) -> dict:
     st = bundle.get("tracker")
     mint = bundle.get("mint") if isinstance(bundle.get("mint"), str) else ""
     pair_id = bundle.get("pair_id") if isinstance(bundle.get("pair_id"), str) else ""
-    selected, why = select_pair(dex, mint, pair_id)
-    pool_id = selected["pairAddress"] if selected is not None else _base_pair_id(dex, mint)
+    if pair_id != "":
+        selected, why = select_pinned_pair(dex, pair_id)
+        pool_id = pair_id if selected is not None else ""
+    else:
+        selected, why = select_pair(dex, mint, "")
+        pool_id = selected["pairAddress"] if selected is not None else _base_pair_id(dex, mint)
     checks = {
         "quote_sol": _quote_status(dex, mint, pair_id),
         "mint_freeze_revoked": authority_check(rc, st, pool_id),

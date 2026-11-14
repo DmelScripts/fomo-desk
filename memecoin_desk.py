@@ -121,37 +121,60 @@ def scout(pair: dict, now: float | None = None) -> dict:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
     import cross_source
     cross_source.take_failure()
-    selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    dex_body = cross_source.fetch_dex(mint)
+    pin = pair.get("pair_address") if isinstance(pair.get("pair_address"), str) else ""
+    if pin != "":
+        selected, why = cross_source.select_pinned_pair(dex_body, pin)
+        if selected is None:
+            why = "pinned_pair_missing"
+    else:
+        selected, why = cross_source.select_pair(dex_body, mint, "")
+    pool_count = len(cross_source.sol_pairs(dex_body, mint))
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
+
+    def scout_kill(reason: str) -> dict:
+        killed = _kill(None, mint, "scout", reason, "dexscreener")
+        noted = {
+            "stage": "scout",
+            "candidate_pools": pool_count,
+            "fdv_used_as_market_cap": False,
+        }
+        if isinstance(pair_address, str) and pair_address != "":
+            noted["pair_address"] = pair_address
+        box = selected.get("liquidity") if isinstance(selected, dict) and isinstance(selected.get("liquidity"), dict) else None
+        if isinstance(box, dict) and "usd" in box:
+            noted["liquidity_usd"] = str(box.get("usd"))
+        return killed | noted
+
     if not isinstance(pair_address, str) or pair_address == "":
-        return _kill(None, mint, "scout", cross_source.take_failure() or why or "pool_missing", "dexscreener")
+        return scout_kill(cross_source.take_failure() or why or "pool_missing")
     created_ms = selected.get("pairCreatedAt") if isinstance(selected, dict) else None
     if type(created_ms) is not int or created_ms < 10**12:
-        return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
+        return scout_kill("pair_created_at")
     age = clock - (Decimal(created_ms) / Decimal(1000))
     if age < MIN_AGE_S or age > MAX_AGE_S:
-        return _kill(None, mint, "scout", "age", "dexscreener")
+        return scout_kill("age")
     if "marketCap" not in selected:
-        return _kill(None, mint, "scout", "market_cap_missing", "dexscreener")
+        return scout_kill("market_cap_missing")
     mcap = _money(selected.get("marketCap"))
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
-        return _kill(None, mint, "scout", "market_cap", "dexscreener")
+        return scout_kill("market_cap")
     other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None:
-        return _kill(None, mint, "scout", cross_source.take_failure() or "market_cap_unconfirmed", "dexscreener")
+        return scout_kill(cross_source.take_failure() or "market_cap_unconfirmed")
     if other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
-        return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
+        return scout_kill("market_cap_unconfirmed")
     liquidity = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
     if not isinstance(liquidity, dict) or "usd" not in liquidity:
-        return _kill(None, mint, "scout", "liquidity_missing", "dexscreener")
+        return scout_kill("liquidity_missing")
     liq = _money(liquidity.get("usd"))
     if liq is None:
-        return _kill(None, mint, "scout", "liquidity", "dexscreener")
+        return scout_kill("liquidity")
     price = _money(selected.get("priceUsd"))
     change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
     change = _num(change_box.get("h1"))
     if price is None or change is None:
-        return _kill(None, mint, "scout", "price", "dexscreener")
+        return scout_kill("price")
     snapshot = {
         "source": "dexscreener",
         "fetched_at": str(fetched),
@@ -160,6 +183,7 @@ def scout(pair: dict, now: float | None = None) -> dict:
         "market_cap_basis": "marketCap",
         "confirmed_market_cap_usd": format(other, "f"),
         "pair_address": pair_address,
+        "candidate_pools": pool_count,
         "fdv_used_as_market_cap": False,
         "liquidity_usd": format(liq, "f"),
         "price_usd": format(price, "f"),
@@ -216,7 +240,7 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     judged = cross_source.judge(bundle)
     checks = judged["checks"]
     liq_row = checks["liq_ge_25pct"]
-    if liq_row.get("reason") in {"pool_ambiguous", "pool_missing"}:
+    if liq_row.get("reason") in {"pool_ambiguous", "pool_missing", "pinned_pair_missing"}:
         return refuse(liq_row["reason"])
     if checks["quote_sol"]["status"] != "PASS":
         return refuse(checks["quote_sol"].get("reason") or "quote_unknown")
@@ -307,13 +331,13 @@ def score_from_values(values: dict) -> Decimal | None:
     return weighted / Decimal("100")
 
 
-def _fetched_components(mint: str) -> dict:
-    """0..100 points from the desk fetch. A missing source is component_unverified."""
+def _fetched_components(mint: str, pair_address: str = "") -> dict:
+    """0..100 points from the pinned pool. A missing source is component_unverified."""
     import cross_source
     found = {"smart_wallets": Decimal("0")}
-    selected, _why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    selected, why = cross_source.select_pinned_pair(cross_source.fetch_dex(mint), pair_address)
     if not isinstance(selected, dict):
-        return {"ok": False, "reason": "component_unverified", "component": "momentum"}
+        return {"ok": False, "reason": why or "pinned_pair_missing", "component": "momentum"}
     change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
     change = _num(change_box.get("h1"))
     volume_box = selected.get("volume") if isinstance(selected.get("volume"), dict) else {}
@@ -331,7 +355,7 @@ def _fetched_components(mint: str) -> dict:
         return {"ok": False, "reason": "component_unverified", "component": "buy_sell_ratio"}
     found["momentum"] = _clamp_unit(change)
     found["buy_sell_ratio"] = Decimal(buys) * Decimal(100) / Decimal(trades)
-    stored = cross_source.fetch_bundle(mint, selected.get("pairAddress") or "")
+    stored = cross_source.fetch_bundle(mint, pair_address)
     judged = cross_source.judge(stored) if stored is not None else None
     liq_row = (judged or {}).get("checks", {}).get("liq_ge_25pct", {})
     quote = _money(liq_row.get("quote_usd"))
@@ -365,7 +389,8 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         holder = _holder_growth_value({"source": "solana_tracker_holders_chart"}, row["mint"])
         if holder is None:
             return _fail(row, "analyst", "holder_growth_unknown", source="solana_tracker_holders_chart")
-    fetched = _fetched_components(row["mint"])
+    pin = _snapshot(row).get("pair_address") if isinstance(_snapshot(row).get("pair_address"), str) else ""
+    fetched = _fetched_components(row["mint"], pin)
     evidence = {
         "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
         "weights_are": "engineering_default",
@@ -598,10 +623,14 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
         return _kill(case_id, None, "executor", "stage", None)
     snap = _snapshot(row)
     import cross_source
-    selected, _why = cross_source.select_pair(cross_source.fetch_dex(row["mint"]), row["mint"], "")
+    pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    selected, why = cross_source.select_pinned_pair(cross_source.fetch_dex(row["mint"]), pin)
+    if selected is None:
+        return _fail(row, "executor", why or "pinned_pair_missing")
     price = _money(selected.get("priceUsd")) if isinstance(selected, dict) else None
     if price is None:
         return _fail(row, "executor", "price")
+    snap["pair_address"] = pin
     snap["price_usd"] = format(price, "f")
     stop_px = price * (Decimal("100") - STOP) / Decimal("100")
     arm_px = price * (Decimal("100") + TRAIL_ARM) / Decimal("100")
