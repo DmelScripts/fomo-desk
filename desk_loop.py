@@ -38,6 +38,7 @@ _runtime = {
         "sims_attempted": 0,
         "sims_ok": 0,
         "sims_failed": 0,
+        "pool_checks": 0,
         "paper_entries": 0,
     },
 }
@@ -156,6 +157,23 @@ def _pass_snapshot() -> dict:
     return body
 
 
+def configure_observe_logs() -> None:
+    """Send loop and provider lines to stdout. Uvicorn does not attach those loggers."""
+    import logging
+    import sys
+    formatter = logging.Formatter("%(levelname)s %(name)s %(message)s")
+    for name in ("desk.loop", "desk.provider"):
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+        if any(getattr(item, "_desk_stdout", False) for item in logger.handlers):
+            continue
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(formatter)
+        handler._desk_stdout = True
+        logger.addHandler(handler)
+
+
 def note_provider(provider: str, reason: str) -> None:
     """One INFO line for a provider failure. The reason is a code, never a URL or a key."""
     import logging
@@ -202,7 +220,7 @@ def end_pass(now: float, result, error: str | None) -> None:
     _runtime["last_pass"] = counts
     _store_evaluations(result, float(now))
     logging.getLogger("desk.loop").info(
-        "pass candidates=%s filter_rejects=%s analyst_scored=%s analyst_passed=%s sims_attempted=%s sims_ok=%s sims_failed=%s paper_entries=%s error=%s",
+        "pass candidates=%s filter_rejects=%s analyst_scored=%s analyst_passed=%s sims_attempted=%s sims_ok=%s sims_failed=%s pool_checks=%s paper_entries=%s error=%s",
         counts["candidates"],
         counts["filter_rejects"],
         counts["analyst_scored"],
@@ -210,6 +228,7 @@ def end_pass(now: float, result, error: str | None) -> None:
         counts["sims_attempted"],
         counts["sims_ok"],
         counts["sims_failed"],
+        counts["pool_checks"],
         counts["paper_entries"],
         _runtime["last_error"],
     )
@@ -234,6 +253,7 @@ def _pass_counts(result) -> dict:
         "sims_attempted": 0,
         "sims_ok": 0,
         "sims_failed": 0,
+        "pool_checks": 0,
         "paper_entries": 0,
     }
     if not isinstance(result, dict):
@@ -256,12 +276,14 @@ def _pass_counts(result) -> dict:
             if reason is None:
                 counts["analyst_passed"] += 1
         quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
-        if quote.get("attempted") is True or quote.get("simulate") is True:
+        if quote.get("simulate") is True:
             counts["sims_attempted"] += 1
             if quote.get("ok") is True:
                 counts["sims_ok"] += 1
             else:
                 counts["sims_failed"] += 1
+        elif quote.get("attempted") is True:
+            counts["pool_checks"] += 1
         if stage in {"protected", "filled"} or item.get("paper_entry") is True:
             counts["paper_entries"] += 1
     counts["filter_rejects"] = rejects
@@ -331,6 +353,9 @@ def _evaluation(item: dict, now: float) -> dict:
             "reason": _safe_code(sim_reason) if isinstance(sim_reason, str) else None,
         },
         "paper_entry": stage in {"protected", "filled"} or item.get("paper_entry") is True,
+        "pair_address": item.get("pair_address") if isinstance(item.get("pair_address"), str) else None,
+        "liquidity_usd": item.get("liquidity_usd") if isinstance(item.get("liquidity_usd"), str) else None,
+        "candidate_pools": item.get("candidate_pools") if type(item.get("candidate_pools")) is int and not isinstance(item.get("candidate_pools"), bool) else None,
         "send": False,
         "sign": False,
     }
@@ -453,6 +478,9 @@ def run_discovery(transport, now: float) -> dict:
             "observed": result.get("observed"),
             "score_measured": False,
             "fixture_is_mainnet_proof": False,
+            "pair_address": result.get("pair_address"),
+            "liquidity_usd": result.get("liquidity_usd") if isinstance(result.get("liquidity_usd"), str) else None,
+            "candidate_pools": result.get("candidate_pools") if type(result.get("candidate_pools")) is int else None,
         })
         if result.get("reason"):
             kills.append(screened[-1] | {"source": result.get("source") or dexscreener_public.SOURCE})
@@ -628,16 +656,32 @@ def run_once(mint: str, transport, now: float) -> dict:
         return stopped | {"reason": "dexscreener_status", "stage": "scout"}
     parsed = dexscreener_public.parse_pairs(response["body"], mint, now)
     if parsed.get("ok") is not True:
-        return stopped | {"reason": parsed.get("reason"), "source": dexscreener_public.SOURCE, "stage": "scout", "fdv_used_as_market_cap": False}
+        return stopped | {
+            "reason": parsed.get("reason"),
+            "source": dexscreener_public.SOURCE,
+            "stage": "scout",
+            "fdv_used_as_market_cap": False,
+            "pair_address": parsed.get("pair_address"),
+            "liquidity_usd": parsed.get("liquidity_usd") if isinstance(parsed.get("liquidity_usd"), str) else None,
+            "candidate_pools": parsed.get("candidate_pools") if type(parsed.get("candidate_pools")) is int else None,
+        }
     _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
     _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
     opened = memecoin_desk.scout(parsed["scout"], now=now)
     if opened.get("ok") is not True:
         quote = _screen_quote(transport, now, mint, parsed.get("evidence") or {})
         return stopped | {
-            "reason": opened.get("reason"), "stage": opened.get("stage"), "case_id": opened.get("case_id"),
-            "quote": quote, "jupiter_called": quote.get("jupiter_called") is True, "score_measured": False,
-            "quote_expiry_proven": False, "sources_are_live_mcp": False,
+            "reason": opened.get("reason"),
+            "stage": opened.get("stage") if isinstance(opened.get("stage"), str) and opened.get("stage") != "" else "scout",
+            "case_id": opened.get("case_id"),
+            "quote": quote,
+            "jupiter_called": quote.get("jupiter_called") is True,
+            "score_measured": False,
+            "quote_expiry_proven": False,
+            "sources_are_live_mcp": False,
+            "pair_address": opened.get("pair_address"),
+            "liquidity_usd": opened.get("liquidity_usd") if isinstance(opened.get("liquidity_usd"), str) else None,
+            "candidate_pools": opened.get("candidate_pools") if type(opened.get("candidate_pools")) is int else None,
         }
     try:
         rpc = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})

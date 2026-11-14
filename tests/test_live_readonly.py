@@ -227,14 +227,19 @@ class LiveReadonlyTests(unittest.TestCase):
         twin["pairAddress"] = real["pairAddress"].swapcase()
         cross_source.unwrap(decoy["dex"])["pairs"] = [twin, real]
         decoy["pair_id"] = real["pairAddress"]
-        self.assertEqual(cross_source.judge(decoy)["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
         self.assertEqual(cross_source.select_pair({"pairs": [real]}, TOKENS["X"], twin["pairAddress"])[1], "pool_missing")
-        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[1], "pool_ambiguous")
+        pinned, pinned_why = cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])
+        self.assertIsNone(pinned_why)
+        self.assertEqual(pinned["pairAddress"], real["pairAddress"])
         other = json.loads(json.dumps(real))
         other["pairAddress"] = real["pairAddress"][:-1] + ("A" if real["pairAddress"][-1] != "A" else "B")
         cross_source.unwrap(decoy["dex"])["pairs"] = [other, real]
-        self.assertEqual(cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])[1], "pool_ambiguous")
-        self.assertEqual(cross_source.select_pair({"pairs": [other, real]}, TOKENS["X"], "")[1], "pool_ambiguous")
+        pinned, pinned_why = cross_source.select_pair(decoy["dex"], TOKENS["X"], real["pairAddress"])
+        self.assertIsNone(pinned_why)
+        self.assertEqual(pinned["pairAddress"], real["pairAddress"])
+        picked, picked_why = cross_source.select_pair({"pairs": [other, real]}, TOKENS["X"], "")
+        self.assertIsNone(picked_why)
+        self.assertEqual(picked["pairAddress"], max(other["pairAddress"], real["pairAddress"]))
         body = cross_source.unwrap(trump["rugcheck"])
         body["risks"] = [{"name": "Rug pull history", "description": "serial", "level": "warning"}]
         again = cross_source.rug_check(trump["rugcheck"], trump["tracker"], trump["das"], trump["deployer"], TOKENS["TRUMP"])
@@ -326,10 +331,10 @@ class LiveReadonlyTests(unittest.TestCase):
             "dev_holding_pct": "0",
             "cross_sources": _passing_decoy(case_mint),
         }, now=NOW)
-        self.assertEqual(refused["reason"], "pool_ambiguous", refused)
+        self.assertEqual(refused["reason"], "pool_missing", refused)
         judged = cross_source.judge(pools)
-        self.assertFalse(judged["ok"])
-        self.assertEqual(judged["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
+        self.assertEqual(judged["pool"], "small-pool-" + case_mint[:8])
+        self.assertNotEqual(judged["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
         mismatch = _passing_decoy(case_mint)
         mismatch["pair_id"] = "not-the-stored-pool"
         mismatch["dex"]["pairs"][0]["pairAddress"] = "not-the-stored-pool"

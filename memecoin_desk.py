@@ -121,37 +121,54 @@ def scout(pair: dict, now: float | None = None) -> dict:
         return _kill(None, mint, "scout", "snapshot_stale", "dexscreener")
     import cross_source
     cross_source.take_failure()
-    selected, why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    dex_body = cross_source.fetch_dex(mint)
+    selected, why = cross_source.select_pair(dex_body, mint, "")
+    pool_count = len(cross_source.sol_pairs(dex_body, mint))
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
+
+    def scout_kill(reason: str) -> dict:
+        killed = _kill(None, mint, "scout", reason, "dexscreener")
+        noted = {
+            "stage": "scout",
+            "candidate_pools": pool_count,
+            "fdv_used_as_market_cap": False,
+        }
+        if isinstance(pair_address, str) and pair_address != "":
+            noted["pair_address"] = pair_address
+        box = selected.get("liquidity") if isinstance(selected, dict) and isinstance(selected.get("liquidity"), dict) else None
+        if isinstance(box, dict) and "usd" in box:
+            noted["liquidity_usd"] = str(box.get("usd"))
+        return killed | noted
+
     if not isinstance(pair_address, str) or pair_address == "":
-        return _kill(None, mint, "scout", cross_source.take_failure() or why or "pool_missing", "dexscreener")
+        return scout_kill(cross_source.take_failure() or why or "pool_missing")
     created_ms = selected.get("pairCreatedAt") if isinstance(selected, dict) else None
     if type(created_ms) is not int or created_ms < 10**12:
-        return _kill(None, mint, "scout", "pair_created_at", "dexscreener")
+        return scout_kill("pair_created_at")
     age = clock - (Decimal(created_ms) / Decimal(1000))
     if age < MIN_AGE_S or age > MAX_AGE_S:
-        return _kill(None, mint, "scout", "age", "dexscreener")
+        return scout_kill("age")
     if "marketCap" not in selected:
-        return _kill(None, mint, "scout", "market_cap_missing", "dexscreener")
+        return scout_kill("market_cap_missing")
     mcap = _money(selected.get("marketCap"))
     if mcap is None or mcap < MIN_MCAP or mcap > MAX_MCAP:
-        return _kill(None, mint, "scout", "market_cap", "dexscreener")
+        return scout_kill("market_cap")
     other = cross_source.fetch_market_cap(mint, pair_address)
     if other is None:
-        return _kill(None, mint, "scout", cross_source.take_failure() or "market_cap_unconfirmed", "dexscreener")
+        return scout_kill(cross_source.take_failure() or "market_cap_unconfirmed")
     if other < MIN_MCAP or other > MAX_MCAP or not cross_source.within(mcap, other, cross_source.MCAP_SOURCE_TOLERANCE):
-        return _kill(None, mint, "scout", "market_cap_unconfirmed", "dexscreener")
+        return scout_kill("market_cap_unconfirmed")
     liquidity = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
     if not isinstance(liquidity, dict) or "usd" not in liquidity:
-        return _kill(None, mint, "scout", "liquidity_missing", "dexscreener")
+        return scout_kill("liquidity_missing")
     liq = _money(liquidity.get("usd"))
     if liq is None:
-        return _kill(None, mint, "scout", "liquidity", "dexscreener")
+        return scout_kill("liquidity")
     price = _money(selected.get("priceUsd"))
     change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
     change = _num(change_box.get("h1"))
     if price is None or change is None:
-        return _kill(None, mint, "scout", "price", "dexscreener")
+        return scout_kill("price")
     snapshot = {
         "source": "dexscreener",
         "fetched_at": str(fetched),
@@ -160,6 +177,7 @@ def scout(pair: dict, now: float | None = None) -> dict:
         "market_cap_basis": "marketCap",
         "confirmed_market_cap_usd": format(other, "f"),
         "pair_address": pair_address,
+        "candidate_pools": pool_count,
         "fdv_used_as_market_cap": False,
         "liquidity_usd": format(liq, "f"),
         "price_usd": format(price, "f"),

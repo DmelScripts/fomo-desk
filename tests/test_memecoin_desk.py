@@ -350,7 +350,12 @@ class MemecoinDeskTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.view(stored["case_id"])["snapshot"]["pair_address"], "FETCHED")
         ambiguous = _pair(_mint(51), pair_address="SMALL")
         cross_source.note_bundle(_mint(51), __import__("tests.test_live_readonly", fromlist=["_two_pools"])._two_pools(_mint(51)))
-        self.assertEqual(memecoin_desk.scout(ambiguous, now=NOW)["reason"], "pool_ambiguous")
+        killed = memecoin_desk.scout(ambiguous, now=NOW)
+        self.assertEqual(killed["reason"], "pair_created_at", killed)
+        self.assertEqual(killed["stage"], "scout")
+        self.assertEqual(killed["candidate_pools"], 2)
+        self.assertEqual(killed["pair_address"], "small-pool-" + _mint(51)[:8])
+        self.assertFalse(killed["fdv_used_as_market_cap"])
         self.assertEqual(memecoin_desk.scout(_pair(_mint(48), market_cap_basis=None), now=NOW)["reason"], "market_cap_basis")
         self.assertTrue(any(row["reason"] == "market_cap_missing" for row in db.query("SELECT reason FROM memecoin_log")))
 
