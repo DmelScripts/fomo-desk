@@ -20,7 +20,28 @@ https://docs.pyth.network/api-reference/hermes/price-feeds
 from __future__ import annotations
 
 # Production authorization is a settings row, default absent. Readiness is not met.
-_runtime = {"running": False, "started": False, "passes": 0, "faults": 0}
+_runtime = {
+    "running": False,
+    "started": False,
+    "passes": 0,
+    "faults": 0,
+    "server_loop": False,
+    "loop_started_at": None,
+    "last_pass_started_at": None,
+    "last_pass_ended_at": None,
+    "last_error": None,
+    "last_pass": {
+        "candidates": 0,
+        "filter_rejects": {},
+        "analyst_scored": 0,
+        "analyst_passed": 0,
+        "sims_attempted": 0,
+        "sims_ok": 0,
+        "sims_failed": 0,
+        "paper_entries": 0,
+    },
+}
+_EVAL_KEEP = 200
 
 import dexscreener_public
 import memecoin_desk
@@ -114,13 +135,282 @@ def scheduler_status() -> dict:
         "running": _runtime["running"],
         "passes": _runtime["passes"],
         "faults": _runtime["faults"],
-        "server_loop": _runtime["started"],
-        "scheduled": _runtime["started"],
+        "server_loop": _runtime["server_loop"] is True,
+        "scheduled": _runtime["server_loop"] is True,
+        "loop_started_at": _runtime["loop_started_at"],
+        "last_pass_started_at": _runtime["last_pass_started_at"],
+        "last_pass_ended_at": _runtime["last_pass_ended_at"],
+        "last_error": _runtime["last_error"],
+        "last_pass": _pass_snapshot(),
         "send": False,
         "sign": False,
         "live_ready": False,
         "agents_enabled": False,
     }
+
+
+def _pass_snapshot() -> dict:
+    body = dict(_runtime["last_pass"])
+    rejects = body.get("filter_rejects")
+    body["filter_rejects"] = dict(rejects) if isinstance(rejects, dict) else {}
+    return body
+
+
+def note_provider(provider: str, reason: str) -> None:
+    """One INFO line for a provider failure. The reason is a code, never a URL or a key."""
+    import logging
+    if not isinstance(provider, str) or not isinstance(reason, str) or reason == "":
+        return
+    if "://" in reason or "api-key" in reason.lower() or any(char.isspace() for char in reason):
+        reason = "redacted"
+    if len(reason) > 80:
+        reason = reason[:80]
+    logging.getLogger("desk.provider").info("provider %s %s", provider, reason)
+
+
+def begin_server_loop(now: float) -> None:
+    _runtime["server_loop"] = True
+    _runtime["started"] = True
+    _runtime["running"] = False
+    if _runtime["loop_started_at"] is None:
+        _runtime["loop_started_at"] = float(now)
+
+
+def end_server_loop() -> None:
+    _runtime["server_loop"] = False
+    _runtime["started"] = False
+    _runtime["running"] = False
+
+
+def begin_pass(now: float) -> None:
+    _runtime["running"] = True
+    _runtime["last_pass_started_at"] = float(now)
+
+
+def end_pass(now: float, result, error: str | None) -> None:
+    """Record one discovery pass. This does not trade, sign, or send."""
+    import logging
+    _runtime["running"] = False
+    _runtime["last_pass_ended_at"] = float(now)
+    _runtime["passes"] = int(_runtime["passes"]) + 1
+    if isinstance(error, str) and error != "":
+        _runtime["faults"] = int(_runtime["faults"]) + 1
+        _runtime["last_error"] = error if "://" not in error and "api-key" not in error.lower() else "redacted"
+    else:
+        _runtime["last_error"] = None
+    counts = _pass_counts(result)
+    _runtime["last_pass"] = counts
+    _store_evaluations(result, float(now))
+    logging.getLogger("desk.loop").info(
+        "pass candidates=%s filter_rejects=%s analyst_scored=%s analyst_passed=%s sims_attempted=%s sims_ok=%s sims_failed=%s paper_entries=%s error=%s",
+        counts["candidates"],
+        counts["filter_rejects"],
+        counts["analyst_scored"],
+        counts["analyst_passed"],
+        counts["sims_attempted"],
+        counts["sims_ok"],
+        counts["sims_failed"],
+        counts["paper_entries"],
+        _runtime["last_error"],
+    )
+
+
+_FILTER_RULES = (
+    ("liquidity_vs_mcap", {"liquidity_below_25pct_mcap", "liquidity_ratio", "liquidity_source_missing", "pool_missing", "pool_ambiguous"}),
+    ("lp_burned_or_locked", {"lp"}),
+    ("dev_rug_history", {"dev_rug_history", "dev_rug_history_unverified"}),
+    ("holder_growth", {"holder_growth_unproven", "holder_growth_unknown"}),
+    ("dev_holding", {"dev_holding", "creator_conflict"}),
+    ("bundles", {"bundle", "bundle_unverified"}),
+)
+
+
+def _pass_counts(result) -> dict:
+    counts = {
+        "candidates": 0,
+        "filter_rejects": {},
+        "analyst_scored": 0,
+        "analyst_passed": 0,
+        "sims_attempted": 0,
+        "sims_ok": 0,
+        "sims_failed": 0,
+        "paper_entries": 0,
+    }
+    if not isinstance(result, dict):
+        return counts
+    candidates = result.get("candidates")
+    if type(candidates) is int and not isinstance(candidates, bool):
+        counts["candidates"] = candidates
+    screened = result.get("screened") if isinstance(result.get("screened"), list) else []
+    rejects = {}
+    filter_codes = {code for _name, codes in _FILTER_RULES for code in codes}
+    for item in screened:
+        if not isinstance(item, dict):
+            continue
+        stage = item.get("stage") if isinstance(item.get("stage"), str) else ""
+        reason = item.get("reason") if isinstance(item.get("reason"), str) else None
+        if isinstance(reason, str) and (reason in filter_codes or stage in {"filter", "rejected"}):
+            rejects[reason] = rejects.get(reason, 0) + 1
+        if stage == "analyst" or item.get("score_measured") is True or item.get("score") is not None:
+            counts["analyst_scored"] += 1
+            if reason is None:
+                counts["analyst_passed"] += 1
+        quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+        if quote.get("attempted") is True or quote.get("simulate") is True:
+            counts["sims_attempted"] += 1
+            if quote.get("ok") is True:
+                counts["sims_ok"] += 1
+            else:
+                counts["sims_failed"] += 1
+        if stage in {"protected", "filled"} or item.get("paper_entry") is True:
+            counts["paper_entries"] += 1
+    counts["filter_rejects"] = rejects
+    return counts
+
+
+def _safe_code(value) -> str | None:
+    if not isinstance(value, str) or value == "":
+        return None
+    if "://" in value or "api-key" in value.lower() or any(char.isspace() for char in value):
+        return "redacted"
+    return value[:80]
+
+
+def _rule_status(reason: str | None, stage: str | None) -> dict:
+    passed_filter = reason is None and stage in {"filter_passed", "analyst", "protected", "filled"}
+    view = {}
+    for name, codes in _FILTER_RULES:
+        if passed_filter:
+            view[name] = "pass"
+        elif isinstance(reason, str) and reason in codes:
+            view[name] = "fail"
+        else:
+            view[name] = "not_evaluated"
+    return view
+
+
+def _evaluation(item: dict, now: float) -> dict:
+    stage = item.get("stage") if isinstance(item.get("stage"), str) else None
+    reason = _safe_code(item.get("reason")) if isinstance(item.get("reason"), str) else None
+    symbol = item.get("symbol") if isinstance(item.get("symbol"), str) and 0 < len(item["symbol"]) <= 32 else None
+    quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
+    simulated = quote.get("attempted") is True or quote.get("simulate") is True
+    sim_reason = quote.get("cause") if isinstance(quote.get("cause"), str) else quote.get("reason") if isinstance(quote.get("reason"), str) else None
+    score = item.get("score")
+    if type(score) not in {int, float, str} or isinstance(score, bool):
+        score = None
+    breakdown = {}
+    raw_breakdown = item.get("breakdown") if isinstance(item.get("breakdown"), dict) else {}
+    for key, value in raw_breakdown.items():
+        if isinstance(key, str) and len(key) <= 40 and type(value) in {int, float, str} and not isinstance(value, bool):
+            breakdown[key] = value if type(value) is not str else value[:40]
+    provider_errors = []
+    if isinstance(reason, str):
+        for name in ("helius", "rugcheck", "solana_tracker", "jupiter", "simulate"):
+            if name in reason:
+                provider_errors.append({"provider": name, "reason": reason})
+                break
+    return {
+        "mint": item.get("mint") if isinstance(item.get("mint"), str) else None,
+        "symbol": symbol,
+        "time": now,
+        "stage": stage,
+        "passed": reason is None and stage in {"filter_passed", "analyst", "protected", "filled"},
+        "reason": reason,
+        "filter": _rule_status(reason, stage),
+        "analyst": {
+            "scored": item.get("score_measured") is True or score is not None,
+            "passed": reason is None and stage in {"analyst", "protected", "filled"},
+            "score": None if score is None else str(score)[:32],
+            "breakdown": breakdown,
+        },
+        "provider_errors": provider_errors,
+        "simulation": {
+            "attempted": simulated,
+            "ok": quote.get("ok") is True if simulated else None,
+            "reason": _safe_code(sim_reason) if isinstance(sim_reason, str) else None,
+        },
+        "paper_entry": stage in {"protected", "filled"} or item.get("paper_entry") is True,
+        "send": False,
+        "sign": False,
+    }
+
+
+def _store_evaluations(result, now: float) -> None:
+    import json
+    import db
+    screened = result.get("screened") if isinstance(result, dict) and isinstance(result.get("screened"), list) else []
+    rows = [_evaluation(item, now) for item in screened if isinstance(item, dict)]
+    if not rows:
+        return
+
+    def work(conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memecoin_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT,
+                symbol TEXT,
+                evaluated_at REAL NOT NULL,
+                stage TEXT,
+                passed INTEGER NOT NULL,
+                reason TEXT,
+                body_json TEXT NOT NULL
+            )
+            """
+        )
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO memecoin_evaluations (mint, symbol, evaluated_at, stage, passed, reason, body_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["mint"], row["symbol"], row["time"], row["stage"],
+                    1 if row["passed"] is True else 0, row["reason"],
+                    json.dumps(row, sort_keys=True, default=str),
+                ),
+            )
+        conn.execute(
+            """
+            DELETE FROM memecoin_evaluations WHERE id NOT IN (
+                SELECT id FROM memecoin_evaluations ORDER BY id DESC LIMIT ?
+            )
+            """,
+            (_EVAL_KEEP,),
+        )
+
+    try:
+        db.exclusive(work)
+    except Exception:
+        return
+
+
+def recent_evaluations(limit: int = 50) -> dict:
+    """Newest evaluations first. Bounded. No secrets and no signing."""
+    import json
+    import db
+    if isinstance(limit, bool) or type(limit) is not int or limit < 1:
+        limit = 50
+    limit = min(limit, 100)
+    shown = {"rows": [], "limit": limit, "send": False, "sign": False, "live_ready": False}
+    try:
+        rows = db.query(
+            "SELECT body_json FROM memecoin_evaluations ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+    except Exception:
+        return shown
+    for row in rows:
+        try:
+            body = json.loads(row["body_json"])
+        except Exception:
+            continue
+        if isinstance(body, dict):
+            body["send"] = False
+            body["sign"] = False
+            shown["rows"].append(body)
+    return shown
 
 
 def run_discovery(transport, now: float) -> dict:
@@ -2839,37 +3129,45 @@ def live_simulate(case_id: str, message_sha256: str, now: float) -> dict:
         "ok": False, "sign": False, "send": False, "preflight_ready": False,
         "dry_run": os.environ.get("DESK_SIM_DRY_RUN") == "1", "network_called": False,
     }
+
+    def _stop(extra):
+        body = quiet | extra
+        if body.get("ok") is not True:
+            reason = body.get("reason")
+            note_provider("simulateTransaction", reason if isinstance(reason, str) else "simulation_failed")
+        return body
+
     if not simulation_allowed():
-        return quiet | {"reason": "simulation_unreachable"}
+        return _stop({"reason": "simulation_unreachable"})
     info = solana_rpc.describe()
     if info.get("ok") is not True:
-        return quiet | {"reason": info.get("reason") or "helius_api_key_missing"}
+        return _stop({"reason": info.get("reason") or "helius_api_key_missing"})
     try:
         rows = db.query(
             "SELECT message_b64, side FROM memecoin_reservations WHERE message_sha256 = ? AND case_id = ?",
             (message_sha256, case_id),
         )
     except Exception:
-        return quiet | {"reason": "simulation_message"}
+        return _stop({"reason": "simulation_message"})
     if len(rows) != 1 or not isinstance(rows[0]["message_b64"], str) or rows[0]["side"] not in {"entry", "exit"}:
-        return quiet | {"reason": "simulation_message"}
+        return _stop({"reason": "simulation_message"})
     encoded = rows[0]["message_b64"]
     try:
         import memecoin_desk
         import solana_tx
         case = memecoin_desk._case(case_id)
         if case is None or not isinstance(case["mint"], str):
-            return quiet | {"reason": "simulation_message"}
+            return _stop({"reason": "simulation_message"})
         output_mint = case["mint"] if rows[0]["side"] == "entry" else solana_tx.NATIVE_MINT
         decoded = solana_tx.decode_transaction(__import__("base64").b64decode(encoded, validate=True))
         output_account = solana_tx.associated_token_address(decoded.fee_payer, output_mint, solana_tx.TOKEN_PROGRAM)
     except Exception:
-        return quiet | {"reason": "simulation_message"}
+        return _stop({"reason": "simulation_message"})
     payload = preflight_sim.rpc_body(encoded, output_account)
     try:
         url = solana_rpc._wire_url()
     except solana_rpc.RpcRefused as exc:
-        return quiet | {"reason": exc.reason}
+        return _stop({"reason": exc.reason})
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -2880,13 +3178,13 @@ def live_simulate(case_id: str, message_sha256: str, now: float) -> dict:
     try:
         status, _raw, proved = live_gate_proof.exchange(request, 8)
     except Exception:
-        return quiet | {"reason": "simulation_rpc", "network_called": True}
+        return _stop({"reason": "simulation_rpc", "network_called": True})
     digest = hashlib.sha256(encoded.encode()).hexdigest()
     closed = proved is True and live_gate_proof.preflight_observed(digest=digest)
-    return quiet | {
+    return _stop({
         "ok": closed, "preflight_ready": closed, "network_called": True,
         "reason": None if closed else "preflight_open", "status": status,
-    }
+    })
 
 
 def simulate_before_sign(case_id: str, message_sha256: str, transport, now: float, estimate: dict) -> dict:
@@ -3001,6 +3299,9 @@ def simulate_before_sign(case_id: str, message_sha256: str, transport, now: floa
 def _log_simulation(case_id: str, body: dict, now: float) -> None:
     import memecoin_desk
     import db
+    if body.get("ok") is not True:
+        cause = body.get("cause")
+        note_provider("simulateTransaction", cause if isinstance(cause, str) else "simulation_failed")
     rpc = body.get("rpc") if isinstance(body.get("rpc"), dict) else {}
     evidence = {
         "cause": body.get("cause"),
@@ -3722,6 +4023,7 @@ def _screen_quote(transport, now: float, mint: str, evidence: dict, allow_synthe
             get, reviewed["est_out"], intent["amount"], intent["input_mint"], intent["output_mint"],
         )
     except Exception:
+        note_provider("jupiter", "quote_transport")
         return quiet | {"attempted": True, "reason": "quote_transport", "pool": identity["pool"], "measured_est_out": reviewed["est_out"]}
     result = quiet | {
         "attempted": True,
@@ -5503,6 +5805,7 @@ def _paper_dry_simulate(request: dict) -> dict:
     try:
         return solana_rpc.post(payload)
     except solana_rpc.RpcRefused as exc:
+        note_provider("simulateTransaction", exc.reason if isinstance(exc.reason, str) else "rpc_refused")
         raise RuntimeError(exc.reason) from None
 
 
@@ -5591,6 +5894,7 @@ def public_reader(request: dict) -> dict:
         try:
             posted = solana_rpc.post(payload)
         except solana_rpc.RpcRefused as exc:
+            note_provider("helius", exc.reason if isinstance(exc.reason, str) else "rpc_refused")
             raise RuntimeError(exc.reason) from None
         return posted
     else:
@@ -5603,6 +5907,11 @@ def public_reader(request: dict) -> dict:
     import live_gate_proof
     status, raw, _proved = live_gate_proof.exchange(req, 8)
     parsed = json.loads(raw.decode())
+    if isinstance(url, str) and status != 200:
+        if url.startswith("https://api.jup.ag/"):
+            note_provider("jupiter", "http_status")
+        elif url.startswith("https://api.rugcheck.xyz/"):
+            note_provider("rugcheck", "http_status")
     return {"status": status, "body": parsed}
 
 
@@ -5776,7 +6085,7 @@ def readiness() -> dict:
         "coded": True,
         "deployed": False,
         "this_process_only": True,
-        "server_loop": False,
+        "server_loop": _runtime["server_loop"] is True,
         "run_once_scheduled": False,
         "send": False,
         "sign": False,

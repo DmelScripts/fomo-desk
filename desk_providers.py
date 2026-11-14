@@ -103,6 +103,24 @@ def shutdown() -> None:
     _LAST.clear()
 
 
+def _observe_provider(kind, reason) -> None:
+    """Log a provider failure code. The URL and the key stay out of the line."""
+    import logging
+    names = {
+        "rugcheck": "rugcheck",
+        "solana_tracker_token": "solana_tracker",
+        "holders_chart": "solana_tracker",
+        "deployer": "solana_tracker",
+        "das": "helius",
+    }
+    provider = names.get(kind)
+    if provider is None or not isinstance(reason, str) or reason == "":
+        return
+    if "://" in reason or "api-key" in reason.lower() or any(char.isspace() for char in reason) or len(reason) > 80:
+        reason = "redacted"
+    logging.getLogger("desk.provider").info("provider %s %s", provider, reason)
+
+
 def _fail(reason: str):
     """Raise after every keyed frame has returned. This frame holds only the reason code."""
     raise cross_source.FetchFailed(reason)
@@ -114,6 +132,7 @@ def production_fetch(kind, mint, pair_id=None):
         _fail("mint")
     reason, body = _fetch(kind, mint, pair_id)
     if reason:
+        _observe_provider(kind, reason)
         _fail(reason)
     if kind == "rugcheck":
         _summary(mint)

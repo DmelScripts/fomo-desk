@@ -1325,8 +1325,30 @@ def memecoin_run(request: Request, body: dict | None = None) -> JSONResponse:
     require_app_token(request)
     import desk_loop
     status = desk_loop.scheduler_status()
-    result = status | {"ok": False, "reason": "scheduler_unarmed", "request_body_used": False, "deployed": False}
+    if status.get("armed") is True and status.get("server_loop") is True:
+        reason = "loop_running"
+    elif status.get("armed") is True:
+        reason = "armed_idle"
+    else:
+        reason = "scheduler_unarmed"
+    result = status | {
+        "ok": False,
+        "reason": reason,
+        "request_body_used": False,
+        "deployed": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+    }
     return JSONResponse(result, status_code=409, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/memecoin/cases")
+def memecoin_cases(request: Request, limit: int = 50) -> JSONResponse:
+    """Recent six-role evaluations. Read-only. This route does not sign or send."""
+    require_app_token(request)
+    import desk_loop
+    return JSONResponse(desk_loop.recent_evaluations(limit), headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/memecoin/scout")

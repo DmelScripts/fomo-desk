@@ -140,15 +140,23 @@ async def _memecoin_screen(stop: asyncio.Event) -> None:
     """One discovery pass at a time. Lifespan starts this only when the gate is armed."""
     import time
     import desk_loop
-    while not stop.is_set():
-        try:
-            desk_loop.run_discovery(desk_loop.public_reader, time.time())
-        except Exception:
-            desk_loop._runtime["faults"] += 1
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=60)
-        except TimeoutError:
-            continue
+    desk_loop.begin_server_loop(time.time())
+    try:
+        while not stop.is_set():
+            desk_loop.begin_pass(time.time())
+            result = None
+            error = None
+            try:
+                result = desk_loop.run_discovery(desk_loop.public_reader, time.time())
+            except Exception as exc:
+                error = type(exc).__name__
+            desk_loop.end_pass(time.time(), result, error)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=60)
+            except TimeoutError:
+                continue
+    finally:
+        desk_loop.end_server_loop()
 
 
 app = FastAPI(title="desk", lifespan=lifespan)

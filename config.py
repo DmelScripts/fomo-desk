@@ -355,8 +355,18 @@ def install_secret_redaction() -> None:
                         text = text.replace(secret, "[REDACTED]")
                 return query_secret.sub(r"\1[REDACTED]", text)
 
-            record.msg = scrub(record.getMessage())
-            record.args = ()
+            # uvicorn's access formatter unpacks five args. Collapsing them
+            # raises ValueError on every request and drops the line.
+            if record.name.startswith("uvicorn.access") and isinstance(record.args, tuple) and len(record.args) == 5:
+                kept = []
+                for part in record.args:
+                    kept.append(scrub(part) if isinstance(part, str) else part)
+                record.args = tuple(kept)
+                if isinstance(record.msg, str):
+                    record.msg = scrub(record.msg)
+            else:
+                record.msg = scrub(record.getMessage())
+                record.args = ()
             if record.exc_info and not record.exc_text:
                 record.exc_text = logging.Formatter().formatException(record.exc_info)
             if record.exc_text:

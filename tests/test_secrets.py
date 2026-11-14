@@ -72,3 +72,41 @@ class TestSecrets(unittest.TestCase):
         self.assertNotIn("tracker-live-value", text)
         self.assertNotIn("other-helius-token", text)
         self.assertIn("api-key=[REDACTED]", text)
+
+    def test_access_log_keeps_its_fields_and_app_logs_still_emit(self):
+        from uvicorn.logging import AccessFormatter
+        secret = "helius-access-log-secret"
+        os.environ["HELIUS_API_KEY"] = secret
+        self.addCleanup(lambda: os.environ.pop("HELIUS_API_KEY", None))
+        install_secret_redaction()
+        stream = io.StringIO()
+        access_handler = logging.StreamHandler(stream)
+        access_handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s'))
+        access = logging.getLogger("uvicorn.access")
+        access.addHandler(access_handler)
+        access.setLevel(logging.INFO)
+        previous_propagate = access.propagate
+        access.propagate = False
+        app_handler = logging.StreamHandler(stream)
+        app = logging.getLogger("desk.access.companion")
+        app.addHandler(app_handler)
+        app.setLevel(logging.INFO)
+        self.addCleanup(lambda: access.removeHandler(access_handler))
+        self.addCleanup(lambda: app.removeHandler(app_handler))
+        self.addCleanup(lambda: setattr(access, "propagate", previous_propagate))
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1",
+            "GET",
+            "/health?api-key=" + secret,
+            "1.1",
+            200,
+        )
+        app.info("desk pass visible")
+        text = stream.getvalue()
+        self.assertIn("GET", text)
+        self.assertIn("/health?api-key=[REDACTED]", text)
+        self.assertIn("200", text)
+        self.assertIn("desk pass visible", text)
+        self.assertNotIn(secret, text)
+        self.assertNotIn("ValueError", text)
