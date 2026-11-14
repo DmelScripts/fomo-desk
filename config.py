@@ -40,6 +40,7 @@ REDACT_ENV_KEYS = SECRET_KEYS + (
 # cannot hold both under one name, so the risk copies use the risk. prefix.
 SETTINGS_DEFAULTS = {
     "agents_enabled": "0",
+    "memecoin_scheduler_authorized": "0",
     "analyst_mode": "jev",
     "min_liquidity_usd": "40000",
     "max_top10_pct": "25",
@@ -72,7 +73,7 @@ SETTINGS_DEFAULTS = {
     "recheck_price_up_pct": "15",
     "confirm_window_min": "5",
     "stop_pct": "6",
-    "trail_start_pct": "20",
+    "trail_start_pct": "12",
     "trail_pct": "12",
     "timeout_h": "3",
     "timeout_min_gain_pct": "5",
@@ -138,6 +139,8 @@ SETTING_RULES = {
     "risk.poll_s": ("number", 5, 3600),
     "risk.confirm_window_min": ("number", 1, 120),
     "fomo_handle": ("text", 1, 64),
+    # 1 arms the six-role loop. It does not enable LIVE, signing, or sending.
+    "memecoin_scheduler_authorized": ("enum", ("0", "1")),
     # LIVE stack from the "stack N" command. Unset until the owner sets it.
     "stack": ("number", 0, 1_000_000_000),
 }
@@ -167,6 +170,7 @@ SETTING_GROUPS = {
     "desk": [
         "mode", "paper_start_stack", "stack", "report_time", "notifier", "rpc_url",
         "push_rejects", "fees_ref_discount", "fomo_handle",
+        "memecoin_scheduler_authorized",
     ],
 }
 
@@ -223,6 +227,10 @@ SETTING_COPY = {
     "push_rejects": ("Push rejects", "Also push auditor and analyst rejects."),
     "fees_ref_discount": ("Referral discount", "Fraction off the fee. 0.10 is 10%."),
     "fomo_handle": ("FOMO username", "From the signup step."),
+    "memecoin_scheduler_authorized": (
+        "Memecoin scheduler",
+        "1 arms the six-role loop in this process. It does not enable LIVE, signing, or sending.",
+    ),
 }
 
 

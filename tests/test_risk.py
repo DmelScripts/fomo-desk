@@ -51,18 +51,18 @@ class TestRisk(unittest.TestCase):
         self.assertIn("hit the -6% stop", self.notifier.pushes[-1]["title"])
         self.assertEqual(self.notifier.pushes[-1]["url"], links.coin_url(MINT, "solana"))
 
-    def test_trail_arms_at_20_and_exits_12_off_the_peak(self):
+    def test_trail_arms_at_12_and_exits_12_off_the_peak(self):
         row = dict(self._open())
-        hold = self.risk.poll_position(row, now=1_100, price=1.19, liquidity=50_000)
+        hold = self.risk.poll_position(row, now=1_100, price=1.11, liquidity=50_000)
         self.assertEqual(hold["action"], "hold")
         self.assertIsNone(hold["trail_line"])
-        armed = self.risk.poll_position(dict(self._row()), now=1_150, price=1.25, liquidity=50_000)
+        armed = self.risk.poll_position(dict(self._row()), now=1_150, price=1.13, liquidity=50_000)
         self.assertEqual(armed["action"], "hold")
         self.assertTrue(db.query("SELECT trail_active FROM positions")[0]["trail_active"])
-        # 13% off a 1.25 peak is through the 12% trail line (1.10).
-        exited = self.risk.poll_position(dict(self._row()), now=1_200, price=1.25 * 0.87, liquidity=50_000)
+        # 13% off a 1.13 peak is through the 12% trail line.
+        exited = self.risk.poll_position(dict(self._row()), now=1_200, price=1.13 * 0.87, liquidity=50_000)
         self.assertEqual(exited["action"], "trail")
-        self.assertEqual(exited["exit_price"], 1.25 * 0.87)
+        self.assertEqual(exited["exit_price"], 1.13 * 0.87)
 
     def test_looser_stop_does_not_move_an_open_stop(self):
         row = dict(self._open())

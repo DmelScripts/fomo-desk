@@ -373,6 +373,8 @@ def _set(phrase: str, value: str) -> dict:
     key = _alias(phrase)
     if key is None:
         return _ok(f"Unknown setting {phrase}.", refused=True)
+    if key == "memecoin_scheduler_authorized":
+        return _ok("The scheduler switch is POST /api/settings. Nothing was changed.", refused=True)
     if key == "mode":
         upper = value.upper()
         if upper == "LIVE":

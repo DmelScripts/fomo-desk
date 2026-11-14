@@ -64,6 +64,11 @@ def fetcher_installed() -> bool:
     return callable(_FETCHER)
 
 
+def fetcher_is(fetcher) -> bool:
+    """True when the installed reader is this exact function. A stand-in is not wired."""
+    return _FETCHER is fetcher
+
+
 _LAST_FAILURE: str | None = None
 
 

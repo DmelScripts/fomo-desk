@@ -23,7 +23,10 @@ _CLAIM = threading.Lock()
 
 
 def armed() -> bool:
-    """True only for LIVE with the agents on and every readiness gate closed."""
+    """True only for LIVE with the agents on and every readiness gate closed.
+
+    The scheduler switch is not read here and is not live consent. PAPER stays false.
+    """
     if db.get_setting("mode", "PAPER") != "LIVE":
         return False
     if db.get_setting("agents_enabled", "0") != "1":

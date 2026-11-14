@@ -979,13 +979,17 @@ def _combined_fee_ok(dex_micro: int, network_lamports, pool_micro: int, quote: d
 
 
 def assess_direct_exit(stored: dict, mark_micro: int, now: float) -> dict:
-    """6% stop, arm at 20% favorable, 12% giveback, 3h unless still up at least 5%.
+    """6% stop, arm at the approved trail, 12% giveback, 3h unless still up at least 5%.
 
     The mark is micro-USDC per SOL. This unwind sold SOL, so a higher mark is adverse.
-    The $20 new-entry stop is not consulted.
+    The $20 new-entry stop is not consulted. The arm percent is the approved exit rule.
     """
     rules = exit_policy.view()
     if rules.get("effective") is not True or not isinstance(rules.get("rules"), dict):
+        return {"action": "unavailable", "reason": "exit_rules", "loss_stop_blocks_exit": False}
+    try:
+        arm_pct = int(rules["rules"]["trail_arm_profit_pct"])
+    except (TypeError, ValueError, KeyError):
         return {"action": "unavailable", "reason": "exit_rules", "loss_stop_blocks_exit": False}
     entry = stored.get("entry_price_micro")
     opened = stored.get("opened_at")
@@ -998,7 +1002,7 @@ def assess_direct_exit(stored: dict, mark_micro: int, now: float) -> dict:
         peak = entry
     if mark_micro < peak:
         peak = mark_micro
-    armed = stored.get("trail_armed") is True or (entry - peak) * 100 >= entry * 20
+    armed = stored.get("trail_armed") is True or (entry - peak) * 100 >= entry * arm_pct
     action = "hold"
     if mark_micro * 100 >= entry * 106:
         action = "stop"
