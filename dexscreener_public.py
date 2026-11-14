@@ -89,16 +89,20 @@ def parse_pairs(payload, mint: str, fetched_at: float) -> dict:
         return refused | {"reason": "pairs_shape"}
     import cross_source
     bases = []
+    rejected_chain = False
     for pair in payload:
         if not isinstance(pair, dict):
             continue
-        chain = pair.get("chainId")
-        if isinstance(chain, str) and chain != "solana":
-            continue
         base = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
-        if base.get("address") == mint:
-            bases.append(pair)
+        if base.get("address") != mint:
+            continue
+        if not cross_source.chain_ok(pair):
+            rejected_chain = True
+            continue
+        bases.append(pair)
     if not bases:
+        if rejected_chain:
+            return refused | {"reason": "chain_rejected", "candidate_pools": 0}
         return refused | {"reason": "pair_missing", "candidate_pools": 0}
     selected, why = cross_source.select_pair(payload, mint, "")
     count = len(cross_source.sol_pairs(payload, mint))

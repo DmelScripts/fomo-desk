@@ -122,7 +122,13 @@ def scout(pair: dict, now: float | None = None) -> dict:
     import cross_source
     cross_source.take_failure()
     dex_body = cross_source.fetch_dex(mint)
-    selected, why = cross_source.select_pair(dex_body, mint, "")
+    pin = pair.get("pair_address") if isinstance(pair.get("pair_address"), str) else ""
+    if pin != "":
+        selected, why = cross_source.select_pinned_pair(dex_body, pin)
+        if selected is None:
+            why = "pinned_pair_missing"
+    else:
+        selected, why = cross_source.select_pair(dex_body, mint, "")
     pool_count = len(cross_source.sol_pairs(dex_body, mint))
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
 
@@ -234,7 +240,7 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     judged = cross_source.judge(bundle)
     checks = judged["checks"]
     liq_row = checks["liq_ge_25pct"]
-    if liq_row.get("reason") in {"pool_ambiguous", "pool_missing"}:
+    if liq_row.get("reason") in {"pool_ambiguous", "pool_missing", "pinned_pair_missing"}:
         return refuse(liq_row["reason"])
     if checks["quote_sol"]["status"] != "PASS":
         return refuse(checks["quote_sol"].get("reason") or "quote_unknown")
@@ -325,13 +331,13 @@ def score_from_values(values: dict) -> Decimal | None:
     return weighted / Decimal("100")
 
 
-def _fetched_components(mint: str) -> dict:
-    """0..100 points from the desk fetch. A missing source is component_unverified."""
+def _fetched_components(mint: str, pair_address: str = "") -> dict:
+    """0..100 points from the pinned pool. A missing source is component_unverified."""
     import cross_source
     found = {"smart_wallets": Decimal("0")}
-    selected, _why = cross_source.select_pair(cross_source.fetch_dex(mint), mint, "")
+    selected, why = cross_source.select_pinned_pair(cross_source.fetch_dex(mint), pair_address)
     if not isinstance(selected, dict):
-        return {"ok": False, "reason": "component_unverified", "component": "momentum"}
+        return {"ok": False, "reason": why or "pinned_pair_missing", "component": "momentum"}
     change_box = selected.get("priceChange") if isinstance(selected.get("priceChange"), dict) else {}
     change = _num(change_box.get("h1"))
     volume_box = selected.get("volume") if isinstance(selected.get("volume"), dict) else {}
@@ -349,7 +355,7 @@ def _fetched_components(mint: str) -> dict:
         return {"ok": False, "reason": "component_unverified", "component": "buy_sell_ratio"}
     found["momentum"] = _clamp_unit(change)
     found["buy_sell_ratio"] = Decimal(buys) * Decimal(100) / Decimal(trades)
-    stored = cross_source.fetch_bundle(mint, selected.get("pairAddress") or "")
+    stored = cross_source.fetch_bundle(mint, pair_address)
     judged = cross_source.judge(stored) if stored is not None else None
     liq_row = (judged or {}).get("checks", {}).get("liq_ge_25pct", {})
     quote = _money(liq_row.get("quote_usd"))
@@ -383,7 +389,8 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
         holder = _holder_growth_value({"source": "solana_tracker_holders_chart"}, row["mint"])
         if holder is None:
             return _fail(row, "analyst", "holder_growth_unknown", source="solana_tracker_holders_chart")
-    fetched = _fetched_components(row["mint"])
+    pin = _snapshot(row).get("pair_address") if isinstance(_snapshot(row).get("pair_address"), str) else ""
+    fetched = _fetched_components(row["mint"], pin)
     evidence = {
         "weights": {key: format(value, "f") for key, value in WEIGHTS.items()},
         "weights_are": "engineering_default",
@@ -616,10 +623,14 @@ def protect(case_id: str, canonical_pool: bytes | None = None, quote: dict | Non
         return _kill(case_id, None, "executor", "stage", None)
     snap = _snapshot(row)
     import cross_source
-    selected, _why = cross_source.select_pair(cross_source.fetch_dex(row["mint"]), row["mint"], "")
+    pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    selected, why = cross_source.select_pinned_pair(cross_source.fetch_dex(row["mint"]), pin)
+    if selected is None:
+        return _fail(row, "executor", why or "pinned_pair_missing")
     price = _money(selected.get("priceUsd")) if isinstance(selected, dict) else None
     if price is None:
         return _fail(row, "executor", "price")
+    snap["pair_address"] = pin
     snap["price_usd"] = format(price, "f")
     stop_px = price * (Decimal("100") - STOP) / Decimal("100")
     arm_px = price * (Decimal("100") + TRAIL_ARM) / Decimal("100")

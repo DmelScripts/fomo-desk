@@ -144,6 +144,7 @@ def write_price_batch(payload: Any, now: float | None = None) -> int:
         mint = fields.get(pair, "baseToken.address")
         if not mint:
             continue
+        # Legacy price tape. The six-role desk pins its pool with select_pinned_pair.
         chosen = fields.dexscreener_select_pair([item for item in pairs if fields.get(item, "baseToken.address") == mint])
         if chosen is not None:
             by_mint[mint] = chosen

@@ -18,7 +18,7 @@ def _pair():
     return [{
         "chainId": "solana",
         "dexId": "raydium",
-        "pairAddress": solana_tx.b58encode(b"\x66" * 32),
+        "pairAddress": cross_source.pair_id_for(MINT),
         "baseToken": {"address": MINT},
         "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "LOOKALIKE"},
         "confirmedMarketCap": 1_000_000,
@@ -49,9 +49,10 @@ class DeskLoopTests(unittest.TestCase):
         memecoin_desk._ensure()
 
         def row(case_id):
+            import json
             db.execute(
-                "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'filter_passed', '{}', ?, ?, 'paper', 'server')",
-                (case_id, MINT, NOW, NOW),
+                "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at, ledger, ledger_provenance) VALUES (?, ?, 'filter_passed', ?, ?, ?, 'paper', 'server')",
+                (case_id, MINT, json.dumps({"pair_address": cross_source.pair_id_for(MINT)}), NOW, NOW),
             )
 
         def components(value):
@@ -205,7 +206,7 @@ class DeskLoopTests(unittest.TestCase):
         mint = solana_tx.b58encode(b"\x44" * 32)
         pair = [{
             "chainId": "solana", "dexId": "raydium",
-            "pairAddress": solana_tx.b58encode(b"\x67" * 32),
+            "pairAddress": cross_source.pair_id_for(mint),
             "baseToken": {"address": mint}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
             "priceUsd": "1.25",
             "marketCap": 1_000_000, "confirmedMarketCap": 1_000_000, "fdv": 5_000_000, "liquidity": {"usd": 250_000},
@@ -466,7 +467,9 @@ class DeskLoopTests(unittest.TestCase):
                 return _Response(200, json.dumps([{"chainId": "solana", "tokenAddress": other}]).encode())
             if "/token-pairs/" in url:
                 body = json.loads(json.dumps(global_pair))
-                body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                asked = url.rsplit("/", 1)[-1]
+                body[0]["baseToken"] = {"address": asked}
+                body[0]["pairAddress"] = cross_source.pair_id_for(asked)
                 return _Response(200, json.dumps(body).encode())
             if url.endswith("/report/summary"):
                 return _Response(200, json.dumps({"lpLockedPct": 100, "score": 1}).encode())
@@ -670,6 +673,7 @@ class DeskLoopTests(unittest.TestCase):
                 return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
             body = _pair()
             body[0]["baseToken"] = {"address": mint}
+            body[0]["pairAddress"] = cross_source.pair_id_for(mint)
             return {"status": 200, "body": body}
 
         found = desk_loop.run_discovery(transport, NOW)
@@ -709,6 +713,7 @@ class DeskLoopTests(unittest.TestCase):
             mint = str(request.get("url", "")).rsplit("/", 1)[-1]
             body = _pair()
             body[0]["baseToken"] = {"address": mint}
+            body[0]["pairAddress"] = cross_source.pair_id_for(mint)
             return {"status": 200, "body": body}
 
         found = desk_loop.run_discovery(transport, NOW)
@@ -825,6 +830,7 @@ class DeskLoopTests(unittest.TestCase):
                 mint = url.rsplit("/", 1)[-1]
                 pair = _pair()
                 pair[0]["baseToken"] = {"address": mint}
+                pair[0]["pairAddress"] = cross_source.pair_id_for(mint)
                 pair[0]["pairCreatedAt"] = int((moment - 3600) * 1000)
                 if mint == swap_mint:
                     pair[0]["dexId"] = "whirlpool"
@@ -945,6 +951,7 @@ class DeskLoopTests(unittest.TestCase):
                 arm_clean_creator(swap_mint)
                 arm_holder_chart()
                 cross_source.note_clock(moment)
+                cross_source.note_dex(swap_mint, pairAddress=values["pool"])
                 screened = desk_loop.synthetic_screen(swap_mint, features(), desk_loop.public_reader, moment)
                 real = desk_loop.run_supervised(desk_loop.public_reader, moment, rounds=1)
                 return screened, real
@@ -1044,8 +1051,10 @@ class DeskLoopTests(unittest.TestCase):
                     raise RuntimeError("boosts down")
                 return {"status": 200, "body": [{"chainId": "solana", "tokenAddress": other}]}
             if "/token-pairs/" in url:
+                asked = url.rsplit("/", 1)[-1]
                 pair = _pair()
-                pair[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                pair[0]["baseToken"] = {"address": asked}
+                pair[0]["pairAddress"] = cross_source.pair_id_for(asked)
                 pair[0]["priceUsd"] = "1.00" if price["usd"] != "fault" else "0.50"
                 return {"status": 200, "body": pair}
             raw = bytearray(82)
@@ -1065,8 +1074,10 @@ class DeskLoopTests(unittest.TestCase):
             if url.endswith("/token-boosts/latest/v1"):
                 raise RuntimeError("boosts down")
             if "/token-pairs/" in url:
+                asked = url.rsplit("/", 1)[-1]
                 body = _pair()
-                body[0]["baseToken"] = {"address": url.rsplit("/", 1)[-1]}
+                body[0]["baseToken"] = {"address": asked}
+                body[0]["pairAddress"] = cross_source.pair_id_for(asked)
                 body[0]["priceUsd"] = "0.10"
                 return {"status": 200, "body": body}
             raise AssertionError("rpc")
@@ -1840,6 +1851,10 @@ conn.close()
                 db.execute(statement)
         self.assertEqual({row["signature"]: row["cost_basis_lamports"] for row in db.query("SELECT signature, cost_basis_lamports FROM memecoin_entry_receipts")}, costs)
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
+        for case_id, mint in (("case-fresh", "mint-fresh"), ("case-paper-fresh", "mint-paper-fresh")):
+            snap = json.loads(db.query("SELECT snapshot_json FROM memecoin_cases WHERE id = ?", (case_id,))[0]["snapshot_json"])
+            snap["pair_address"] = cross_source.pair_id_for(mint)
+            db.execute("UPDATE memecoin_cases SET snapshot_json = ? WHERE id = ?", (json.dumps(snap), case_id))
         previous = pyth_sponsored.sol_leg
         pyth_sponsored.sol_leg = lambda now: {"fresh": True, "used": True, "price": 15_000_000_000, "conf": 1, "expo": -8}
         rent = {"ok": True, "lamports": 1_488_440, "count": 1, "slot": 1, "tip_slot": 2, "genesis": "g", "mint_program": "spl"}

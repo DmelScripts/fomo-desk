@@ -34,7 +34,7 @@ def _pair(**over):
     body = {
         "chainId": "solana",
         "dexId": "raydium",
-        "pairAddress": solana_tx.b58encode(b"\x66" * 32),
+        "pairAddress": __import__("cross_source").pair_id_for(MINT),
         "baseToken": {"address": MINT},
         "quoteToken": {"address": solana_tx.NATIVE_MINT, "symbol": "NOTSOL"},
         "confirmedMarketCap": 1_000_000,

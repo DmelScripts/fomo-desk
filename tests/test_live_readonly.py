@@ -269,7 +269,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
-        self.assertEqual(unconfirmed["reason"], "pool_missing")
+        self.assertEqual(unconfirmed["reason"], "pinned_pair_missing")
         supplied = dict(unconfirmed) if False else {
             "mint": mint,
             "source": "dexscreener",
@@ -284,7 +284,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_change_h1": "10",
         }
         cross_source.clear_fetcher()
-        self.assertEqual(memecoin_desk.scout(supplied, now=NOW)["reason"], "pool_missing")
+        self.assertEqual(memecoin_desk.scout(supplied, now=NOW)["reason"], "pinned_pair_missing")
         opened = memecoin_desk.scout({
             "mint": mint + "x",
             "source": "dexscreener",
@@ -297,7 +297,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
-        self.assertEqual(opened["reason"], "pool_missing")
+        self.assertEqual(opened["reason"], "pinned_pair_missing")
         case_mint = mint + "x"
         cross_source.note_cap(case_mint, "1000000")
         cross_source.arm_test_fetcher()
@@ -310,15 +310,21 @@ class LiveReadonlyTests(unittest.TestCase):
             "market_cap_usd": "1000000",
             "market_cap_basis": "marketCap",
             "confirmed_market_cap_usd": "1000000",
-            "pair_address": "SMALL",
-            "pairs": [{"pairAddress": "SMALL"}],
+            "pair_address": cross_source.pair_id_for(case_mint),
             "liquidity_usd": "250000",
             "price_usd": "1",
             "price_change_h1": "10",
         }, now=NOW)
         self.assertTrue(opened["ok"], opened)
         self.assertEqual(memecoin_desk.view(opened["case_id"])["snapshot"]["pair_address"], cross_source.pair_id_for(case_mint))
-        self.assertNotEqual(memecoin_desk.view(opened["case_id"])["snapshot"]["pair_address"], "SMALL")
+        refused_pin = memecoin_desk.scout({
+            "mint": case_mint,
+            "source": "dexscreener",
+            "fetched_at": NOW,
+            "market_cap_basis": "marketCap",
+            "pair_address": "SMALL",
+        }, now=NOW)
+        self.assertEqual(refused_pin["reason"], "pinned_pair_missing")
         pools = _two_pools(case_mint)
         cross_source.note_bundle(case_mint, pools)
         refused = memecoin_desk.filter_case(opened["case_id"], {
@@ -331,7 +337,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "dev_holding_pct": "0",
             "cross_sources": _passing_decoy(case_mint),
         }, now=NOW)
-        self.assertEqual(refused["reason"], "pool_missing", refused)
+        self.assertEqual(refused["reason"], "pinned_pair_missing", refused)
         judged = cross_source.judge(pools)
         self.assertEqual(judged["pool"], "small-pool-" + case_mint[:8])
         self.assertNotEqual(judged["checks"]["liq_ge_25pct"]["reason"], "pool_ambiguous")
@@ -353,7 +359,7 @@ class LiveReadonlyTests(unittest.TestCase):
             "dev_holding_pct": "0",
             "cross_sources": _passing_decoy(case_mint),
         }, now=NOW)
-        self.assertEqual(missed["reason"], "pool_missing", missed)
+        self.assertEqual(missed["reason"], "pinned_pair_missing", missed)
 
     def test_hermes_requires_a_bearer_and_does_not_use_the_stale_onchain_account(self):
         saved = json.loads((ROOT / "raw" / "pyth_0.json").read_text(encoding="utf-8"))

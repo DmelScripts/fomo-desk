@@ -276,9 +276,13 @@ def _pass_counts(result) -> dict:
             if reason is None:
                 counts["analyst_passed"] += 1
         quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
-        if quote.get("simulate") is True:
+        pre_sign = quote.get("pre_sign") if isinstance(quote.get("pre_sign"), dict) else {}
+        simulation = pre_sign.get("simulation") if isinstance(pre_sign.get("simulation"), dict) else {}
+        simulated = quote.get("simulate") is True or pre_sign.get("simulate") is True
+        if simulated:
             counts["sims_attempted"] += 1
-            if quote.get("ok") is True:
+            ok = quote.get("ok") is True or pre_sign.get("preflight_ready") is True or simulation.get("ok") is True
+            if ok:
                 counts["sims_ok"] += 1
             else:
                 counts["sims_failed"] += 1
@@ -316,7 +320,8 @@ def _evaluation(item: dict, now: float) -> dict:
     reason = _safe_code(item.get("reason")) if isinstance(item.get("reason"), str) else None
     symbol = item.get("symbol") if isinstance(item.get("symbol"), str) and 0 < len(item["symbol"]) <= 32 else None
     quote = item.get("quote") if isinstance(item.get("quote"), dict) else {}
-    simulated = quote.get("attempted") is True or quote.get("simulate") is True
+    pre_sign = quote.get("pre_sign") if isinstance(quote.get("pre_sign"), dict) else {}
+    simulated = quote.get("simulate") is True or pre_sign.get("simulate") is True
     sim_reason = quote.get("cause") if isinstance(quote.get("cause"), str) else quote.get("reason") if isinstance(quote.get("reason"), str) else None
     score = item.get("score")
     if type(score) not in {int, float, str} or isinstance(score, bool):
@@ -4460,9 +4465,11 @@ def _supervise_reservations(transport, now: float) -> list:
 def _supervise_open(transport, now: float) -> list:
     """Mark and, when the stop or trail has fired, quote each open receipt position.
 
+    The quote and the mark both use the receipt pool. A missing pin is not re-ranked.
     This does not read the boost list and it does not apply the new-entry halt.
     """
     import json
+    import cross_source
     found = []
     for row in _open_positions():
         try:
@@ -4480,25 +4487,34 @@ def _supervise_open(transport, now: float) -> list:
         if balance.get("ok") is not True:
             found.append({"mint": row["mint"], "reason": balance.get("reason"), "jupiter_called": False, "supervised": True})
             continue
+        receipt = memecoin_desk._live_entry_receipt(row["id"])
+        pinned_pool = receipt["pool"] if receipt is not None and isinstance(receipt["pool"], str) and receipt["pool"] != "" else snap.get("pair_address")
+        if not isinstance(pinned_pool, str) or pinned_pool == "":
+            found.append({"mint": row["mint"], "reason": "pinned_pair_missing", "jupiter_called": False, "supervised": True, "pool": None})
+            continue
         try:
             response = transport({"kind": "http", "url": dexscreener_public.pairs_url(row["mint"])})
         except Exception:
-            found.append({"mint": row["mint"], "reason": "exit_mark_unpriced", "jupiter_called": False, "supervised": True})
+            found.append({"mint": row["mint"], "reason": "exit_mark_unpriced", "jupiter_called": False, "supervised": True, "pool": pinned_pool})
             continue
-        parsed = dexscreener_public.parse_pairs(response.get("body") if isinstance(response, dict) else None, row["mint"], now)
-        if parsed.get("ok") is not True:
-            found.append({"mint": row["mint"], "reason": "exit_mark_unpriced", "jupiter_called": False, "supervised": True})
+        body = response.get("body") if isinstance(response, dict) else None
+        pinned, _why = cross_source.select_pinned_pair(body, pinned_pool)
+        if pinned is None:
+            found.append({"mint": row["mint"], "reason": "pinned_pair_missing", "jupiter_called": False, "supervised": True, "pool": pinned_pool})
             continue
-        intent = snap.get("exit_intent") if isinstance(snap.get("exit_intent"), dict) else {}
+        evidence = {
+            "pair_address": pinned_pool,
+            "dex_id": pinned.get("dexId") if isinstance(pinned.get("dexId"), str) else None,
+        }
         if row["stage"] == "filled":
             marked = memecoin_desk.mark_open_position(row["id"], transport, now)
             if marked.get("action") not in {"stop", "trail"}:
-                found.append({"mint": row["mint"], "reason": marked.get("reason") or "exit_hold", "action": marked.get("action"), "jupiter_called": False, "supervised": True, "mark_price": marked.get("mark_price")})
+                found.append({"mint": row["mint"], "reason": marked.get("reason") or "exit_hold", "action": marked.get("action"), "jupiter_called": False, "supervised": True, "mark_price": marked.get("mark_price"), "pool": pinned_pool})
                 continue
         elif memecoin_desk._matching_intent(row["id"]) is None:
-            found.append({"mint": row["mint"], "reason": "exit_unproven", "jupiter_called": False, "supervised": True})
+            found.append({"mint": row["mint"], "reason": "exit_unproven", "jupiter_called": False, "supervised": True, "pool": pinned_pool})
             continue
-        quote = _screen_quote(transport, now, row["mint"], parsed.get("evidence") or {})
+        quote = _screen_quote(transport, now, row["mint"], evidence)
         found.append({
             "mint": row["mint"],
             "reason": quote.get("reason"),

@@ -362,6 +362,7 @@ class Scanner:
             return {}
         for mint in mints:
             own = [item for item in payload if isinstance(item, dict) and fields.get(item, "baseToken.address") == mint]
+            # Legacy scanner. The six-role desk pins its pool with select_pinned_pair.
             pair = fields.dexscreener_select_pair(own or payload)
             if pair and (not own or fields.get(pair, "baseToken.address") in (None, mint)):
                 if own:
