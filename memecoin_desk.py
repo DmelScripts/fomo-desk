@@ -55,6 +55,13 @@ WEIGHTS = {
 }
 COMPONENTS = tuple(WEIGHTS)
 FRESH_S = 30
+# A rejected mint can be read again after this. It is not a trade threshold.
+REEVAL_COOLDOWN_S = 300
+_PIPELINE_STAGES = frozenset({"scout_passed", "filter_passed", "analyst_passed"})
+_HOLDING_STAGES = frozenset({
+    "protected", "entry_ready", "filled", "partial", "exit_intent",
+    "entry_failed", "entry_unreconciled", "paper_exited",
+})
 ANALYST_APPROVED_AT = "2026-11-10T06:19:00+07:00"
 ANALYST_APPROVED_BY = "Thành"
 ANALYST_APPROVAL_SOURCE = "owner decision 2026-11-10 06:19 Asia/Saigon"
@@ -192,12 +199,9 @@ def scout(pair: dict, now: float | None = None) -> dict:
 
     def work(conn):
         _ensure_conn(conn)
-        open_row = conn.execute(
-            "SELECT id, stage FROM memecoin_cases WHERE mint = ? AND stage NOT IN ('rejected', 'exited')",
-            (mint,),
-        ).fetchone()
-        if open_row is not None:
-            return {"ok": False, "reason": "already_open", "case_id": open_row["id"], "stage": open_row["stage"], "mint": mint}
+        blocked = _admit_conn(conn, mint, moment)
+        if blocked is not None:
+            return blocked
         case_id = mint
         suffix = 0
         while conn.execute("SELECT id FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone() is not None:
@@ -2139,6 +2143,107 @@ def record_jupiter_block(case_id: str, assessment: dict) -> dict:
     if not isinstance(assessment, dict) or assessment.get("execution_allowed") is not False or assessment.get("min_out_proven") is not False:
         return _note(row, name, "jupiter_assessment")
     return _note(row, name, "jupiter_instruction_unproven")
+
+
+def _clock_age(updated_at, now: float):
+    """Seconds since updated_at. None when either clock cannot be trusted."""
+    if isinstance(updated_at, bool) or isinstance(now, bool):
+        return None
+    if not isinstance(updated_at, (int, float)) or not isinstance(now, (int, float)):
+        return None
+    return float(now) - float(updated_at)
+
+
+def _snapshot_holds(raw) -> bool:
+    """True when the snapshot still has a position or an entry in flight.
+
+    An unreadable snapshot is treated as holding so a broken row cannot be re-opened.
+    """
+    try:
+        snap = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return True
+    if not isinstance(snap, dict):
+        return True
+    if isinstance(snap.get("entry_inflight"), dict) or isinstance(snap.get("inflight"), dict):
+        return True
+    remaining = snap.get("remaining_raw")
+    return isinstance(remaining, int) and not isinstance(remaining, bool) and remaining > 0
+
+
+def _admit_conn(conn, mint: str, now: float) -> dict | None:
+    """Block a second entry, or None when scout may open a case.
+
+    A real position or a case still inside the re-eval cooldown blocks.
+    A pipeline case older than the cooldown is closed to rejected and does not block.
+    """
+    if not isinstance(mint, str) or mint == "":
+        return None
+    rows = conn.execute(
+        "SELECT id, stage, snapshot_json, updated_at FROM memecoin_cases WHERE mint = ? AND stage NOT IN ('rejected', 'exited')",
+        (mint,),
+    ).fetchall()
+    blocking = None
+    for row in rows:
+        stage = row["stage"]
+        holds = stage in _HOLDING_STAGES or _snapshot_holds(row["snapshot_json"])
+        if holds or stage not in _PIPELINE_STAGES:
+            if blocking is None or stage in _HOLDING_STAGES:
+                blocking = row
+            continue
+        age = _clock_age(row["updated_at"], now)
+        if age is None or age < REEVAL_COOLDOWN_S:
+            if blocking is None:
+                blocking = row
+            continue
+        conn.execute(
+            "UPDATE memecoin_cases SET stage = 'rejected' WHERE id = ? AND stage = ?",
+            (row["id"], stage),
+        )
+        _log(conn, row["id"], mint, "scout", "kill", "stale_pipeline", None, {"reason": "stale_pipeline", "closed": True}, now if isinstance(now, (int, float)) and not isinstance(now, bool) else time.time())
+    if blocking is not None:
+        return {"ok": False, "reason": "already_open", "case_id": blocking["id"], "stage": blocking["stage"], "mint": mint}
+    latest = conn.execute(
+        "SELECT id, updated_at FROM memecoin_cases WHERE mint = ? AND stage = 'rejected' ORDER BY updated_at DESC LIMIT 1",
+        (mint,),
+    ).fetchone()
+    if latest is not None:
+        age = _clock_age(latest["updated_at"], now)
+        if age is None or age < REEVAL_COOLDOWN_S:
+            return {"ok": False, "reason": "reeval_cooldown", "case_id": latest["id"], "stage": "rejected", "mint": mint}
+    return None
+
+
+def case_admission(mint: str, now: float) -> dict | None:
+    """The same gate scout uses, so a pass can stop before another fetch."""
+    if not isinstance(mint, str) or mint == "":
+        return None
+
+    def work(conn):
+        _ensure_conn(conn)
+        return _admit_conn(conn, mint, now)
+
+    return db.exclusive(work)
+
+
+def close_terminal(case_id: str, reason: str, role: str, now: float) -> dict:
+    """Close a pipeline case that this pass rejected. A position is left open."""
+    moment = now if isinstance(now, (int, float)) and not isinstance(now, bool) else time.time()
+
+    def work(conn):
+        _ensure_conn(conn)
+        row = conn.execute("SELECT id, mint, stage FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
+        if row is None or row["stage"] not in _PIPELINE_STAGES:
+            current = None if row is None else row["stage"]
+            return {"ok": False, "closed": False, "reason": reason, "case_id": case_id, "stage": current}
+        conn.execute(
+            "UPDATE memecoin_cases SET stage = 'rejected', updated_at = ? WHERE id = ? AND stage = ?",
+            (moment, case_id, row["stage"]),
+        )
+        _log(conn, case_id, row["mint"], role if isinstance(role, str) and role != "" else "scout", "kill", reason, None, {"reason": reason, "closed": True}, moment)
+        return {"ok": False, "closed": True, "reason": reason, "case_id": case_id, "stage": "rejected", "mint": row["mint"]}
+
+    return db.exclusive(work)
 
 
 def view(case_id: str) -> dict | None:

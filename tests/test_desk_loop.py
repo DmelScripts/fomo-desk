@@ -223,10 +223,64 @@ class DeskLoopTests(unittest.TestCase):
                 return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [__import__("base64").b64encode(bytes(raw)).decode(), "base64"]}}}}
             return {"status": 200, "body": pair}
 
+        import db
         blocked = desk_loop.run_once(mint, transport, NOW)
         self.assertEqual(blocked["reason"], "lp", blocked)
+        self.assertEqual(blocked["stage"], "filter")
+        self.assertEqual(memecoin_desk.view(blocked["case_id"])["stage"], "rejected")
         self.assertTrue(blocked["lp_fetched"])
         self.assertFalse(blocked["live_ready"])
+        cooling = desk_loop.run_once(mint, transport, NOW + 299)
+        self.assertEqual(cooling["reason"], "reeval_cooldown", cooling)
+        self.assertEqual(len(db.query("SELECT id FROM memecoin_cases WHERE mint = ?", (mint,))), 1)
+        again = desk_loop.run_once(mint, transport, NOW + memecoin_desk.REEVAL_COOLDOWN_S)
+        self.assertEqual(again["reason"], "lp", again)
+        self.assertNotEqual(again["case_id"], blocked["case_id"])
+        self.assertEqual(memecoin_desk.view(again["case_id"])["stage"], "rejected")
+
+    def test_an_open_position_stays_blocked_and_a_scout_cannot_double_enter(self):
+        import db
+        import threading
+        memecoin_desk._ensure()
+        held = solana_tx.b58encode(b"\x45" * 32)
+        stale = solana_tx.b58encode(b"\x46" * 32)
+        fresh = solana_tx.b58encode(b"\x47" * 32)
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at) VALUES ('held-pos', ?, 'filled', '{}', ?, ?)",
+            (held, NOW - 10_000, NOW - 10_000),
+        )
+        db.execute(
+            "INSERT INTO memecoin_cases (id, mint, stage, snapshot_json, created_at, updated_at) VALUES ('stale-pipe', ?, 'scout_passed', '{}', ?, ?)",
+            (stale, NOW - 10_000, NOW - memecoin_desk.REEVAL_COOLDOWN_S - 1),
+        )
+
+        def payload(mint):
+            return {
+                "mint": mint, "source": "dexscreener", "fetched_at": NOW,
+                "pair_created_at": int((NOW - 3600) * 1000), "market_cap_usd": "1000000",
+                "market_cap_basis": "marketCap", "pair_address": cross_source.pair_id_for(mint),
+                "liquidity_usd": "250000", "price_usd": "1", "price_change_h1": "1",
+            }
+
+        blocked = memecoin_desk.scout(payload(held), now=NOW)
+        self.assertEqual(blocked["reason"], "already_open", blocked)
+        self.assertEqual(blocked["stage"], "filled")
+        self.assertEqual(len(db.query("SELECT id FROM memecoin_cases WHERE mint = ?", (held,))), 1)
+        reopened = memecoin_desk.scout(payload(stale), now=NOW)
+        self.assertTrue(reopened["ok"], reopened)
+        self.assertEqual(db.query("SELECT stage FROM memecoin_cases WHERE id = 'stale-pipe'")[0]["stage"], "rejected")
+        raced = []
+
+        def once():
+            raced.append(memecoin_desk.scout(payload(fresh), now=NOW))
+
+        threads = [threading.Thread(target=once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertCountEqual([item.get("reason") for item in raced], [None, "already_open"])
+        self.assertEqual(len(db.query("SELECT id FROM memecoin_cases WHERE mint = ?", (fresh,))), 1)
 
     def test_without_a_transport_nothing_is_fetched(self):
         result = desk_loop.run_once(MINT, None, NOW)
@@ -311,7 +365,9 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(refused["reason"], "holder_count_source_unpublished")
         self.assertEqual(desk_loop.holder_growth(MINT)["reason"], "holder_growth_unproven")
         bare = [{key: value for key, value in _pair()[0].items() if key != "marketCap"}]
-        missing = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW)
+        cooling = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW)
+        self.assertEqual(cooling["reason"], "reeval_cooldown")
+        missing = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW + memecoin_desk.REEVAL_COOLDOWN_S)
         self.assertEqual(missing["reason"], "market_cap_missing")
         self.assertEqual(missing["source"], "dexscreener")
 

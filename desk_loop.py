@@ -653,6 +653,13 @@ def run_once(mint: str, transport, now: float) -> dict:
     stopped = {"ok": False, "send": False, "sign": False, "live_ready": False, "armed": False, "mint": mint}
     if transport is None:
         return stopped | {"reason": "network_disabled", "stage": "scout"}
+    admitted = memecoin_desk.case_admission(mint, now)
+    if admitted is not None and admitted.get("reason") == "reeval_cooldown":
+        return stopped | {
+            "reason": "reeval_cooldown",
+            "stage": "rejected",
+            "case_id": admitted.get("case_id"),
+        }
     try:
         response = transport({"kind": "http", "url": dexscreener_public.pairs_url(mint)})
     except Exception:
@@ -691,6 +698,7 @@ def run_once(mint: str, transport, now: float) -> dict:
     try:
         rpc = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})
     except Exception:
+        memecoin_desk.close_terminal(opened["case_id"], "mint_transport", "filter", now)
         return stopped | {"reason": "mint_transport", "stage": "filter", "case_id": opened["case_id"]}
     account = {"ok": False, "reason": "account_missing"}
     if isinstance(rpc, dict) and rpc.get("status") == 200 and isinstance(rpc.get("body"), dict):
@@ -714,6 +722,7 @@ def run_once(mint: str, transport, now: float) -> dict:
     if authorities_clear:
         locked = _fetch_lp_locked_pct(transport, mint)
         if locked.get("ok") is not True:
+            memecoin_desk.close_terminal(opened["case_id"], "lp", "filter", now)
             return stopped | {
                 "reason": "lp", "stage": "filter", "case_id": opened["case_id"],
                 "lp_fetched": locked.get("fetched") is True, "lp_source": "rugcheck_summary",
@@ -723,10 +732,13 @@ def run_once(mint: str, transport, now: float) -> dict:
     if authorities_clear and source_blocks_lp:
         reported = source_reason
         stage = opened.get("stage")
+        memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
     else:
         filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
         reported = filtered.get("reason") or "features_unpublished"
         stage = filtered.get("stage")
+        if filtered.get("ok") is not True and filtered.get("stage") != "rejected":
+            memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
     blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": reported, "send": False, "live_ready": False, "sources_are_live_mcp": False}
     return stopped | {
         "reason": reported,
@@ -3406,6 +3418,12 @@ def approach_signer(case_id: str, message_sha256: str, transport, now: float, mo
         return base | {"fee_estimate_blocked": False, "signer_reached": False, "reason": auth.get("reason"), "auth": auth}
     simulated = simulate_before_sign(case_id, message_sha256, transport, now, estimate)
     if simulated.get("ok") is not True:
+        memecoin_desk.close_terminal(
+            case_id,
+            simulated.get("cause") if isinstance(simulated.get("cause"), str) else "simulation_failed",
+            "preflight",
+            now,
+        )
         return base | {
             "simulate": True, "simulation": simulated, "fee_estimate_blocked": False,
             "signer_reached": False, "reason": simulated.get("cause"), "preflight_ready": False,
