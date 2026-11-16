@@ -44,8 +44,10 @@ class CutLogTests(unittest.TestCase):
         db.init_db()
         memecoin_desk._CUT_WRITER = None
         memecoin_desk._UNPERSISTED_FAILURES = 0
-        memecoin_desk._RECONCILE_FAILED = False
+        memecoin_desk._PROCESS_WITNESS = False
+        memecoin_desk._BEFORE_CUT_ATTEMPT = None
         self.addCleanup(lambda: setattr(memecoin_desk, "_CUT_WRITER", None))
+        self.addCleanup(lambda: setattr(memecoin_desk, "_BEFORE_CUT_ATTEMPT", None))
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         db.set_setting("mode", "PAPER", "test")
         db.set_setting("agents_enabled", "0", "test")
@@ -223,7 +225,10 @@ class CutLogTests(unittest.TestCase):
         self.assertEqual(payload["unique_mints"], 1)
         self.assertIsNone(payload["proposal"])
         self.assertTrue(all(item["pipeline"] == "six_role" for item in payload["rows"]))
-        self.assertTrue(payload["complete"])
+        self.assertFalse(payload["complete"])
+        self.assertFalse(payload["capture_proven"])
+        self.assertEqual(payload["sampling"], "best_effort")
+        self.assertTrue(payload["window_intact"])
         self.assertFalse(payload["truncated"])
         self.assertEqual(payload["horizon_s"], memecoin_desk.CUT_HORIZON_S)
 
@@ -257,7 +262,10 @@ class CutLogTests(unittest.TestCase):
         self.assertEqual(report["unmeasured_events"], (per_mint_passes - per_mint_measured) * len(mints))
         self.assertEqual(report["unique_mints"], len(mints))
         self.assertEqual(report["events"], per_mint_passes * len(mints))
-        self.assertTrue(report["complete"], report)
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+        self.assertEqual(report["sampling"], "best_effort")
+        self.assertTrue(report["window_intact"], report)
         self.assertFalse(report["truncated"])
         self.assertGreaterEqual(report["covers_through"] - report["covers_from"], span - 60)
         self.assertLess(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_repeats")[0]["n"], report["unmeasured_events"])
@@ -275,7 +283,8 @@ class CutLogTests(unittest.TestCase):
         self.assertEqual(flooded["measured_events"], before)
         self.assertEqual(flooded["unmeasured_events"], report["unmeasured_events"] + flood)
         self.assertEqual(flooded["unique_mints"], len(mints))
-        self.assertTrue(flooded["complete"])
+        self.assertFalse(flooded["complete"])
+        self.assertTrue(flooded["window_intact"])
         self.assertEqual(
             db.query("SELECT events FROM memecoin_cut_repeats WHERE mint = ? AND window_start = ?", (mints[0], window))[0]["events"],
             prior + flood,
@@ -291,12 +300,14 @@ class CutLogTests(unittest.TestCase):
         still = memecoin_desk.cut_report()
         self.assertEqual(still["measured_events"], 2)
         self.assertEqual(still["unmeasured_events"], 5)
-        self.assertTrue(still["complete"])
+        self.assertFalse(still["complete"])
+        self.assertTrue(still["window_intact"])
         memecoin_desk.persist_cut(self._cut(mint, NOW + memecoin_desk.CUT_HORIZON_S + memecoin_desk.REEVAL_COOLDOWN_S, False, "reeval_cooldown"))
         moved = memecoin_desk.cut_report()
         self.assertEqual(moved["measured_events"], 1)
         self.assertEqual(moved["unmeasured_events"], 1)
-        self.assertTrue(moved["complete"])
+        self.assertFalse(moved["complete"])
+        self.assertTrue(moved["window_intact"])
         self.assertFalse(moved["truncated"])
         self.assertGreaterEqual(moved["covers_from"], NOW + memecoin_desk.CUT_HORIZON_S)
 
@@ -308,9 +319,12 @@ class CutLogTests(unittest.TestCase):
         capped = memecoin_desk.cut_report()
         self.assertEqual(capped["measured_events"], 2)
         self.assertTrue(capped["truncated"])
+        self.assertFalse(capped["window_intact"])
         self.assertFalse(capped["complete"])
+        self.assertFalse(capped["capture_proven"])
         self.assertIn("measured_cap", capped["truncation_reason"])
         self.assertTrue(capped["diagnostic_ok"])
+        self.assertEqual(capped["known_gaps"], 0)
         self.assertEqual(capped["cut_write_failures"], 0)
 
     def test_a_cut_write_failure_does_not_change_the_decision(self):
@@ -392,7 +406,8 @@ class CutLogTests(unittest.TestCase):
         kept = _mint(91)
         missed = _mint(92)
         self.assertTrue(memecoin_desk.persist_cut(self._cut(kept, NOW, True, "age")))
-        self.assertTrue(memecoin_desk.cut_report()["complete"])
+        self.assertFalse(memecoin_desk.cut_report()["capture_proven"])
+        self.assertTrue(memecoin_desk.cut_report()["window_intact"])
 
         def explode(_conn, _cut):
             raise sqlite3.OperationalError("injected cut failure")
@@ -412,6 +427,8 @@ class CutLogTests(unittest.TestCase):
             "report = memecoin_desk.cut_report()\n"
             "rows = __import__('db').query('SELECT mint FROM memecoin_cuts')\n"
             "json.dump({'complete': report['complete'], 'diagnostic_ok': report['diagnostic_ok'],"
+            " 'capture_proven': report['capture_proven'], 'sampling': report['sampling'],"
+            " 'known_gaps': report['known_gaps'], 'window_intact': report['window_intact'],"
             " 'failures': report['cut_write_failures'], 'mints': [row['mint'] for row in rows],"
             " 'measured': report['measured_events']}, sys.stdout)\n"
         ) % os.getcwd()
@@ -419,15 +436,112 @@ class CutLogTests(unittest.TestCase):
         env["DESK_DATA_DIR"] = os.environ["DESK_DATA_DIR"]
         fresh = json.loads(subprocess.check_output([sys.executable, "-c", code], env=env, cwd=os.getcwd()))
         self.assertFalse(fresh["complete"])
+        self.assertFalse(fresh["capture_proven"])
+        self.assertEqual(fresh["sampling"], "best_effort")
         self.assertFalse(fresh["diagnostic_ok"])
+        self.assertGreaterEqual(fresh["known_gaps"], 1)
         self.assertGreaterEqual(fresh["failures"], 1)
         self.assertEqual(fresh["measured"], 1)
         self.assertEqual(fresh["mints"], [kept])
         self.assertNotIn(missed, fresh["mints"])
 
-        db.execute("UPDATE memecoin_cut_health SET attempt_open = 1, failed = 0, failures = 0 WHERE id = 1")
-        crashed = json.loads(subprocess.check_output([sys.executable, "-c", code], env=env, cwd=os.getcwd()))
-        self.assertFalse(crashed["complete"])
-        self.assertFalse(crashed["diagnostic_ok"])
-        self.assertGreaterEqual(crashed["failures"], 1)
-        self.assertEqual(crashed["mints"], [kept])
+    def _query_fresh(self) -> dict:
+        code = (
+            "import json, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import memecoin_desk\n"
+            "report = memecoin_desk.cut_report()\n"
+            "rows = __import__('db').query('SELECT mint FROM memecoin_cuts')\n"
+            "json.dump({'complete': report['complete'], 'diagnostic_ok': report['diagnostic_ok'],"
+            " 'capture_proven': report['capture_proven'], 'sampling': report['sampling'],"
+            " 'known_gaps': report['known_gaps'], 'window_intact': report['window_intact'],"
+            " 'failures': report['cut_write_failures'], 'mints': [row['mint'] for row in rows]}, sys.stdout)\n"
+        ) % os.getcwd()
+        env = os.environ.copy()
+        env["DESK_DATA_DIR"] = os.environ["DESK_DATA_DIR"]
+        return json.loads(subprocess.check_output([sys.executable, "-c", code], env=env, cwd=os.getcwd()))
+
+    def test_a_marker_that_cannot_persist_is_not_called_complete_after_restart(self):
+        kept = _mint(93)
+        missed = _mint(94)
+        self.assertTrue(memecoin_desk.persist_cut(self._cut(kept, NOW, True, "age")))
+
+        def down(_cut):
+            raise sqlite3.OperationalError("attempt and seal down")
+
+        original_begin = memecoin_desk._begin_attempt
+        original_fail = memecoin_desk._fail_attempt
+        memecoin_desk._begin_attempt = down
+        memecoin_desk._fail_attempt = down
+        self.addCleanup(lambda: setattr(memecoin_desk, "_begin_attempt", original_begin))
+        self.addCleanup(lambda: setattr(memecoin_desk, "_fail_attempt", original_fail))
+        self.assertFalse(memecoin_desk.persist_cut(self._cut(missed, NOW + 1, True, "market_cap")))
+        here = memecoin_desk.cut_report()
+        self.assertFalse(here["complete"])
+        self.assertFalse(here["capture_proven"])
+        self.assertFalse(here["diagnostic_ok"])
+        self.assertTrue(here["coverage_uncertain"])
+        fresh = self._query_fresh()
+        self.assertFalse(fresh["complete"])
+        self.assertFalse(fresh["capture_proven"])
+        self.assertEqual(fresh["sampling"], "best_effort")
+        self.assertFalse(fresh["diagnostic_ok"])
+        self.assertEqual(fresh["mints"], [kept])
+        self.assertNotIn(missed, fresh["mints"])
+
+    def test_concurrent_writers_cannot_clear_each_others_attempt(self):
+        import threading
+        winner = _mint(95)
+        loser = _mint(96)
+        barrier = threading.Barrier(2)
+        done = []
+
+        def win():
+            barrier.wait()
+            done.append(memecoin_desk.persist_cut(self._cut(winner, NOW, True, "age")))
+
+        def lose():
+            barrier.wait()
+            cut = self._cut(loser, NOW + 1, True, "market_cap")
+            self.assertTrue(memecoin_desk._begin_attempt(cut))
+            done.append(cut["cut_id"])
+
+        threads = [threading.Thread(target=win), threading.Thread(target=lose)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertIn(True, done)
+        fresh = self._query_fresh()
+        self.assertFalse(fresh["complete"])
+        self.assertFalse(fresh["capture_proven"])
+        self.assertFalse(fresh["diagnostic_ok"])
+        self.assertGreaterEqual(fresh["known_gaps"], 1)
+        self.assertIn(winner, fresh["mints"])
+        self.assertNotIn(loser, fresh["mints"])
+
+    def test_a_crash_after_rejection_and_before_the_attempt_is_not_complete(self):
+        mint = _mint(97)
+        code = (
+            "import os, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import memecoin_desk\n"
+            "memecoin_desk._BEFORE_CUT_ATTEMPT = lambda cut: os._exit(9)\n"
+            "cut = memecoin_desk.make_cut(observed_at=%r, mint=%r, pair_address=None,"
+            " pair_provenance='unknown', case_id=None, stage='scout', rule='market_cap',"
+            " measured=True, liquidity='10', market_cap='1000', liquidity_basis='dex_liquidity_usd',"
+            " market_cap_basis='marketCap')\n"
+            "memecoin_desk._kill(None, %r, 'scout', 'market_cap', 'dexscreener', cut)\n"
+        ) % (os.getcwd(), NOW, mint, mint)
+        env = os.environ.copy()
+        env["DESK_DATA_DIR"] = os.environ["DESK_DATA_DIR"]
+        crashed = subprocess.run([sys.executable, "-c", code], env=env, cwd=os.getcwd())
+        self.assertEqual(crashed.returncode, 9)
+        fresh = self._query_fresh()
+        self.assertFalse(fresh["complete"])
+        self.assertFalse(fresh["capture_proven"])
+        self.assertEqual(fresh["sampling"], "best_effort")
+        self.assertFalse(fresh["diagnostic_ok"])
+        self.assertGreaterEqual(fresh["known_gaps"], 1)
+        self.assertNotIn(mint, fresh["mints"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (mint,))[0]["n"], 1)
