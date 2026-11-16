@@ -2508,13 +2508,31 @@ def _mark_cut_truncation(conn, reason: str) -> None:
 
 
 def _prune_cuts(conn, now: float) -> None:
-    """Drop only what is outside the horizon, or a whole oldest window past the safety cap."""
+    """Drop only what is outside the horizon, or a whole oldest window past the safety cap.
+
+    Expected cuts and attempt rows follow the same horizon. A measured cap also drops
+    the expectation for the rows it evicts, and for anything older than the oldest
+    row still kept. Those are retention, not lost writes.
+    """
     horizon_start = float(now) - CUT_HORIZON_S
     conn.execute("DELETE FROM memecoin_cuts WHERE observed_at < ?", (horizon_start,))
     conn.execute("DELETE FROM memecoin_cut_repeats WHERE window_start < ?", (horizon_start,))
+    conn.execute("DELETE FROM memecoin_cut_expected WHERE observed_at < ?", (horizon_start,))
+    conn.execute("DELETE FROM memecoin_cut_attempts WHERE started_at < ?", (horizon_start,))
     measured = conn.execute("SELECT COUNT(*) FROM memecoin_cuts").fetchone()[0]
     if measured > CUT_MEASURED_CAP:
         extra = measured - CUT_MEASURED_CAP
+        conn.execute(
+            """
+            DELETE FROM memecoin_cut_expected WHERE cut_id IN (
+                SELECT cut_id FROM memecoin_cuts
+                WHERE cut_id IS NOT NULL AND id IN (
+                    SELECT id FROM memecoin_cuts ORDER BY observed_at ASC, id ASC LIMIT ?
+                )
+            )
+            """,
+            (extra,),
+        )
         conn.execute(
             """
             DELETE FROM memecoin_cuts WHERE id IN (
@@ -2524,6 +2542,13 @@ def _prune_cuts(conn, now: float) -> None:
             (extra,),
         )
         _mark_cut_truncation(conn, "measured_cap")
+        oldest = conn.execute("SELECT MIN(observed_at) FROM memecoin_cuts").fetchone()[0]
+        if oldest is not None:
+            conn.execute("DELETE FROM memecoin_cut_expected WHERE observed_at < ?", (float(oldest),))
+            conn.execute(
+                "DELETE FROM memecoin_cut_attempts WHERE measured = 1 AND started_at < ?",
+                (float(oldest),),
+            )
     while conn.execute("SELECT COUNT(*) FROM memecoin_cut_repeats").fetchone()[0] > CUT_REPEAT_CAP:
         oldest = conn.execute("SELECT MIN(window_start) FROM memecoin_cut_repeats").fetchone()[0]
         if oldest is None:
@@ -2583,10 +2608,13 @@ def _begin_attempt(cut: dict) -> bool:
             _ensure_conn(conn)
             conn.execute(
                 """
-                INSERT INTO memecoin_cut_attempts (attempt_id, started_at, mint, rule, state)
-                VALUES (?, ?, ?, ?, 'open')
+                INSERT INTO memecoin_cut_attempts (attempt_id, started_at, mint, rule, state, measured)
+                VALUES (?, ?, ?, ?, 'open', ?)
                 """,
-                (cut.get("cut_id"), float(cut["observed_at"]), cut.get("mint") or "", cut.get("rule") or "unknown"),
+                (
+                    cut.get("cut_id"), float(cut["observed_at"]), cut.get("mint") or "",
+                    cut.get("rule") or "unknown", 1 if cut.get("measured") is True else 0,
+                ),
             )
 
         db.exclusive(work)
@@ -2707,7 +2735,9 @@ def cut_report(limit: int = 50) -> dict:
     """Retained six-role cuts for the horizon. This is not a threshold and it does not read scanner scans.
 
     Measured samples stay as rows. Cooldown repeats are exact counts per window.
-    A safety cap or a failed write is reported as incomplete. It is not hidden.
+    `window_intact` is that retention. `complete` stays false: capture is best-effort.
+    `known_gaps` counts a cut still inside the retained window that was logged or
+    attempted and is not stored. Horizon expiry and cap eviction are not gaps.
     """
     if isinstance(limit, bool) or type(limit) is not int or limit < 1:
         limit = 50
@@ -2851,34 +2881,61 @@ def cut_report(limit: int = 50) -> dict:
             FROM memecoin_cut_health WHERE id = 1
             """
         )
+        health = health_rows[0] if health_rows else None
+        anchors = [measured["newest"], repeats["newest"]]
+        for item in db.query(
+            """
+            SELECT MAX(observed_at) AS n FROM memecoin_cut_expected
+            UNION ALL
+            SELECT MAX(started_at) AS n FROM memecoin_cut_attempts
+            """
+        ):
+            anchors.append(item["n"])
+        anchors = [item for item in anchors if item is not None]
         gap_ids = set()
-        for item in db.query("SELECT attempt_id FROM memecoin_cut_attempts"):
-            if isinstance(item["attempt_id"], str) and item["attempt_id"] != "":
-                gap_ids.add(item["attempt_id"])
-        stored_ids = {
-            item["cut_id"]
-            for item in db.query("SELECT cut_id FROM memecoin_cuts WHERE cut_id IS NOT NULL")
-            if isinstance(item["cut_id"], str)
-        }
-        evidence_unreadable = False
-        for item in db.query("SELECT evidence_json FROM memecoin_log WHERE evidence_json LIKE '%cut_id%'"):
-            try:
-                body = json.loads(item["evidence_json"])
-            except Exception:
-                evidence_unreadable = True
-                continue
-            logged = body.get("cut") if isinstance(body, dict) else None
-            logged_id = logged.get("cut_id") if isinstance(logged, dict) else None
-            if isinstance(logged_id, str) and logged_id not in stored_ids:
-                gap_ids.add(logged_id)
+        if anchors:
+            horizon_start = max(float(item) for item in anchors) - CUT_HORIZON_S
+            # Only a measured cap moves the floor. A missing row newer than the oldest
+            # kept cut is still inside the retained set. An older one was evicted or expired.
+            floor = None
+            if health is not None and health["measured_truncated"] == 1 and measured["oldest"] is not None:
+                floor = float(measured["oldest"])
+            for item in db.query(
+                """
+                SELECT cut_id, observed_at FROM memecoin_cut_expected
+                WHERE observed_at >= ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM memecoin_cuts WHERE memecoin_cuts.cut_id = memecoin_cut_expected.cut_id
+                )
+                """,
+                (horizon_start,),
+            ):
+                if floor is not None and not (float(item["observed_at"]) > floor):
+                    continue
+                if isinstance(item["cut_id"], str) and item["cut_id"] != "":
+                    gap_ids.add(item["cut_id"])
+            for item in db.query(
+                """
+                SELECT attempt_id, started_at, measured FROM memecoin_cut_attempts
+                WHERE started_at >= ?
+                """,
+                (horizon_start,),
+            ):
+                if (
+                    floor is not None
+                    and item["measured"] == 1
+                    and not (float(item["started_at"]) > floor)
+                ):
+                    continue
+                if isinstance(item["attempt_id"], str) and item["attempt_id"] != "":
+                    gap_ids.add(item["attempt_id"])
     except Exception:
         return base | {"complete": False, "diagnostic_ok": False, "read_failed": True}
     measured_events = int(measured["events"] or 0)
     unmeasured_events = int(repeats["events"] or 0)
-    health = health_rows[0] if health_rows else None
     truncated = health is not None and (health["measured_truncated"] == 1 or health["repeat_truncated"] == 1)
     reason = None if health is None else health["truncation_reason"]
-    uncertain = _UNPERSISTED_FAILURES > 0 or evidence_unreadable
+    uncertain = _UNPERSISTED_FAILURES > 0
     covers = [item for item in (measured["oldest"], repeats["oldest"]) if item is not None]
     through = [item for item in (measured["newest"], None if repeats["newest"] is None else repeats["newest"] + window) if item is not None]
     rules = {}
@@ -3828,6 +3885,30 @@ def _notional(canonical_pool, quote) -> Decimal | None:
     return TICKET - deposit
 
 
+def _note_expected_cut(conn, evidence) -> None:
+    """Remember a measured cut the decision just logged. Same transaction as that log.
+
+    The row is pruned with the cut horizon and the measured cap. It is how a crash
+    after the decision and before the attempt is still visible, without rereading
+    every historical log.
+    """
+    if not isinstance(evidence, dict):
+        return
+    cut = evidence.get("cut")
+    if not isinstance(cut, dict) or cut.get("measured") is not True or cut.get("pipeline") != CUT_PIPELINE:
+        return
+    cut_id = cut.get("cut_id")
+    observed = cut.get("observed_at")
+    if not isinstance(cut_id, str) or cut_id == "":
+        return
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO memecoin_cut_expected (cut_id, observed_at) VALUES (?, ?)",
+        (cut_id, float(observed)),
+    )
+
+
 def _log(conn, case_id, mint, stage: str, verdict: str, reason, source, evidence, moment: float) -> None:
     cursor = conn.execute(
         "INSERT INTO memecoin_log (ts, case_id, mint, stage, verdict, reason, source, evidence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3835,6 +3916,7 @@ def _log(conn, case_id, mint, stage: str, verdict: str, reason, source, evidence
     )
     if cursor.rowcount != 1:
         raise RuntimeError("log_failed")
+    _note_expected_cut(conn, evidence)
 
 
 def _ensure() -> None:
@@ -4002,10 +4084,25 @@ def _ensure_conn(conn) -> None:
             started_at REAL NOT NULL,
             mint TEXT,
             rule TEXT,
-            state TEXT NOT NULL
+            state TEXT NOT NULL,
+            measured INTEGER NOT NULL DEFAULT 1
         )
         """
     )
+    try:
+        conn.execute("ALTER TABLE memecoin_cut_attempts ADD COLUMN measured INTEGER NOT NULL DEFAULT 1")
+    except Exception:
+        pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cut_expected (
+            cut_id TEXT PRIMARY KEY,
+            observed_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memecoin_cut_expected_at ON memecoin_cut_expected (observed_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memecoin_cuts_cut_id ON memecoin_cuts (cut_id)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_cut_repeats (

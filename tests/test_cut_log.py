@@ -545,3 +545,131 @@ class CutLogTests(unittest.TestCase):
         self.assertGreaterEqual(fresh["known_gaps"], 1)
         self.assertNotIn(mint, fresh["mints"])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (mint,))[0]["n"], 1)
+
+    def _kill_measured(self, mint: str, moment: float, rule: str = "age") -> dict:
+        cut = self._cut(mint, moment, True, rule)
+        memecoin_desk._kill(None, mint, "scout", rule, "dexscreener", cut)
+        return cut
+
+    def test_overnight_rollover_is_not_a_write_failure(self):
+        first = _mint(62)
+        second = _mint(63)
+        self._kill_measured(first, NOW)
+        later = NOW + memecoin_desk.CUT_HORIZON_S + 5
+        self._kill_measured(second, later)
+        db.execute(
+            "INSERT INTO memecoin_cut_expected (cut_id, observed_at) VALUES (?, ?)",
+            ("stale-outside-horizon", NOW - 10),
+        )
+        report = memecoin_desk.cut_report()
+        self.assertEqual(report["measured_events"], 1)
+        self.assertEqual([row["mint"] for row in db.query("SELECT mint FROM memecoin_cuts")], [second])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log")[0]["n"], 2)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts")[0]["n"], 0)
+        self.assertEqual(report["known_gaps"], 0)
+        self.assertEqual(report["cut_write_failures"], 0)
+        self.assertTrue(report["window_intact"])
+        self.assertFalse(report["truncated"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+        self.assertTrue(report["diagnostic_ok"])
+
+    def test_safety_cap_eviction_is_not_a_write_failure(self):
+        previous = memecoin_desk.CUT_MEASURED_CAP
+        memecoin_desk.CUT_MEASURED_CAP = 2
+        self.addCleanup(lambda: setattr(memecoin_desk, "CUT_MEASURED_CAP", previous))
+        for index in range(5):
+            self._kill_measured(_mint(110 + index), NOW + index)
+        report = memecoin_desk.cut_report()
+        self.assertEqual(report["measured_events"], 2)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log")[0]["n"], 5)
+        self.assertEqual(report["known_gaps"], 0)
+        self.assertEqual(report["cut_write_failures"], 0)
+        self.assertTrue(report["truncated"])
+        self.assertFalse(report["window_intact"])
+        self.assertTrue(report["diagnostic_ok"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+        newest = db.query("SELECT cut_id FROM memecoin_cuts ORDER BY observed_at DESC, id DESC LIMIT 1")[0]
+        db.execute("DELETE FROM memecoin_cuts WHERE cut_id = ?", (newest["cut_id"],))
+        holed = memecoin_desk.cut_report()
+        self.assertEqual(holed["measured_events"], 1)
+        self.assertEqual(holed["known_gaps"], 1)
+        self.assertEqual(holed["cut_write_failures"], 1)
+        self.assertFalse(holed["diagnostic_ok"])
+        self.assertFalse(holed["complete"])
+
+    def test_historical_logs_outside_the_horizon_are_not_gaps(self):
+        memecoin_desk._ensure()
+        old = NOW - memecoin_desk.CUT_HORIZON_S - 60
+        rows = [
+            (
+                old,
+                "scout",
+                "kill",
+                "market_cap",
+                json.dumps({"cut": {"cut_id": "old-%s" % index, "observed_at": old, "pipeline": "six_role", "measured": True}}),
+            )
+            for index in range(2000)
+        ]
+
+        def load(conn):
+            conn.executemany(
+                "INSERT INTO memecoin_log (ts, stage, verdict, reason, evidence_json) VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+
+        db.exclusive(load)
+        mint = _mint(61)
+        self._kill_measured(mint, NOW)
+        report = memecoin_desk.cut_report()
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log")[0]["n"], 2001)
+        self.assertEqual(report["measured_events"], 1)
+        self.assertEqual(report["known_gaps"], 0)
+        self.assertEqual(report["cut_write_failures"], 0)
+        self.assertTrue(report["diagnostic_ok"])
+        self.assertTrue(report["window_intact"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+
+    def test_a_missing_cut_inside_the_window_is_a_gap(self):
+        kept = _mint(64)
+        lost = _mint(65)
+        self._kill_measured(kept, NOW, "age")
+        lost_cut = self._kill_measured(lost, NOW + 10, "market_cap")
+        db.execute("DELETE FROM memecoin_cuts WHERE cut_id = ?", (lost_cut["cut_id"],))
+        report = memecoin_desk.cut_report()
+        self.assertEqual(report["measured_events"], 1)
+        self.assertEqual([row["mint"] for row in db.query("SELECT mint FROM memecoin_cuts")], [kept])
+        self.assertEqual(report["known_gaps"], 1)
+        self.assertEqual(report["cut_write_failures"], 1)
+        self.assertFalse(report["diagnostic_ok"])
+        self.assertTrue(report["window_intact"])
+        self.assertFalse(report["truncated"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+
+    def test_an_attempt_and_its_logged_cut_count_as_one_gap(self):
+        mint = _mint(66)
+
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        memecoin_desk._CUT_WRITER = explode
+        cut = self._cut(mint, NOW, True, "market_cap")
+        memecoin_desk._kill(None, mint, "scout", "market_cap", "dexscreener", cut)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 0)
+        self.assertEqual(
+            db.query("SELECT cut_id FROM memecoin_cut_expected")[0]["cut_id"],
+            cut["cut_id"],
+        )
+        self.assertEqual(
+            db.query("SELECT attempt_id FROM memecoin_cut_attempts")[0]["attempt_id"],
+            cut["cut_id"],
+        )
+        report = memecoin_desk.cut_report()
+        self.assertEqual(report["known_gaps"], 1)
+        self.assertEqual(report["cut_write_failures"], 1)
+        self.assertFalse(report["diagnostic_ok"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
