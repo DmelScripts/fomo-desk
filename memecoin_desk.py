@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import time
+import uuid
 from decimal import Decimal, InvalidOperation
 
 import db
@@ -55,6 +56,15 @@ WEIGHTS = {
 }
 COMPONENTS = tuple(WEIGHTS)
 FRESH_S = 30
+# Six-role cut log only. Not a trade threshold and not the legacy scanner.
+# Measured rows are kept for one full day so a morning read still has the night.
+# Cooldown repeats are counted in fixed windows instead of one row per pass.
+CUT_PIPELINE = "six_role"
+CUT_HORIZON_S = 24 * 3600
+CUT_MEASURED_CAP = 40000
+CUT_REPEAT_CAP = 40000
+_CUT_LIQUIDITY_BASIS = frozenset({"dex_liquidity_usd", "quote_side"})
+_CUT_PAIR_PROVENANCE = frozenset({"pinned", "first_rank", "pinned_missing", "unknown"})
 # A rejected mint can be read again after this. It is not a trade threshold.
 REEVAL_COOLDOWN_S = 300
 _PIPELINE_STAGES = frozenset({"scout_passed", "filter_passed", "analyst_passed"})
@@ -139,18 +149,55 @@ def scout(pair: dict, now: float | None = None) -> dict:
     pool_count = len(cross_source.sol_pairs(dex_body, mint))
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
 
+    if pin != "" and not isinstance(selected, dict):
+        provenance = "pinned_missing"
+        logged_pair = pin
+    elif pin != "":
+        provenance = "pinned"
+        logged_pair = pair_address if isinstance(pair_address, str) else pin
+    elif isinstance(pair_address, str) and pair_address != "":
+        provenance = "first_rank"
+        logged_pair = pair_address
+    else:
+        provenance = "unknown"
+        logged_pair = None
+
     def scout_kill(reason: str) -> dict:
-        killed = _kill(None, mint, "scout", reason, "dexscreener")
+        liq_raw = None
+        cap_raw = None
+        if isinstance(selected, dict) and provenance != "pinned_missing":
+            box = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
+            if isinstance(box, dict) and "usd" in box:
+                liq_raw = box.get("usd")
+            if "marketCap" in selected:
+                cap_raw = selected.get("marketCap")
+        cut = make_cut(
+            observed_at=moment,
+            mint=mint,
+            pair_address=logged_pair,
+            pair_provenance=provenance,
+            case_id=None,
+            stage="scout",
+            rule=reason,
+            measured=True,
+            liquidity=liq_raw,
+            market_cap=cap_raw,
+            liquidity_basis="dex_liquidity_usd",
+            market_cap_basis="marketCap",
+        )
+        killed = _kill(None, mint, "scout", reason, "dexscreener", cut)
         noted = {
             "stage": "scout",
             "candidate_pools": pool_count,
             "fdv_used_as_market_cap": False,
+            "cut": cut,
         }
-        if isinstance(pair_address, str) and pair_address != "":
-            noted["pair_address"] = pair_address
-        box = selected.get("liquidity") if isinstance(selected, dict) and isinstance(selected.get("liquidity"), dict) else None
-        if isinstance(box, dict) and "usd" in box:
-            noted["liquidity_usd"] = str(box.get("usd"))
+        if isinstance(logged_pair, str) and logged_pair != "":
+            noted["pair_address"] = logged_pair
+        if isinstance(selected, dict) and provenance != "pinned_missing":
+            box = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
+            if isinstance(box, dict) and "usd" in box:
+                noted["liquidity_usd"] = str(box.get("usd"))
         return killed | noted
 
     if not isinstance(pair_address, str) or pair_address == "":
@@ -225,10 +272,40 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return _kill(case_id, None, "filter", "stage", None)
     snap = _snapshot(row)
     source = onchain.get("source") if isinstance(onchain, dict) and isinstance(onchain.get("source"), str) else None
+    stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    seen_liq = snap.get("liquidity_usd")
+    seen_cap = snap.get("market_cap_usd")
+    seen_basis = "dex_liquidity_usd"
+
+    def refuse(reason: str, reading: dict | None = None, *, source_name: str | None = None, extra: dict | None = None) -> dict:
+        if reading is None:
+            liquidity, cap, basis = seen_liq, seen_cap, seen_basis
+        else:
+            liquidity, cap, basis = reading.get("liquidity"), reading.get("market_cap"), reading.get("basis")
+        cut = make_cut(
+            observed_at=moment,
+            mint=row["mint"],
+            pair_address=stored_pair or None,
+            pair_provenance="pinned" if stored_pair else "unknown",
+            case_id=row["id"],
+            stage="filter",
+            rule=reason,
+            measured=True,
+            liquidity=liquidity,
+            market_cap=cap,
+            liquidity_basis=basis,
+            market_cap_basis="marketCap",
+        )
+        evidence = {"reason": reason, "cut": cut}
+        if isinstance(extra, dict):
+            evidence.update(extra)
+            evidence["cut"] = cut
+        failed = _fail(row, "filter", reason, evidence, source=source if source_name is None else source_name)
+        failed["cut"] = cut
+        return failed
+
     if not isinstance(onchain, dict) or source in (None, "dexscreener"):
-        return _fail(row, "filter", "onchain_source", source=source)
-    def refuse(reason: str) -> dict:
-        return _fail(row, "filter", reason, source=source)
+        return refuse("onchain_source")
 
     fetched = _num(onchain.get("fetched_at"))
     clock = _num(moment)
@@ -236,7 +313,6 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return refuse("onchain_stale")
     import dev_rug_history
     import cross_source
-    stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
     cross_source.take_failure()
     bundle = cross_source.fetch_bundle(row["mint"], stored_pair) if stored_pair else None
     if bundle is None:
@@ -265,7 +341,16 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     if checks["holder_growth"]["status"] != "PASS":
         return refuse(checks["holder_growth"].get("reason") or "holder_growth_unproven")
     if liq_row["status"] != "PASS":
-        return refuse(liq_row.get("reason") or "liquidity_source_missing")
+        if liq_row.get("reason") in {"liquidity_source_missing", "pool_missing", "pool_ambiguous", "pinned_pair_missing"}:
+            return refuse(liq_row.get("reason") or "liquidity_source_missing", {"liquidity": None, "market_cap": None, "basis": None})
+        return refuse(liq_row.get("reason") or "liquidity_source_missing", {
+            "liquidity": liq_row.get("quote_usd"),
+            "market_cap": liq_row.get("market_cap_usd"),
+            "basis": "quote_side",
+        })
+    seen_liq = liq_row.get("quote_usd")
+    seen_cap = liq_row.get("market_cap_usd")
+    seen_basis = "quote_side"
     snap = dict(snap)
     snap["liquidity_usd"] = liq_row.get("quote_usd")
     snap["market_cap_usd"] = liq_row.get("market_cap_usd")
@@ -281,16 +366,16 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         "bundled_launch_pct": bundled.get("bundled_launch_pct"),
     }
     if bundled.get("ok") is not True:
-        return _fail(row, "filter", bundled.get("reason") or "bundle_unverified", bundle_evidence, source=bundled.get("source"))
+        return refuse(bundled.get("reason") or "bundle_unverified", source_name=bundled.get("source"), extra=bundle_evidence)
     bundled_pct = _num(bundled.get("bundled_launch_pct"))
     if bundled_pct is None or bundled_pct > BUNDLE_MAX:
-        return _fail(row, "filter", "bundle" if bundled_pct is not None else "bundle_unverified", bundle_evidence, source=bundled.get("source"))
+        return refuse("bundle" if bundled_pct is not None else "bundle_unverified", source_name=bundled.get("source"), extra=bundle_evidence)
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:
-        return refuse("liquidity_ratio")
+        return refuse("liquidity_ratio", {"liquidity": snap.get("liquidity_usd"), "market_cap": snap.get("market_cap_usd"), "basis": "quote_side"})
     if liq / mcap < LIQ_OF_MCAP:
-        return refuse("liquidity_below_25pct_mcap")
+        return refuse("liquidity_below_25pct_mcap", {"liquidity": snap.get("liquidity_usd"), "market_cap": snap.get("market_cap_usd"), "basis": "quote_side"})
     evidence = {
         "source": onchain.get("source"), "liq_of_mcap": format(liq / mcap, "f"),
         "market_cap_basis": "market_cap", "lpLockedPct": 100, "lp_expiry_checked": False,
@@ -378,21 +463,44 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     those components at 0 the highest score is 65.
     """
     moment = time.time() if now is None else now
-    del moment
     row = _case(case_id)
     if row is None or row["stage"] != "filter_passed":
         return _kill(case_id, None, "analyst", "stage", None)
+
+    def analyst_fail(reason: str, evidence: dict | None = None, source: str | None = None) -> dict:
+        body = dict(evidence or {})
+        snap = _snapshot(row)
+        pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+        body["reason"] = reason
+        body["cut"] = make_cut(
+            observed_at=moment,
+            mint=row["mint"],
+            pair_address=pin or None,
+            pair_provenance="pinned" if pin else "unknown",
+            case_id=row["id"],
+            stage="analyst",
+            rule=reason,
+            measured=True,
+            liquidity=snap.get("liquidity_usd"),
+            market_cap=snap.get("market_cap_usd"),
+            liquidity_basis="quote_side",
+            market_cap_basis="marketCap",
+        )
+        failed = _fail(row, "analyst", reason, body, source=source)
+        failed["cut"] = body["cut"]
+        return failed
+
     if not isinstance(components, dict):
-        return _fail(row, "analyst", "components_missing")
+        return analyst_fail("components_missing")
     holder_item = components.get("holder_growth")
     if isinstance(holder_item, dict):
         holder = _holder_growth_value(holder_item, row["mint"])
         if holder is None:
-            return _fail(row, "analyst", "holder_growth_unknown", source=holder_item.get("source") if isinstance(holder_item.get("source"), str) else None)
+            return analyst_fail("holder_growth_unknown", source=holder_item.get("source") if isinstance(holder_item.get("source"), str) else None)
     else:
         holder = _holder_growth_value({"source": "solana_tracker_holders_chart"}, row["mint"])
         if holder is None:
-            return _fail(row, "analyst", "holder_growth_unknown", source="solana_tracker_holders_chart")
+            return analyst_fail("holder_growth_unknown", source="solana_tracker_holders_chart")
     pin = _snapshot(row).get("pair_address") if isinstance(_snapshot(row).get("pair_address"), str) else ""
     fetched = _fetched_components(row["mint"], pin)
     evidence = {
@@ -409,7 +517,7 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     }
     if fetched.get("ok") is not True:
         evidence["component"] = fetched.get("component")
-        return _fail(row, "analyst", fetched.get("reason") or "component_unverified", evidence)
+        return analyst_fail(fetched.get("reason") or "component_unverified", evidence)
     values = fetched["values"]
     values["holder_growth"] = holder
     values["unique_buyers"] = Decimal("0")
@@ -420,13 +528,13 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     }
     score = score_from_values(plain)
     if score is None:
-        return _fail(row, "analyst", "component_unverified", evidence)
+        return analyst_fail("component_unverified", evidence)
     evidence["score"] = format(score, "f")
     evidence["momentum"] = {"value": str(values["momentum"]), "source": "dex_price_change_h1"}
     evidence["buy_sell_ratio"] = {"value": str(values["buy_sell_ratio"]), "source": "dex_txns_h1"}
     evidence["liq_mcap"] = {"value": str(values["liq_mcap"]), "source": "quote_over_confirmed_mcap"}
     if score < SCORE_FLOOR:
-        return _fail(row, "analyst", "score", evidence)
+        return analyst_fail("score", evidence)
     snap = _snapshot(row)
     snap["score"] = format(score, "f")
     snap["analyst"] = evidence
@@ -1747,8 +1855,8 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
 
 
 def _refund_duplicate(signature: str) -> dict | None:
-    _ensure()
     try:
+        _ensure()
         rows = db.query("SELECT case_id, network_fee_lamports, fee_usd, released FROM memecoin_refunds WHERE signature = ?", (signature,))
     except Exception:
         return None
@@ -2286,34 +2394,623 @@ def _advance(row, stage: str, name: str, evidence: dict, snap: dict | None = Non
     return db.exclusive(work)
 
 
+def _usd_known(value):
+    """A finite USD amount, including zero. Missing, negative, and non-numbers are unknown."""
+    if value is None or isinstance(value, bool):
+        return None
+    number = _num(value)
+    if number is None or number < 0:
+        return None
+    return format(number, "f")
+
+
+def _cut_text(value, limit: int = 80) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value == "" or len(value) > limit or any(char.isspace() for char in value) or "://" in value or "api-key" in value.lower():
+        return None
+    return value
+
+
+def make_cut(
+    *,
+    observed_at,
+    mint,
+    pair_address,
+    pair_provenance,
+    case_id,
+    stage,
+    rule,
+    measured,
+    liquidity,
+    market_cap,
+    liquidity_basis,
+    market_cap_basis,
+) -> dict:
+    """One six-role rejection observation. FDV is never copied into market cap."""
+    liquidity_usd = _usd_known(liquidity)
+    market_cap_usd = _usd_known(market_cap)
+    if market_cap_basis != "marketCap":
+        market_cap_usd = None
+    if liquidity_basis not in _CUT_LIQUIDITY_BASIS:
+        liquidity_usd = None
+        liquidity_basis = None
+    elif liquidity_usd is None:
+        liquidity_basis = None
+    if market_cap_usd is None:
+        market_cap_basis = None
+    ratio = None
+    if liquidity_usd is not None and market_cap_usd is not None:
+        cap = Decimal(market_cap_usd)
+        if cap > 0:
+            ratio = format(Decimal(liquidity_usd) / cap, "f")
+    provenance = pair_provenance if pair_provenance in _CUT_PAIR_PROVENANCE else "unknown"
+    pair = _cut_text(pair_address, 64)
+    if provenance == "unknown":
+        pair = None
+    return {
+        "pipeline": CUT_PIPELINE,
+        "observed_at": observed_at if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool) else None,
+        "mint": _cut_text(mint, 64),
+        "pair_address": pair,
+        "pair_provenance": provenance,
+        "case_id": _cut_text(case_id, 96),
+        "stage": _cut_text(stage, 40) or "unknown",
+        "rule": _cut_text(rule, 80) or "unknown",
+        "liquidity_usd": liquidity_usd,
+        "liquidity_basis": liquidity_basis,
+        "market_cap_usd": market_cap_usd,
+        "market_cap_basis": market_cap_basis,
+        "ratio": ratio,
+        "ratio_status": "known" if ratio is not None else "unknown",
+        "measured": measured is True,
+        "fdv_used_as_market_cap": False,
+        "cut_id": str(uuid.uuid4()),
+    }
+
+
+# This process only. A restart cannot inherit it, so a cold reader never attests history.
+_CUT_WRITER = None
+_UNPERSISTED_FAILURES = 0
+
+
+def _mark_unpersisted() -> None:
+    global _UNPERSISTED_FAILURES
+    _UNPERSISTED_FAILURES += 1
+
+
+def note_cut_failure() -> None:
+    """A cut write failed outside record_cut_safely. The decision is already committed."""
+    _mark_unpersisted()
+
+
+def _cut_window_start(observed_at: float) -> int:
+    window = REEVAL_COOLDOWN_S
+    return int(float(observed_at) // window) * window
+
+
+def _mark_cut_truncation(conn, reason: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO memecoin_cut_health (id, measured_truncated, repeat_truncated, truncation_reason)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            measured_truncated = MAX(memecoin_cut_health.measured_truncated, excluded.measured_truncated),
+            repeat_truncated = MAX(memecoin_cut_health.repeat_truncated, excluded.repeat_truncated),
+            truncation_reason = CASE
+                WHEN memecoin_cut_health.truncation_reason IS NULL OR memecoin_cut_health.truncation_reason = '' THEN excluded.truncation_reason
+                WHEN instr(memecoin_cut_health.truncation_reason, excluded.truncation_reason) > 0 THEN memecoin_cut_health.truncation_reason
+                ELSE memecoin_cut_health.truncation_reason || ',' || excluded.truncation_reason
+            END
+        """,
+        (1 if reason == "measured_cap" else 0, 1 if reason == "repeat_cap" else 0, reason),
+    )
+
+
+def _prune_cuts(conn, now: float) -> None:
+    """Drop stored samples outside the horizon, or a whole oldest window past the safety cap.
+
+    An attempt row is a write that did not finish. The cap removes stored cuts only.
+    It does not delete an attempt, including one older than the oldest cut still kept.
+    """
+    horizon_start = float(now) - CUT_HORIZON_S
+    conn.execute("DELETE FROM memecoin_cuts WHERE observed_at < ?", (horizon_start,))
+    conn.execute("DELETE FROM memecoin_cut_repeats WHERE window_start < ?", (horizon_start,))
+    conn.execute("DELETE FROM memecoin_cut_attempts WHERE started_at < ?", (horizon_start,))
+    measured = conn.execute("SELECT COUNT(*) FROM memecoin_cuts").fetchone()[0]
+    if measured > CUT_MEASURED_CAP:
+        extra = measured - CUT_MEASURED_CAP
+        conn.execute(
+            """
+            DELETE FROM memecoin_cuts WHERE id IN (
+                SELECT id FROM memecoin_cuts ORDER BY observed_at ASC, id ASC LIMIT ?
+            )
+            """,
+            (extra,),
+        )
+        _mark_cut_truncation(conn, "measured_cap")
+    while conn.execute("SELECT COUNT(*) FROM memecoin_cut_repeats").fetchone()[0] > CUT_REPEAT_CAP:
+        oldest = conn.execute("SELECT MIN(window_start) FROM memecoin_cut_repeats").fetchone()[0]
+        if oldest is None:
+            break
+        conn.execute("DELETE FROM memecoin_cut_repeats WHERE window_start = ?", (oldest,))
+        _mark_cut_truncation(conn, "repeat_cap")
+
+
+def _insert_cut(conn, cut: dict) -> None:
+    if not isinstance(cut, dict) or cut.get("pipeline") != CUT_PIPELINE:
+        return
+    if cut.get("observed_at") is None:
+        return
+    observed_at = float(cut["observed_at"])
+    if cut.get("measured") is True:
+        conn.execute(
+            """
+            INSERT INTO memecoin_cuts (
+                observed_at, pipeline, mint, pair_address, pair_provenance, case_id, stage, rule,
+                liquidity_usd, liquidity_basis, market_cap_usd, market_cap_basis, ratio, measured,
+                fdv_used_as_market_cap, cut_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?)
+            """,
+            (
+                observed_at, CUT_PIPELINE, cut.get("mint"), cut.get("pair_address"),
+                cut.get("pair_provenance") or "unknown", cut.get("case_id"), cut.get("stage") or "unknown",
+                cut.get("rule") or "unknown", cut.get("liquidity_usd"), cut.get("liquidity_basis"),
+                cut.get("market_cap_usd"), cut.get("market_cap_basis"), cut.get("ratio"),
+                cut.get("cut_id"),
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO memecoin_cut_repeats (window_start, pipeline, mint, rule, stage, events)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(pipeline, window_start, mint, rule, stage) DO UPDATE SET events = events + 1
+            """,
+            (
+                _cut_window_start(observed_at), CUT_PIPELINE, cut.get("mint") or "",
+                cut.get("rule") or "unknown", cut.get("stage") or "unknown",
+            ),
+        )
+    _prune_cuts(conn, observed_at)
+
+
+# Runs in the logging process only. A new process cannot attest history.
+_PROCESS_WITNESS = False
+# Tests may set this to exit or raise before any attempt row is written.
+_BEFORE_CUT_ATTEMPT = None
+
+
+def _begin_attempt(cut: dict) -> bool:
+    """One row per try. Not a process-wide flag, so two writers do not share it."""
+    try:
+        def work(conn):
+            _ensure_conn(conn)
+            conn.execute(
+                """
+                INSERT INTO memecoin_cut_attempts (attempt_id, started_at, mint, rule, state, measured)
+                VALUES (?, ?, ?, ?, 'open', ?)
+                """,
+                (
+                    cut.get("cut_id"), float(cut["observed_at"]), cut.get("mint") or "",
+                    cut.get("rule") or "unknown", 1 if cut.get("measured") is True else 0,
+                ),
+            )
+
+        db.exclusive(work)
+        return True
+    except Exception:
+        _mark_unpersisted()
+        return False
+
+
+def _fail_attempt(cut: dict) -> bool:
+    try:
+        updated = []
+
+        def work(conn):
+            _ensure_conn(conn)
+            cursor = conn.execute(
+                "UPDATE memecoin_cut_attempts SET state = 'failed' WHERE attempt_id = ?",
+                (cut.get("cut_id"),),
+            )
+            updated.append(cursor.rowcount)
+
+        db.exclusive(work)
+        if not updated or updated[0] != 1:
+            _mark_unpersisted()
+            return False
+        return True
+    except Exception:
+        _mark_unpersisted()
+        return False
+
+
+def record_cut_safely(cut: dict) -> bool:
+    """Store a cut after the decision has committed. Nothing here can raise.
+
+    Capture is best-effort. An attempt row is per cut, in its own transaction,
+    before the insert. There is no shared attempt flag and no telemetry write in
+    the decision transaction. A crash before this function leaves no gap row;
+    complete stays false. A crash after the attempt row leaves that row.
+    """
+    global _PROCESS_WITNESS
+    try:
+        if not isinstance(cut, dict) or cut.get("observed_at") is None or cut.get("pipeline") != CUT_PIPELINE:
+            return False
+        hook = _BEFORE_CUT_ATTEMPT
+        if callable(hook):
+            hook(cut)
+        if not _begin_attempt(cut):
+            return False
+
+        def work(conn):
+            _ensure_conn(conn)
+            writer = _CUT_WRITER
+            if callable(writer):
+                writer(conn, cut)
+            _insert_cut(conn, cut)
+            conn.execute("DELETE FROM memecoin_cut_attempts WHERE attempt_id = ?", (cut.get("cut_id"),))
+
+        db.exclusive(work)
+        _PROCESS_WITNESS = True
+        return True
+    except Exception:
+        try:
+            _fail_attempt(cut)
+        except Exception:
+            _mark_unpersisted()
+        return False
+
+
+def persist_cut(cut: dict) -> bool:
+    """Write one cut. Never raises. The caller’s decision does not depend on this."""
+    return record_cut_safely(cut)
+
+
+def cut_from_case(case_id: str, *, observed_at, stage: str, rule: str, measured: bool = True) -> dict:
+    """The case snapshot's own marketCap and dex liquidity. Missing fields stay unknown."""
+    row = _case(case_id) if isinstance(case_id, str) else None
+    snap = _snapshot(row) if row is not None else {}
+    pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    cut = make_cut(
+        observed_at=observed_at,
+        mint=row["mint"] if row is not None else None,
+        pair_address=pin or None,
+        pair_provenance="pinned" if pin else "unknown",
+        case_id=case_id if isinstance(case_id, str) else None,
+        stage=stage,
+        rule=rule,
+        measured=measured,
+        liquidity=snap.get("liquidity_usd"),
+        market_cap=snap.get("market_cap_usd"),
+        liquidity_basis="dex_liquidity_usd",
+        market_cap_basis="marketCap" if snap.get("market_cap_basis") == "marketCap" else None,
+    )
+    persist_cut(cut)
+    return cut
+
+
+def _cut_row(row) -> dict:
+    ratio = row["ratio"]
+    return {
+        "pipeline": CUT_PIPELINE,
+        "observed_at": row["observed_at"],
+        "mint": row["mint"],
+        "pair_address": row["pair_address"],
+        "pair_provenance": row["pair_provenance"],
+        "case_id": row["case_id"],
+        "stage": row["stage"],
+        "rule": row["rule"],
+        "liquidity_usd": row["liquidity_usd"],
+        "liquidity_basis": row["liquidity_basis"],
+        "market_cap_usd": row["market_cap_usd"],
+        "market_cap_basis": row["market_cap_basis"],
+        "ratio": ratio,
+        "ratio_status": "known" if isinstance(ratio, str) else "unknown",
+        "measured": row["measured"] == 1,
+        "fdv_used_as_market_cap": False,
+    }
+
+
+def cut_report(limit: int = 50) -> dict:
+    """Retained six-role cuts for the horizon. This is not a threshold and it does not read scanner scans.
+
+    Measured samples stay as rows. Cooldown repeats are exact counts per window.
+    `window_intact` is that retention. `complete` stays false: capture is best-effort.
+    `known_gaps` counts attempt rows still inside the time horizon. A stored cut
+    the cap evicts is not a gap. An attempt older than the oldest kept cut still is.
+    """
+    if isinstance(limit, bool) or type(limit) is not int or limit < 1:
+        limit = 50
+    limit = min(limit, 100)
+    window = REEVAL_COOLDOWN_S
+    base = {
+        "pipeline": CUT_PIPELINE,
+        "legacy_scanner_excluded": True,
+        "not_a_threshold_proposal": True,
+        "proposal": None,
+        "fdv_used_as_market_cap": False,
+        "horizon_s": CUT_HORIZON_S,
+        "repeat_window_s": window,
+        "summary_covers": "retained_horizon",
+        "rows_are": "newest_measured_samples",
+        "events": 0,
+        "unique_mints": 0,
+        "measured_events": 0,
+        "unmeasured_events": 0,
+        "liquidity_unknown_events": 0,
+        "market_cap_unknown_events": 0,
+        "ratio_known_events": 0,
+        "ratio_unknown_events": 0,
+        "by_rule": [],
+        "repeat_windows": [],
+        "rows": [],
+        "limit": limit,
+        "covers_from": None,
+        "covers_through": None,
+        "sampling": "best_effort",
+        "capture_proven": False,
+        "capture_complete": False,
+        "complete": False,
+        "window_intact": False,
+        "truncated": False,
+        "truncation_reason": None,
+        "diagnostic_ok": False,
+        "known_gaps": 0,
+        "cut_write_failures": _UNPERSISTED_FAILURES,
+        "coverage_uncertain": _UNPERSISTED_FAILURES > 0,
+        "attested": False,
+        "read_failed": False,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+    }
+    try:
+        _ensure()
+        measured = db.query(
+            """
+            SELECT COUNT(*) AS events,
+                   COALESCE(SUM(CASE WHEN liquidity_usd IS NULL THEN 1 ELSE 0 END), 0) AS liquidity_unknown,
+                   COALESCE(SUM(CASE WHEN market_cap_usd IS NULL THEN 1 ELSE 0 END), 0) AS market_cap_unknown,
+                   COALESCE(SUM(CASE WHEN ratio IS NULL THEN 1 ELSE 0 END), 0) AS ratio_unknown,
+                   COALESCE(SUM(CASE WHEN ratio IS NOT NULL THEN 1 ELSE 0 END), 0) AS ratio_known,
+                   MIN(observed_at) AS oldest,
+                   MAX(observed_at) AS newest
+            FROM memecoin_cuts WHERE pipeline = ?
+            """,
+            (CUT_PIPELINE,),
+        )[0]
+        repeats = db.query(
+            """
+            SELECT COALESCE(SUM(events), 0) AS events,
+                   MIN(window_start) AS oldest,
+                   MAX(window_start) AS newest
+            FROM memecoin_cut_repeats WHERE pipeline = ?
+            """,
+            (CUT_PIPELINE,),
+        )[0]
+        unique = db.query(
+            """
+            SELECT COUNT(*) AS n FROM (
+                SELECT mint FROM memecoin_cuts WHERE pipeline = ? AND mint IS NOT NULL
+                UNION
+                SELECT mint FROM memecoin_cut_repeats WHERE pipeline = ? AND mint != ''
+            )
+            """,
+            (CUT_PIPELINE, CUT_PIPELINE),
+        )[0]
+        measured_rules = db.query(
+            """
+            SELECT rule, stage, COUNT(*) AS events, COUNT(DISTINCT mint) AS unique_mints,
+                   COALESCE(SUM(CASE WHEN liquidity_usd IS NULL THEN 1 ELSE 0 END), 0) AS liquidity_unknown,
+                   COALESCE(SUM(CASE WHEN market_cap_usd IS NULL THEN 1 ELSE 0 END), 0) AS market_cap_unknown,
+                   COALESCE(SUM(CASE WHEN ratio IS NULL THEN 1 ELSE 0 END), 0) AS ratio_unknown
+            FROM memecoin_cuts WHERE pipeline = ?
+            GROUP BY rule, stage
+            """,
+            (CUT_PIPELINE,),
+        )
+        repeat_rules = db.query(
+            """
+            SELECT rule, stage, COALESCE(SUM(events), 0) AS events, COUNT(DISTINCT mint) AS unique_mints
+            FROM memecoin_cut_repeats WHERE pipeline = ?
+            GROUP BY rule, stage
+            """,
+            (CUT_PIPELINE,),
+        )
+        measured_windows = db.query(
+            """
+            SELECT CAST(observed_at / ? AS INT) * ? AS window_start,
+                   COUNT(*) AS events, COUNT(DISTINCT mint) AS unique_mints
+            FROM memecoin_cuts WHERE pipeline = ?
+            GROUP BY window_start
+            """,
+            (window, window, CUT_PIPELINE),
+        )
+        repeat_windows = db.query(
+            """
+            SELECT window_start, COALESCE(SUM(events), 0) AS events, COUNT(DISTINCT mint) AS unique_mints
+            FROM memecoin_cut_repeats WHERE pipeline = ?
+            GROUP BY window_start
+            """,
+            (CUT_PIPELINE,),
+        )
+        window_mints = db.query(
+            """
+            SELECT window_start, COUNT(*) AS unique_mints FROM (
+                SELECT CAST(observed_at / ? AS INT) * ? AS window_start, mint
+                FROM memecoin_cuts WHERE pipeline = ? AND mint IS NOT NULL
+                UNION
+                SELECT window_start, mint FROM memecoin_cut_repeats WHERE pipeline = ? AND mint != ''
+            )
+            GROUP BY window_start
+            """,
+            (window, window, CUT_PIPELINE, CUT_PIPELINE),
+        )
+        listed = db.query(
+            """
+            SELECT observed_at, pipeline, mint, pair_address, pair_provenance, case_id, stage, rule,
+                   liquidity_usd, liquidity_basis, market_cap_usd, market_cap_basis, ratio, measured
+            FROM memecoin_cuts WHERE pipeline = ?
+            ORDER BY observed_at DESC, id DESC LIMIT ?
+            """,
+            (CUT_PIPELINE, limit),
+        )
+        health_rows = db.query(
+            """
+            SELECT measured_truncated, repeat_truncated, truncation_reason
+            FROM memecoin_cut_health WHERE id = 1
+            """
+        )
+        health = health_rows[0] if health_rows else None
+        anchors = [measured["newest"], repeats["newest"]]
+        anchors.append(db.query("SELECT MAX(started_at) AS n FROM memecoin_cut_attempts")[0]["n"])
+        anchors = [item for item in anchors if item is not None]
+        gap_ids = set()
+        if anchors:
+            horizon_start = max(float(item) for item in anchors) - CUT_HORIZON_S
+            for item in db.query(
+                "SELECT attempt_id FROM memecoin_cut_attempts WHERE started_at >= ?",
+                (horizon_start,),
+            ):
+                if isinstance(item["attempt_id"], str) and item["attempt_id"] != "":
+                    gap_ids.add(item["attempt_id"])
+    except Exception:
+        return base | {"complete": False, "diagnostic_ok": False, "read_failed": True}
+    measured_events = int(measured["events"] or 0)
+    unmeasured_events = int(repeats["events"] or 0)
+    truncated = health is not None and (health["measured_truncated"] == 1 or health["repeat_truncated"] == 1)
+    reason = None if health is None else health["truncation_reason"]
+    uncertain = _UNPERSISTED_FAILURES > 0
+    covers = [item for item in (measured["oldest"], repeats["oldest"]) if item is not None]
+    through = [item for item in (measured["newest"], None if repeats["newest"] is None else repeats["newest"] + window) if item is not None]
+    rules = {}
+    for item in measured_rules:
+        rules[(item["rule"], item["stage"])] = {
+            "rule": item["rule"], "stage": item["stage"],
+            "events": int(item["events"]), "unique_mints": int(item["unique_mints"]),
+            "measured_events": int(item["events"]),
+            "liquidity_unknown": int(item["liquidity_unknown"] or 0),
+            "market_cap_unknown": int(item["market_cap_unknown"] or 0),
+            "ratio_unknown": int(item["ratio_unknown"] or 0),
+        }
+    for item in repeat_rules:
+        key = (item["rule"], item["stage"])
+        slot = rules.get(key)
+        events = int(item["events"] or 0)
+        if slot is None:
+            rules[key] = {
+                "rule": item["rule"], "stage": item["stage"],
+                "events": events, "unique_mints": int(item["unique_mints"]),
+                "measured_events": 0,
+                "liquidity_unknown": events, "market_cap_unknown": events, "ratio_unknown": events,
+            }
+        else:
+            slot["events"] += events
+            slot["unique_mints"] += int(item["unique_mints"])
+            slot["liquidity_unknown"] += events
+            slot["market_cap_unknown"] += events
+            slot["ratio_unknown"] += events
+    windows = {}
+    for item in measured_windows:
+        start = int(item["window_start"])
+        windows[start] = {
+            "window_start": start, "window_end": start + window,
+            "measured_events": int(item["events"]), "unmeasured_events": 0,
+            "events": int(item["events"]), "unique_mints": int(item["unique_mints"]),
+        }
+    for item in repeat_windows:
+        start = int(item["window_start"])
+        slot = windows.get(start)
+        events = int(item["events"] or 0)
+        if slot is None:
+            windows[start] = {
+                "window_start": start, "window_end": start + window,
+                "measured_events": 0, "unmeasured_events": events,
+                "events": events, "unique_mints": int(item["unique_mints"]),
+            }
+        else:
+            slot["unmeasured_events"] += events
+            slot["events"] += events
+    for item in window_mints:
+        slot = windows.get(int(item["window_start"]))
+        if slot is not None:
+            slot["unique_mints"] = int(item["unique_mints"])
+    rows = [_cut_row(item) for item in listed]
+    known_gaps = len(gap_ids)
+    attested = _PROCESS_WITNESS and not uncertain
+    window_intact = not truncated
+    return base | {
+        "events": measured_events + unmeasured_events,
+        "unique_mints": int(unique["n"] or 0),
+        "measured_events": measured_events,
+        "unmeasured_events": unmeasured_events,
+        "liquidity_unknown_events": int(measured["liquidity_unknown"] or 0) + unmeasured_events,
+        "market_cap_unknown_events": int(measured["market_cap_unknown"] or 0) + unmeasured_events,
+        "ratio_known_events": int(measured["ratio_known"] or 0),
+        "ratio_unknown_events": int(measured["ratio_unknown"] or 0) + unmeasured_events,
+        "by_rule": sorted(rules.values(), key=lambda item: (-item["events"], item["rule"], item["stage"])),
+        "repeat_windows": [windows[key] for key in sorted(windows)],
+        "rows": rows,
+        "covers_from": None if not covers else min(covers),
+        "covers_through": None if not through else max(through),
+        "sampling": "best_effort",
+        "capture_proven": False,
+        "capture_complete": False,
+        "complete": False,
+        "window_intact": window_intact,
+        "truncated": truncated,
+        "truncation_reason": reason,
+        "known_gaps": known_gaps,
+        "diagnostic_ok": attested and known_gaps == 0,
+        "cut_write_failures": known_gaps + _UNPERSISTED_FAILURES,
+        "coverage_uncertain": uncertain,
+        "attested": attested,
+        "rows_limited": measured_events > len(rows),
+    }
+
+
 def _fail(row, stage: str, reason: str, evidence: dict | None = None, source: str | None = None) -> dict:
     moment = time.time()
+    body = evidence or {"reason": reason}
 
     def work(conn):
+        _ensure_conn(conn)
         conn.execute(
             "UPDATE memecoin_cases SET stage = 'rejected', updated_at = ? WHERE id = ? AND stage = ?",
             (moment, row["id"], row["stage"]),
         )
-        _log(conn, row["id"], row["mint"], stage, "kill", reason, source, evidence or {"reason": reason}, moment)
+        _log(conn, row["id"], row["mint"], stage, "kill", reason, source, body, moment)
         return {"ok": False, "reason": reason, "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
 
-    return db.exclusive(work)
+    result = db.exclusive(work)
+    cut = body.get("cut") if isinstance(body, dict) else None
+    if isinstance(cut, dict):
+        record_cut_safely(cut)
+    return result
 
 
-def _kill(case_id, mint, stage: str, reason: str, source) -> dict:
+def _kill(case_id, mint, stage: str, reason: str, source, cut=None) -> dict:
     moment = time.time()
     _ensure()
+    evidence = {"reason": reason}
+    if isinstance(cut, dict):
+        evidence["cut"] = cut
 
     def work(conn):
         _ensure_conn(conn)
-        _log(conn, case_id, mint, stage, "kill", reason, source if isinstance(source, str) else None, {"reason": reason}, moment)
+        _log(conn, case_id, mint, stage, "kill", reason, source if isinstance(source, str) else None, evidence, moment)
         current = None
         if isinstance(case_id, str):
             stored = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
             current = None if stored is None else stored["stage"]
         return {"ok": False, "reason": reason, "case_id": case_id, "stage": current, "mint": mint}
 
-    return db.exclusive(work)
+    result = db.exclusive(work)
+    if isinstance(cut, dict):
+        record_cut_safely(cut)
+    return result
 
 
 def _note(row, stage: str, reason: str) -> dict:
@@ -3275,6 +3972,86 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cuts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at REAL NOT NULL,
+            pipeline TEXT NOT NULL,
+            mint TEXT,
+            pair_address TEXT,
+            pair_provenance TEXT NOT NULL,
+            case_id TEXT,
+            stage TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            liquidity_usd TEXT,
+            liquidity_basis TEXT,
+            market_cap_usd TEXT,
+            market_cap_basis TEXT,
+            ratio TEXT,
+            measured INTEGER NOT NULL,
+            fdv_used_as_market_cap INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memecoin_cuts_mint ON memecoin_cuts (mint, observed_at)")
+    try:
+        conn.execute("ALTER TABLE memecoin_cuts ADD COLUMN cut_id TEXT")
+    except Exception:
+        pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cut_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            started_at REAL NOT NULL,
+            mint TEXT,
+            rule TEXT,
+            state TEXT NOT NULL,
+            measured INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    try:
+        conn.execute("ALTER TABLE memecoin_cut_attempts ADD COLUMN measured INTEGER NOT NULL DEFAULT 1")
+    except Exception:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memecoin_cuts_cut_id ON memecoin_cuts (cut_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cut_repeats (
+            window_start REAL NOT NULL,
+            pipeline TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            events INTEGER NOT NULL,
+            PRIMARY KEY (pipeline, window_start, mint, rule, stage)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cut_health (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            measured_truncated INTEGER NOT NULL,
+            repeat_truncated INTEGER NOT NULL,
+            truncation_reason TEXT,
+            attempt_open INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0
+        )
+        -- attempt_open, failed and failures are unused. Coverage is per cut, not one shared bit.
+        """
+    )
+    for statement in (
+        "ALTER TABLE memecoin_cut_health ADD COLUMN attempt_open INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE memecoin_cut_health ADD COLUMN failed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE memecoin_cut_health ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(statement)
+        except Exception:
+            pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_reservations (

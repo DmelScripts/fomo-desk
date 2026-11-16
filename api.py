@@ -1382,6 +1382,14 @@ def memecoin_protect(request: Request, body: dict | None = None) -> JSONResponse
     return JSONResponse({"ok": False, "reason": "caller_snapshot_not_the_handoff", "send": False, "live_ready": False, "deployed": False}, status_code=409, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/memecoin/cuts")
+def memecoin_cuts(request: Request, limit: int = 50) -> JSONResponse:
+    """Six-role cut log. Legacy scanner scans are not included. This route does not sign or send."""
+    require_app_token(request)
+    import memecoin_desk
+    return JSONResponse(memecoin_desk.cut_report(limit), headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/memecoin/{case_id}")
 def memecoin_view(request: Request, case_id: str) -> JSONResponse:
     require_app_token(request)
