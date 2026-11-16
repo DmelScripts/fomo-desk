@@ -358,6 +358,8 @@ def _evaluation(item: dict, now: float) -> dict:
             "reason": _safe_code(sim_reason) if isinstance(sim_reason, str) else None,
         },
         "paper_entry": stage in {"protected", "filled"} or item.get("paper_entry") is True,
+        "pipeline": "six_role" if isinstance(item.get("cut"), dict) else None,
+        "cut": item.get("cut") if isinstance(item.get("cut"), dict) else None,
         "pair_address": item.get("pair_address") if isinstance(item.get("pair_address"), str) else None,
         "liquidity_usd": item.get("liquidity_usd") if isinstance(item.get("liquidity_usd"), str) else None,
         "candidate_pools": item.get("candidate_pools") if type(item.get("candidate_pools")) is int and not isinstance(item.get("candidate_pools"), bool) else None,
@@ -484,6 +486,7 @@ def run_discovery(transport, now: float) -> dict:
             "score_measured": False,
             "fixture_is_mainnet_proof": False,
             "pair_address": result.get("pair_address"),
+            "cut": result.get("cut") if isinstance(result.get("cut"), dict) else None,
             "liquidity_usd": result.get("liquidity_usd") if isinstance(result.get("liquidity_usd"), str) else None,
             "candidate_pools": result.get("candidate_pools") if type(result.get("candidate_pools")) is int else None,
         })
@@ -655,10 +658,18 @@ def run_once(mint: str, transport, now: float) -> dict:
         return stopped | {"reason": "network_disabled", "stage": "scout"}
     admitted = memecoin_desk.case_admission(mint, now)
     if admitted is not None and admitted.get("reason") == "reeval_cooldown":
+        cut = memecoin_desk.make_cut(
+            observed_at=now, mint=mint, pair_address=None, pair_provenance="unknown",
+            case_id=admitted.get("case_id") if isinstance(admitted.get("case_id"), str) else None,
+            stage="rejected", rule="reeval_cooldown", measured=False,
+            liquidity=None, market_cap=None, liquidity_basis=None, market_cap_basis=None,
+        )
+        memecoin_desk.persist_cut(cut)
         return stopped | {
             "reason": "reeval_cooldown",
             "stage": "rejected",
             "case_id": admitted.get("case_id"),
+            "cut": cut,
         }
     try:
         response = transport({"kind": "http", "url": dexscreener_public.pairs_url(mint)})
@@ -668,6 +679,18 @@ def run_once(mint: str, transport, now: float) -> dict:
         return stopped | {"reason": "dexscreener_status", "stage": "scout"}
     parsed = dexscreener_public.parse_pairs(response["body"], mint, now)
     if parsed.get("ok") is not True:
+        cut = memecoin_desk.make_cut(
+            observed_at=now, mint=mint,
+            pair_address=parsed.get("pair_address"),
+            pair_provenance="first_rank" if isinstance(parsed.get("pair_address"), str) and parsed.get("pair_address") else "unknown",
+            case_id=None, stage="scout", rule=parsed.get("reason") if isinstance(parsed.get("reason"), str) else "pair_missing",
+            measured=True,
+            liquidity=parsed.get("liquidity_usd"),
+            market_cap=parsed.get("market_cap_usd"),
+            liquidity_basis="dex_liquidity_usd",
+            market_cap_basis="marketCap",
+        )
+        memecoin_desk.persist_cut(cut)
         return stopped | {
             "reason": parsed.get("reason"),
             "source": dexscreener_public.SOURCE,
@@ -675,7 +698,9 @@ def run_once(mint: str, transport, now: float) -> dict:
             "fdv_used_as_market_cap": False,
             "pair_address": parsed.get("pair_address"),
             "liquidity_usd": parsed.get("liquidity_usd") if isinstance(parsed.get("liquidity_usd"), str) else None,
+            "market_cap_usd": parsed.get("market_cap_usd"),
             "candidate_pools": parsed.get("candidate_pools") if type(parsed.get("candidate_pools")) is int else None,
+            "cut": cut,
         }
     _observe(mint, dexscreener_public.SOURCE, "market_cap_usd", parsed["scout"]["market_cap_usd"], now)
     _observe(mint, dexscreener_public.SOURCE, "liquidity_usd", parsed["scout"]["liquidity_usd"], now)
@@ -694,12 +719,14 @@ def run_once(mint: str, transport, now: float) -> dict:
             "pair_address": opened.get("pair_address"),
             "liquidity_usd": opened.get("liquidity_usd") if isinstance(opened.get("liquidity_usd"), str) else None,
             "candidate_pools": opened.get("candidate_pools") if type(opened.get("candidate_pools")) is int else None,
+            "cut": opened.get("cut") if isinstance(opened.get("cut"), dict) else None,
         }
     try:
         rpc = transport({"kind": "rpc", "method": "getAccountInfo", "mint": mint})
     except Exception:
         memecoin_desk.close_terminal(opened["case_id"], "mint_transport", "filter", now)
-        return stopped | {"reason": "mint_transport", "stage": "filter", "case_id": opened["case_id"]}
+        cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage="filter", rule="mint_transport")
+        return stopped | {"reason": "mint_transport", "stage": "filter", "case_id": opened["case_id"], "cut": cut}
     account = {"ok": False, "reason": "account_missing"}
     if isinstance(rpc, dict) and rpc.get("status") == 200 and isinstance(rpc.get("body"), dict):
         value = (rpc["body"].get("result") or {}).get("value") if isinstance(rpc["body"].get("result"), dict) else None
@@ -723,22 +750,28 @@ def run_once(mint: str, transport, now: float) -> dict:
         locked = _fetch_lp_locked_pct(transport, mint)
         if locked.get("ok") is not True:
             memecoin_desk.close_terminal(opened["case_id"], "lp", "filter", now)
+            cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage="filter", rule="lp")
             return stopped | {
                 "reason": "lp", "stage": "filter", "case_id": opened["case_id"],
                 "lp_fetched": locked.get("fetched") is True, "lp_source": "rugcheck_summary",
                 "rest_envelope_verified": False, "live_ready": False, "send": False,
+                "cut": cut,
             }
         onchain["lpLockedPct"] = 100
     if authorities_clear and source_blocks_lp:
         reported = source_reason
         stage = opened.get("stage")
         memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
+        cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage=stage if isinstance(stage, str) else "filter", rule=reported if isinstance(reported, str) else "filter")
     else:
         filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
         reported = filtered.get("reason") or "features_unpublished"
         stage = filtered.get("stage")
+        cut = filtered.get("cut") if isinstance(filtered.get("cut"), dict) else None
         if filtered.get("ok") is not True and filtered.get("stage") != "rejected":
             memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
+            if cut is None:
+                cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage="filter", rule=reported if isinstance(reported, str) else "filter")
     blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": reported, "send": False, "live_ready": False, "sources_are_live_mcp": False}
     return stopped | {
         "reason": reported,
@@ -760,6 +793,7 @@ def run_once(mint: str, transport, now: float) -> dict:
         "observed": observed,
         "fixture_is_mainnet_proof": False,
         "analyst": memecoin_desk.analyst_decision(),
+        "cut": cut if isinstance(cut, dict) else None,
     }
 
 

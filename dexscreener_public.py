@@ -184,6 +184,7 @@ def _pair_note(chosen: dict, count: int) -> dict:
     return {
         "pair_address": chosen.get("pairAddress") if isinstance(chosen.get("pairAddress"), str) else None,
         "liquidity_usd": None if usd is None else str(usd),
+        "market_cap_usd": chosen.get("marketCap") if "marketCap" in chosen else None,
         "candidate_pools": count,
         "fdv_used_as_market_cap": False,
     }

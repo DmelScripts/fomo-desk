@@ -55,6 +55,11 @@ WEIGHTS = {
 }
 COMPONENTS = tuple(WEIGHTS)
 FRESH_S = 30
+# Six-role cut log only. Not a trade threshold and not the legacy scanner.
+CUT_PIPELINE = "six_role"
+CUT_KEEP = 2000
+_CUT_LIQUIDITY_BASIS = frozenset({"dex_liquidity_usd", "quote_side"})
+_CUT_PAIR_PROVENANCE = frozenset({"pinned", "first_rank", "pinned_missing", "unknown"})
 # A rejected mint can be read again after this. It is not a trade threshold.
 REEVAL_COOLDOWN_S = 300
 _PIPELINE_STAGES = frozenset({"scout_passed", "filter_passed", "analyst_passed"})
@@ -139,18 +144,55 @@ def scout(pair: dict, now: float | None = None) -> dict:
     pool_count = len(cross_source.sol_pairs(dex_body, mint))
     pair_address = selected.get("pairAddress") if isinstance(selected, dict) else None
 
+    if pin != "" and not isinstance(selected, dict):
+        provenance = "pinned_missing"
+        logged_pair = pin
+    elif pin != "":
+        provenance = "pinned"
+        logged_pair = pair_address if isinstance(pair_address, str) else pin
+    elif isinstance(pair_address, str) and pair_address != "":
+        provenance = "first_rank"
+        logged_pair = pair_address
+    else:
+        provenance = "unknown"
+        logged_pair = None
+
     def scout_kill(reason: str) -> dict:
-        killed = _kill(None, mint, "scout", reason, "dexscreener")
+        liq_raw = None
+        cap_raw = None
+        if isinstance(selected, dict) and provenance != "pinned_missing":
+            box = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
+            if isinstance(box, dict) and "usd" in box:
+                liq_raw = box.get("usd")
+            if "marketCap" in selected:
+                cap_raw = selected.get("marketCap")
+        cut = make_cut(
+            observed_at=moment,
+            mint=mint,
+            pair_address=logged_pair,
+            pair_provenance=provenance,
+            case_id=None,
+            stage="scout",
+            rule=reason,
+            measured=True,
+            liquidity=liq_raw,
+            market_cap=cap_raw,
+            liquidity_basis="dex_liquidity_usd",
+            market_cap_basis="marketCap",
+        )
+        killed = _kill(None, mint, "scout", reason, "dexscreener", cut)
         noted = {
             "stage": "scout",
             "candidate_pools": pool_count,
             "fdv_used_as_market_cap": False,
+            "cut": cut,
         }
-        if isinstance(pair_address, str) and pair_address != "":
-            noted["pair_address"] = pair_address
-        box = selected.get("liquidity") if isinstance(selected, dict) and isinstance(selected.get("liquidity"), dict) else None
-        if isinstance(box, dict) and "usd" in box:
-            noted["liquidity_usd"] = str(box.get("usd"))
+        if isinstance(logged_pair, str) and logged_pair != "":
+            noted["pair_address"] = logged_pair
+        if isinstance(selected, dict) and provenance != "pinned_missing":
+            box = selected.get("liquidity") if isinstance(selected.get("liquidity"), dict) else None
+            if isinstance(box, dict) and "usd" in box:
+                noted["liquidity_usd"] = str(box.get("usd"))
         return killed | noted
 
     if not isinstance(pair_address, str) or pair_address == "":
@@ -225,10 +267,40 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return _kill(case_id, None, "filter", "stage", None)
     snap = _snapshot(row)
     source = onchain.get("source") if isinstance(onchain, dict) and isinstance(onchain.get("source"), str) else None
+    stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    seen_liq = snap.get("liquidity_usd")
+    seen_cap = snap.get("market_cap_usd")
+    seen_basis = "dex_liquidity_usd"
+
+    def refuse(reason: str, reading: dict | None = None, *, source_name: str | None = None, extra: dict | None = None) -> dict:
+        if reading is None:
+            liquidity, cap, basis = seen_liq, seen_cap, seen_basis
+        else:
+            liquidity, cap, basis = reading.get("liquidity"), reading.get("market_cap"), reading.get("basis")
+        cut = make_cut(
+            observed_at=moment,
+            mint=row["mint"],
+            pair_address=stored_pair or None,
+            pair_provenance="pinned" if stored_pair else "unknown",
+            case_id=row["id"],
+            stage="filter",
+            rule=reason,
+            measured=True,
+            liquidity=liquidity,
+            market_cap=cap,
+            liquidity_basis=basis,
+            market_cap_basis="marketCap",
+        )
+        evidence = {"reason": reason, "cut": cut}
+        if isinstance(extra, dict):
+            evidence.update(extra)
+            evidence["cut"] = cut
+        failed = _fail(row, "filter", reason, evidence, source=source if source_name is None else source_name)
+        failed["cut"] = cut
+        return failed
+
     if not isinstance(onchain, dict) or source in (None, "dexscreener"):
-        return _fail(row, "filter", "onchain_source", source=source)
-    def refuse(reason: str) -> dict:
-        return _fail(row, "filter", reason, source=source)
+        return refuse("onchain_source")
 
     fetched = _num(onchain.get("fetched_at"))
     clock = _num(moment)
@@ -236,7 +308,6 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         return refuse("onchain_stale")
     import dev_rug_history
     import cross_source
-    stored_pair = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
     cross_source.take_failure()
     bundle = cross_source.fetch_bundle(row["mint"], stored_pair) if stored_pair else None
     if bundle is None:
@@ -265,7 +336,16 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
     if checks["holder_growth"]["status"] != "PASS":
         return refuse(checks["holder_growth"].get("reason") or "holder_growth_unproven")
     if liq_row["status"] != "PASS":
-        return refuse(liq_row.get("reason") or "liquidity_source_missing")
+        if liq_row.get("reason") in {"liquidity_source_missing", "pool_missing", "pool_ambiguous", "pinned_pair_missing"}:
+            return refuse(liq_row.get("reason") or "liquidity_source_missing", {"liquidity": None, "market_cap": None, "basis": None})
+        return refuse(liq_row.get("reason") or "liquidity_source_missing", {
+            "liquidity": liq_row.get("quote_usd"),
+            "market_cap": liq_row.get("market_cap_usd"),
+            "basis": "quote_side",
+        })
+    seen_liq = liq_row.get("quote_usd")
+    seen_cap = liq_row.get("market_cap_usd")
+    seen_basis = "quote_side"
     snap = dict(snap)
     snap["liquidity_usd"] = liq_row.get("quote_usd")
     snap["market_cap_usd"] = liq_row.get("market_cap_usd")
@@ -281,16 +361,16 @@ def filter_case(case_id: str, onchain: dict, now: float | None = None) -> dict:
         "bundled_launch_pct": bundled.get("bundled_launch_pct"),
     }
     if bundled.get("ok") is not True:
-        return _fail(row, "filter", bundled.get("reason") or "bundle_unverified", bundle_evidence, source=bundled.get("source"))
+        return refuse(bundled.get("reason") or "bundle_unverified", source_name=bundled.get("source"), extra=bundle_evidence)
     bundled_pct = _num(bundled.get("bundled_launch_pct"))
     if bundled_pct is None or bundled_pct > BUNDLE_MAX:
-        return _fail(row, "filter", "bundle" if bundled_pct is not None else "bundle_unverified", bundle_evidence, source=bundled.get("source"))
+        return refuse("bundle" if bundled_pct is not None else "bundle_unverified", source_name=bundled.get("source"), extra=bundle_evidence)
     mcap = _money(snap.get("market_cap_usd"))
     liq = _money(snap.get("liquidity_usd"))
     if mcap is None or liq is None or mcap <= 0:
-        return refuse("liquidity_ratio")
+        return refuse("liquidity_ratio", {"liquidity": snap.get("liquidity_usd"), "market_cap": snap.get("market_cap_usd"), "basis": "quote_side"})
     if liq / mcap < LIQ_OF_MCAP:
-        return refuse("liquidity_below_25pct_mcap")
+        return refuse("liquidity_below_25pct_mcap", {"liquidity": snap.get("liquidity_usd"), "market_cap": snap.get("market_cap_usd"), "basis": "quote_side"})
     evidence = {
         "source": onchain.get("source"), "liq_of_mcap": format(liq / mcap, "f"),
         "market_cap_basis": "market_cap", "lpLockedPct": 100, "lp_expiry_checked": False,
@@ -378,21 +458,44 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     those components at 0 the highest score is 65.
     """
     moment = time.time() if now is None else now
-    del moment
     row = _case(case_id)
     if row is None or row["stage"] != "filter_passed":
         return _kill(case_id, None, "analyst", "stage", None)
+
+    def analyst_fail(reason: str, evidence: dict | None = None, source: str | None = None) -> dict:
+        body = dict(evidence or {})
+        snap = _snapshot(row)
+        pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+        body["reason"] = reason
+        body["cut"] = make_cut(
+            observed_at=moment,
+            mint=row["mint"],
+            pair_address=pin or None,
+            pair_provenance="pinned" if pin else "unknown",
+            case_id=row["id"],
+            stage="analyst",
+            rule=reason,
+            measured=True,
+            liquidity=snap.get("liquidity_usd"),
+            market_cap=snap.get("market_cap_usd"),
+            liquidity_basis="quote_side",
+            market_cap_basis="marketCap",
+        )
+        failed = _fail(row, "analyst", reason, body, source=source)
+        failed["cut"] = body["cut"]
+        return failed
+
     if not isinstance(components, dict):
-        return _fail(row, "analyst", "components_missing")
+        return analyst_fail("components_missing")
     holder_item = components.get("holder_growth")
     if isinstance(holder_item, dict):
         holder = _holder_growth_value(holder_item, row["mint"])
         if holder is None:
-            return _fail(row, "analyst", "holder_growth_unknown", source=holder_item.get("source") if isinstance(holder_item.get("source"), str) else None)
+            return analyst_fail("holder_growth_unknown", source=holder_item.get("source") if isinstance(holder_item.get("source"), str) else None)
     else:
         holder = _holder_growth_value({"source": "solana_tracker_holders_chart"}, row["mint"])
         if holder is None:
-            return _fail(row, "analyst", "holder_growth_unknown", source="solana_tracker_holders_chart")
+            return analyst_fail("holder_growth_unknown", source="solana_tracker_holders_chart")
     pin = _snapshot(row).get("pair_address") if isinstance(_snapshot(row).get("pair_address"), str) else ""
     fetched = _fetched_components(row["mint"], pin)
     evidence = {
@@ -409,7 +512,7 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     }
     if fetched.get("ok") is not True:
         evidence["component"] = fetched.get("component")
-        return _fail(row, "analyst", fetched.get("reason") or "component_unverified", evidence)
+        return analyst_fail(fetched.get("reason") or "component_unverified", evidence)
     values = fetched["values"]
     values["holder_growth"] = holder
     values["unique_buyers"] = Decimal("0")
@@ -420,13 +523,13 @@ def analyze(case_id: str, components: dict, now: float | None = None) -> dict:
     }
     score = score_from_values(plain)
     if score is None:
-        return _fail(row, "analyst", "component_unverified", evidence)
+        return analyst_fail("component_unverified", evidence)
     evidence["score"] = format(score, "f")
     evidence["momentum"] = {"value": str(values["momentum"]), "source": "dex_price_change_h1"}
     evidence["buy_sell_ratio"] = {"value": str(values["buy_sell_ratio"]), "source": "dex_txns_h1"}
     evidence["liq_mcap"] = {"value": str(values["liq_mcap"]), "source": "quote_over_confirmed_mcap"}
     if score < SCORE_FLOOR:
-        return _fail(row, "analyst", "score", evidence)
+        return analyst_fail("score", evidence)
     snap = _snapshot(row)
     snap["score"] = format(score, "f")
     snap["analyst"] = evidence
@@ -2286,27 +2389,294 @@ def _advance(row, stage: str, name: str, evidence: dict, snap: dict | None = Non
     return db.exclusive(work)
 
 
-def _fail(row, stage: str, reason: str, evidence: dict | None = None, source: str | None = None) -> dict:
-    moment = time.time()
+def _usd_known(value):
+    """A finite USD amount, including zero. Missing, negative, and non-numbers are unknown."""
+    if value is None or isinstance(value, bool):
+        return None
+    number = _num(value)
+    if number is None or number < 0:
+        return None
+    return format(number, "f")
+
+
+def _cut_text(value, limit: int = 80) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value == "" or len(value) > limit or any(char.isspace() for char in value) or "://" in value or "api-key" in value.lower():
+        return None
+    return value
+
+
+def make_cut(
+    *,
+    observed_at,
+    mint,
+    pair_address,
+    pair_provenance,
+    case_id,
+    stage,
+    rule,
+    measured,
+    liquidity,
+    market_cap,
+    liquidity_basis,
+    market_cap_basis,
+) -> dict:
+    """One six-role rejection observation. FDV is never copied into market cap."""
+    liquidity_usd = _usd_known(liquidity)
+    market_cap_usd = _usd_known(market_cap)
+    if market_cap_basis != "marketCap":
+        market_cap_usd = None
+    if liquidity_basis not in _CUT_LIQUIDITY_BASIS:
+        liquidity_usd = None
+        liquidity_basis = None
+    elif liquidity_usd is None:
+        liquidity_basis = None
+    if market_cap_usd is None:
+        market_cap_basis = None
+    ratio = None
+    if liquidity_usd is not None and market_cap_usd is not None:
+        cap = Decimal(market_cap_usd)
+        if cap > 0:
+            ratio = format(Decimal(liquidity_usd) / cap, "f")
+    provenance = pair_provenance if pair_provenance in _CUT_PAIR_PROVENANCE else "unknown"
+    pair = _cut_text(pair_address, 64)
+    if provenance == "unknown":
+        pair = None
+    return {
+        "pipeline": CUT_PIPELINE,
+        "observed_at": observed_at if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool) else None,
+        "mint": _cut_text(mint, 64),
+        "pair_address": pair,
+        "pair_provenance": provenance,
+        "case_id": _cut_text(case_id, 96),
+        "stage": _cut_text(stage, 40) or "unknown",
+        "rule": _cut_text(rule, 80) or "unknown",
+        "liquidity_usd": liquidity_usd,
+        "liquidity_basis": liquidity_basis,
+        "market_cap_usd": market_cap_usd,
+        "market_cap_basis": market_cap_basis,
+        "ratio": ratio,
+        "ratio_status": "known" if ratio is not None else "unknown",
+        "measured": measured is True,
+        "fdv_used_as_market_cap": False,
+    }
+
+
+def _insert_cut(conn, cut: dict) -> None:
+    if not isinstance(cut, dict) or cut.get("pipeline") != CUT_PIPELINE:
+        return
+    if cut.get("observed_at") is None:
+        return
+    conn.execute(
+        """
+        INSERT INTO memecoin_cuts (
+            observed_at, pipeline, mint, pair_address, pair_provenance, case_id, stage, rule,
+            liquidity_usd, liquidity_basis, market_cap_usd, market_cap_basis, ratio, measured, fdv_used_as_market_cap
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (
+            float(cut["observed_at"]), CUT_PIPELINE, cut.get("mint"), cut.get("pair_address"),
+            cut.get("pair_provenance") or "unknown", cut.get("case_id"), cut.get("stage") or "unknown",
+            cut.get("rule") or "unknown", cut.get("liquidity_usd"), cut.get("liquidity_basis"),
+            cut.get("market_cap_usd"), cut.get("market_cap_basis"), cut.get("ratio"),
+            1 if cut.get("measured") is True else 0,
+        ),
+    )
+    conn.execute(
+        """
+        DELETE FROM memecoin_cuts WHERE id NOT IN (
+            SELECT id FROM memecoin_cuts ORDER BY id DESC LIMIT ?
+        )
+        """,
+        (CUT_KEEP,),
+    )
+
+
+def persist_cut(cut: dict) -> None:
+    """Write one cut outside an existing transaction. A bad clock writes nothing."""
+    if not isinstance(cut, dict):
+        return
 
     def work(conn):
+        _ensure_conn(conn)
+        _insert_cut(conn, cut)
+
+    db.exclusive(work)
+
+
+def cut_from_case(case_id: str, *, observed_at, stage: str, rule: str, measured: bool = True) -> dict:
+    """The case snapshot's own marketCap and dex liquidity. Missing fields stay unknown."""
+    row = _case(case_id) if isinstance(case_id, str) else None
+    snap = _snapshot(row) if row is not None else {}
+    pin = snap.get("pair_address") if isinstance(snap.get("pair_address"), str) else ""
+    cut = make_cut(
+        observed_at=observed_at,
+        mint=row["mint"] if row is not None else None,
+        pair_address=pin or None,
+        pair_provenance="pinned" if pin else "unknown",
+        case_id=case_id if isinstance(case_id, str) else None,
+        stage=stage,
+        rule=rule,
+        measured=measured,
+        liquidity=snap.get("liquidity_usd"),
+        market_cap=snap.get("market_cap_usd"),
+        liquidity_basis="dex_liquidity_usd",
+        market_cap_basis="marketCap" if snap.get("market_cap_basis") == "marketCap" else None,
+    )
+    persist_cut(cut)
+    return cut
+
+
+def _cut_row(row) -> dict:
+    ratio = row["ratio"]
+    return {
+        "pipeline": CUT_PIPELINE,
+        "observed_at": row["observed_at"],
+        "mint": row["mint"],
+        "pair_address": row["pair_address"],
+        "pair_provenance": row["pair_provenance"],
+        "case_id": row["case_id"],
+        "stage": row["stage"],
+        "rule": row["rule"],
+        "liquidity_usd": row["liquidity_usd"],
+        "liquidity_basis": row["liquidity_basis"],
+        "market_cap_usd": row["market_cap_usd"],
+        "market_cap_basis": row["market_cap_basis"],
+        "ratio": ratio,
+        "ratio_status": "known" if isinstance(ratio, str) else "unknown",
+        "measured": row["measured"] == 1,
+        "fdv_used_as_market_cap": False,
+    }
+
+
+def cut_report(limit: int = 50) -> dict:
+    """Retained six-role cuts. This is not a threshold and it does not read scanner scans.
+
+    The summary counts events and unique mints. It does not average a ratio into a proposed number.
+    """
+    if isinstance(limit, bool) or type(limit) is not int or limit < 1:
+        limit = 50
+    limit = min(limit, 100)
+    empty = {
+        "pipeline": CUT_PIPELINE,
+        "legacy_scanner_excluded": True,
+        "not_a_threshold_proposal": True,
+        "proposal": None,
+        "fdv_used_as_market_cap": False,
+        "events": 0,
+        "unique_mints": 0,
+        "measured_events": 0,
+        "unmeasured_events": 0,
+        "liquidity_unknown_events": 0,
+        "market_cap_unknown_events": 0,
+        "ratio_known_events": 0,
+        "ratio_unknown_events": 0,
+        "by_rule": [],
+        "rows": [],
+        "limit": limit,
+        "retained_limit": CUT_KEEP,
+        "send": False,
+        "sign": False,
+        "live_ready": False,
+    }
+    _ensure()
+    try:
+        totals = db.query(
+            """
+            SELECT COUNT(*) AS events,
+                   COUNT(DISTINCT mint) AS unique_mints,
+                   COALESCE(SUM(measured), 0) AS measured_events,
+                   COALESCE(SUM(CASE WHEN liquidity_usd IS NULL THEN 1 ELSE 0 END), 0) AS liquidity_unknown_events,
+                   COALESCE(SUM(CASE WHEN market_cap_usd IS NULL THEN 1 ELSE 0 END), 0) AS market_cap_unknown_events,
+                   COALESCE(SUM(CASE WHEN ratio IS NULL THEN 1 ELSE 0 END), 0) AS ratio_unknown_events,
+                   COALESCE(SUM(CASE WHEN ratio IS NOT NULL THEN 1 ELSE 0 END), 0) AS ratio_known_events
+            FROM memecoin_cuts WHERE pipeline = ?
+            """,
+            (CUT_PIPELINE,),
+        )[0]
+        grouped = db.query(
+            """
+            SELECT rule, stage, COUNT(*) AS events, COUNT(DISTINCT mint) AS unique_mints,
+                   COALESCE(SUM(measured), 0) AS measured_events,
+                   COALESCE(SUM(CASE WHEN liquidity_usd IS NULL THEN 1 ELSE 0 END), 0) AS liquidity_unknown,
+                   COALESCE(SUM(CASE WHEN market_cap_usd IS NULL THEN 1 ELSE 0 END), 0) AS market_cap_unknown,
+                   COALESCE(SUM(CASE WHEN ratio IS NULL THEN 1 ELSE 0 END), 0) AS ratio_unknown
+            FROM memecoin_cuts WHERE pipeline = ?
+            GROUP BY rule, stage
+            ORDER BY events DESC, rule, stage
+            """,
+            (CUT_PIPELINE,),
+        )
+        listed = db.query(
+            """
+            SELECT observed_at, pipeline, mint, pair_address, pair_provenance, case_id, stage, rule,
+                   liquidity_usd, liquidity_basis, market_cap_usd, market_cap_basis, ratio, measured
+            FROM memecoin_cuts WHERE pipeline = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (CUT_PIPELINE, limit),
+        )
+    except Exception:
+        return empty
+    events = int(totals["events"] or 0)
+    measured = int(totals["measured_events"] or 0)
+    return empty | {
+        "events": events,
+        "unique_mints": int(totals["unique_mints"] or 0),
+        "measured_events": measured,
+        "unmeasured_events": events - measured,
+        "liquidity_unknown_events": int(totals["liquidity_unknown_events"] or 0),
+        "market_cap_unknown_events": int(totals["market_cap_unknown_events"] or 0),
+        "ratio_known_events": int(totals["ratio_known_events"] or 0),
+        "ratio_unknown_events": int(totals["ratio_unknown_events"] or 0),
+        "by_rule": [
+            {
+                "rule": item["rule"],
+                "stage": item["stage"],
+                "events": int(item["events"]),
+                "unique_mints": int(item["unique_mints"]),
+                "measured_events": int(item["measured_events"] or 0),
+                "liquidity_unknown": int(item["liquidity_unknown"] or 0),
+                "market_cap_unknown": int(item["market_cap_unknown"] or 0),
+                "ratio_unknown": int(item["ratio_unknown"] or 0),
+            }
+            for item in grouped
+        ],
+        "rows": [_cut_row(item) for item in listed],
+    }
+
+
+def _fail(row, stage: str, reason: str, evidence: dict | None = None, source: str | None = None) -> dict:
+    moment = time.time()
+    body = evidence or {"reason": reason}
+
+    def work(conn):
+        _ensure_conn(conn)
         conn.execute(
             "UPDATE memecoin_cases SET stage = 'rejected', updated_at = ? WHERE id = ? AND stage = ?",
             (moment, row["id"], row["stage"]),
         )
-        _log(conn, row["id"], row["mint"], stage, "kill", reason, source, evidence or {"reason": reason}, moment)
+        _log(conn, row["id"], row["mint"], stage, "kill", reason, source, body, moment)
+        if isinstance(body.get("cut"), dict):
+            _insert_cut(conn, body["cut"])
         return {"ok": False, "reason": reason, "case_id": row["id"], "stage": "rejected", "mint": row["mint"]}
 
     return db.exclusive(work)
 
 
-def _kill(case_id, mint, stage: str, reason: str, source) -> dict:
+def _kill(case_id, mint, stage: str, reason: str, source, cut=None) -> dict:
     moment = time.time()
     _ensure()
+    evidence = {"reason": reason}
+    if isinstance(cut, dict):
+        evidence["cut"] = cut
 
     def work(conn):
         _ensure_conn(conn)
-        _log(conn, case_id, mint, stage, "kill", reason, source if isinstance(source, str) else None, {"reason": reason}, moment)
+        _log(conn, case_id, mint, stage, "kill", reason, source if isinstance(source, str) else None, evidence, moment)
+        if isinstance(cut, dict):
+            _insert_cut(conn, cut)
         current = None
         if isinstance(case_id, str):
             stored = conn.execute("SELECT stage FROM memecoin_cases WHERE id = ?", (case_id,)).fetchone()
@@ -3275,6 +3645,29 @@ def _ensure_conn(conn) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memecoin_cuts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at REAL NOT NULL,
+            pipeline TEXT NOT NULL,
+            mint TEXT,
+            pair_address TEXT,
+            pair_provenance TEXT NOT NULL,
+            case_id TEXT,
+            stage TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            liquidity_usd TEXT,
+            liquidity_basis TEXT,
+            market_cap_usd TEXT,
+            market_cap_basis TEXT,
+            ratio TEXT,
+            measured INTEGER NOT NULL,
+            fdv_used_as_market_cap INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memecoin_cuts_mint ON memecoin_cuts (mint, observed_at)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_reservations (
