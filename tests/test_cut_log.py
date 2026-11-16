@@ -1,5 +1,6 @@
 """Six-role cut log. It records observations and does not change a trade decision."""
 import os
+import sqlite3
 import unittest
 from decimal import Decimal
 
@@ -38,6 +39,9 @@ class CutLogTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("APP_TOKEN", None))
         self.addCleanup(lambda: os.environ.pop("DESK_PRICE_LOOP", None))
         db.init_db()
+        memecoin_desk._CUT_WRITER = None
+        memecoin_desk._CUT_WRITE_FAILURES = 0
+        self.addCleanup(lambda: setattr(memecoin_desk, "_CUT_WRITER", None))
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         db.set_setting("mode", "PAPER", "test")
         db.set_setting("agents_enabled", "0", "test")
@@ -174,13 +178,14 @@ class CutLogTests(unittest.TestCase):
 
         again = desk_loop.run_once(mint, boom, NOW + 10)
         self.assertEqual(again["reason"], "reeval_cooldown")
-        repeat = _latest(mint)
-        self.assertEqual(repeat["rule"], "reeval_cooldown")
-        self.assertEqual(repeat["measured"], 0)
-        self.assertIsNone(repeat["liquidity_usd"])
-        self.assertIsNone(repeat["market_cap_usd"])
-        self.assertIsNone(repeat["ratio"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts WHERE rule = 'reeval_cooldown'")[0]["n"], 0)
         report = memecoin_desk.cut_report()
+        cooldown = next(item for item in report["by_rule"] if item["rule"] == "reeval_cooldown")
+        self.assertEqual(cooldown["events"], 1)
+        self.assertEqual(cooldown["measured_events"], 0)
+        self.assertEqual(cooldown["ratio_unknown"], 1)
+        self.assertEqual(report["repeat_windows"][0]["unmeasured_events"], 1)
+        self.assertEqual(report["repeat_windows"][0]["unique_mints"], 1)
         self.assertEqual(report["events"], 2)
         self.assertEqual(report["unique_mints"], 1)
         self.assertEqual(report["measured_events"], 1)
@@ -214,17 +219,167 @@ class CutLogTests(unittest.TestCase):
         self.assertEqual(payload["unique_mints"], 1)
         self.assertIsNone(payload["proposal"])
         self.assertTrue(all(item["pipeline"] == "six_role" for item in payload["rows"]))
+        self.assertTrue(payload["complete"])
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["horizon_s"], memecoin_desk.CUT_HORIZON_S)
 
-    def test_the_cut_log_keeps_only_the_newest_rows(self):
-        previous = memecoin_desk.CUT_KEEP
-        memecoin_desk.CUT_KEEP = 2
-        self.addCleanup(lambda: setattr(memecoin_desk, "CUT_KEEP", previous))
-        for index in range(4):
-            memecoin_desk.persist_cut(memecoin_desk.make_cut(
-                observed_at=NOW + index, mint=_mint(50 + index), pair_address=None, pair_provenance="unknown",
-                case_id=None, stage="scout", rule="age", measured=True,
-                liquidity=None, market_cap=None, liquidity_basis=None, market_cap_basis=None,
-            ))
-        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 2)
-        kept = db.query("SELECT mint FROM memecoin_cuts ORDER BY id")
-        self.assertEqual([row["mint"] for row in kept], [_mint(52), _mint(53)])
+    def _cut(self, mint, moment, measured, rule):
+        return memecoin_desk.make_cut(
+            observed_at=moment, mint=mint, pair_address=None, pair_provenance="unknown",
+            case_id=None, stage="scout" if measured else "rejected", rule=rule, measured=measured,
+            liquidity="1000" if measured else None, market_cap="299999" if measured else None,
+            liquidity_basis="dex_liquidity_usd" if measured else None,
+            market_cap_basis="marketCap" if measured else None,
+        )
+
+    def test_overnight_samples_survive_a_cooldown_flood(self):
+        mints = [_mint(index) for index in range(1, 24)]
+        span = 16 * 3600
+
+        def load(conn):
+            memecoin_desk._ensure_conn(conn)
+            for mint in mints:
+                for offset in range(0, span, 60):
+                    measured = offset % memecoin_desk.REEVAL_COOLDOWN_S == 0
+                    memecoin_desk._insert_cut(conn, self._cut(
+                        mint, NOW + offset, measured, "market_cap" if measured else "reeval_cooldown",
+                    ))
+
+        db.exclusive(load)
+        per_mint_passes = span // 60
+        per_mint_measured = span // memecoin_desk.REEVAL_COOLDOWN_S
+        report = memecoin_desk.cut_report()
+        self.assertEqual(report["measured_events"], per_mint_measured * len(mints))
+        self.assertEqual(report["unmeasured_events"], (per_mint_passes - per_mint_measured) * len(mints))
+        self.assertEqual(report["unique_mints"], len(mints))
+        self.assertEqual(report["events"], per_mint_passes * len(mints))
+        self.assertTrue(report["complete"], report)
+        self.assertFalse(report["truncated"])
+        self.assertGreaterEqual(report["covers_through"] - report["covers_from"], span - 60)
+        self.assertLess(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_repeats")[0]["n"], report["unmeasured_events"])
+        before = report["measured_events"]
+        flood_at = NOW + span - 60
+        window = int(flood_at // memecoin_desk.REEVAL_COOLDOWN_S) * memecoin_desk.REEVAL_COOLDOWN_S
+        prior = db.query(
+            "SELECT events FROM memecoin_cut_repeats WHERE mint = ? AND window_start = ?",
+            (mints[0], window),
+        )[0]["events"]
+        for _ in range(5000):
+            memecoin_desk.persist_cut(self._cut(mints[0], flood_at, False, "reeval_cooldown"))
+        flooded = memecoin_desk.cut_report()
+        self.assertEqual(flooded["measured_events"], before)
+        self.assertEqual(flooded["unmeasured_events"], report["unmeasured_events"] + 5000)
+        self.assertEqual(flooded["unique_mints"], len(mints))
+        self.assertTrue(flooded["complete"])
+        self.assertEqual(
+            db.query("SELECT events FROM memecoin_cut_repeats WHERE mint = ? AND window_start = ?", (mints[0], window))[0]["events"],
+            prior + 5000,
+        )
+
+    def test_horizon_drops_whole_windows_and_a_cap_is_reported(self):
+        mint = _mint(61)
+        memecoin_desk.persist_cut(self._cut(mint, NOW, True, "age"))
+        for _ in range(5):
+            memecoin_desk.persist_cut(self._cut(mint, NOW, False, "reeval_cooldown"))
+        kept = memecoin_desk.persist_cut(self._cut(mint, NOW + memecoin_desk.CUT_HORIZON_S, True, "age"))
+        self.assertTrue(kept)
+        still = memecoin_desk.cut_report()
+        self.assertEqual(still["measured_events"], 2)
+        self.assertEqual(still["unmeasured_events"], 5)
+        self.assertTrue(still["complete"])
+        memecoin_desk.persist_cut(self._cut(mint, NOW + memecoin_desk.CUT_HORIZON_S + memecoin_desk.REEVAL_COOLDOWN_S, False, "reeval_cooldown"))
+        moved = memecoin_desk.cut_report()
+        self.assertEqual(moved["measured_events"], 1)
+        self.assertEqual(moved["unmeasured_events"], 1)
+        self.assertTrue(moved["complete"])
+        self.assertFalse(moved["truncated"])
+        self.assertGreaterEqual(moved["covers_from"], NOW + memecoin_desk.CUT_HORIZON_S)
+
+        previous = memecoin_desk.CUT_MEASURED_CAP
+        memecoin_desk.CUT_MEASURED_CAP = 2
+        self.addCleanup(lambda: setattr(memecoin_desk, "CUT_MEASURED_CAP", previous))
+        for index in range(2):
+            memecoin_desk.persist_cut(self._cut(_mint(70 + index), NOW + memecoin_desk.CUT_HORIZON_S + 10 + index, True, "age"))
+        capped = memecoin_desk.cut_report()
+        self.assertEqual(capped["measured_events"], 2)
+        self.assertTrue(capped["truncated"])
+        self.assertFalse(capped["complete"])
+        self.assertIn("measured_cap", capped["truncation_reason"])
+        self.assertTrue(capped["diagnostic_ok"])
+        self.assertEqual(capped["cut_write_failures"], 0)
+
+    def test_a_cut_write_failure_does_not_change_the_decision(self):
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        memecoin_desk._CUT_WRITER = explode
+        floor = _mint(81)
+        cross_source.note_dex(floor, liquidityUsd="1000")
+        scouted = memecoin_desk.scout(_pair(floor, market_cap_usd="299999"), now=NOW)
+        self.assertEqual(scouted["reason"], "market_cap")
+        self.assertIsNone(memecoin_desk.view(floor))
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 0)
+
+        opened = memecoin_desk.scout(_pair(_mint(82)), now=NOW)
+        self.assertTrue(opened["ok"], opened)
+        refused = memecoin_desk.filter_case(opened["case_id"], {"source": "dexscreener"}, now=NOW)
+        self.assertEqual(refused["reason"], "onchain_source")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts WHERE case_id = ?", (opened["case_id"],))[0]["n"], 0)
+
+        bare = _mint(83)
+
+        def pairs(request):
+            return {"status": 200, "body": [{
+                "chainId": "solana", "pairAddress": "pool-" + bare[:8],
+                "baseToken": {"address": bare}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
+                "liquidity": {"usd": 10}, "priceUsd": "1", "priceChange": {"h1": 1},
+                "pairCreatedAt": int((NOW - 3600) * 1000), "fdv": 9_000_000,
+            }]}
+
+        parsed = desk_loop.run_once(bare, pairs, NOW)
+        self.assertEqual(parsed["reason"], "market_cap_missing")
+        self.assertIsNone(memecoin_desk.view(bare))
+
+        db.execute("UPDATE memecoin_cases SET updated_at = ? WHERE id = ?", (NOW, opened["case_id"]))
+        cooled = desk_loop.run_once(_mint(82), lambda _request: (_ for _ in ()).throw(AssertionError("refetch")), NOW + 10)
+        self.assertEqual(cooled["reason"], "reeval_cooldown")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+
+        noted = memecoin_desk.cut_from_case(opened["case_id"], observed_at=NOW, stage="filter", rule="lp")
+        self.assertEqual(noted["rule"], "lp")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+        self.assertGreaterEqual(memecoin_desk._CUT_WRITE_FAILURES, 4)
+        broken = memecoin_desk.cut_report()
+        self.assertFalse(broken["diagnostic_ok"])
+        self.assertFalse(broken["complete"])
+        self.assertFalse(broken["read_failed"])
+        self.assertGreaterEqual(broken["cut_write_failures"], 4)
+
+        left = _mint(84)
+        right = _mint(85)
+
+        def discovery(request):
+            url = str(request.get("url") or "")
+            if url.endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [
+                    {"chainId": "solana", "tokenAddress": left},
+                    {"chainId": "solana", "tokenAddress": right},
+                ]}
+            mint = url.rsplit("/", 1)[-1]
+            return {"status": 200, "body": [{
+                "chainId": "solana", "pairAddress": "pool-" + mint[:8],
+                "baseToken": {"address": mint}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
+                "liquidity": {"usd": 10}, "priceUsd": "1", "priceChange": {"h1": 1},
+                "pairCreatedAt": int((NOW - 3600) * 1000),
+            }]}
+
+        found = desk_loop.run_discovery(discovery, NOW)
+        self.assertEqual(
+            {item.get("mint"): item.get("reason") for item in found["kills"] if item.get("mint")},
+            {left: "market_cap_missing", right: "market_cap_missing"},
+        )
+        supervised = desk_loop.run_supervised(discovery, NOW, rounds=1)
+        self.assertTrue(supervised["ok"], supervised)
+        self.assertEqual(supervised["faults"], 0)
+        self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")

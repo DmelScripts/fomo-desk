@@ -664,7 +664,10 @@ def run_once(mint: str, transport, now: float) -> dict:
             stage="rejected", rule="reeval_cooldown", measured=False,
             liquidity=None, market_cap=None, liquidity_basis=None, market_cap_basis=None,
         )
-        memecoin_desk.persist_cut(cut)
+        try:
+            memecoin_desk.persist_cut(cut)
+        except Exception:
+            memecoin_desk.note_cut_failure()
         return stopped | {
             "reason": "reeval_cooldown",
             "stage": "rejected",
@@ -690,7 +693,10 @@ def run_once(mint: str, transport, now: float) -> dict:
             liquidity_basis="dex_liquidity_usd",
             market_cap_basis="marketCap",
         )
-        memecoin_desk.persist_cut(cut)
+        try:
+            memecoin_desk.persist_cut(cut)
+        except Exception:
+            memecoin_desk.note_cut_failure()
         return stopped | {
             "reason": parsed.get("reason"),
             "source": dexscreener_public.SOURCE,
