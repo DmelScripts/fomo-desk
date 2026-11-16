@@ -542,8 +542,9 @@ class CutLogTests(unittest.TestCase):
         self.assertFalse(fresh["capture_proven"])
         self.assertEqual(fresh["sampling"], "best_effort")
         self.assertFalse(fresh["diagnostic_ok"])
-        self.assertGreaterEqual(fresh["known_gaps"], 1)
+        self.assertEqual(fresh["known_gaps"], 0)
         self.assertNotIn(mint, fresh["mints"])
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts")[0]["n"], 0)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (mint,))[0]["n"], 1)
 
     def _kill_measured(self, mint: str, moment: float, rule: str = "age") -> dict:
@@ -558,14 +559,17 @@ class CutLogTests(unittest.TestCase):
         later = NOW + memecoin_desk.CUT_HORIZON_S + 5
         self._kill_measured(second, later)
         db.execute(
-            "INSERT INTO memecoin_cut_expected (cut_id, observed_at) VALUES (?, ?)",
-            ("stale-outside-horizon", NOW - 10),
+            """
+            INSERT INTO memecoin_cut_attempts (attempt_id, started_at, mint, rule, state, measured)
+            VALUES ('stale-outside-horizon', ?, '', 'age', 'open', 1)
+            """,
+            (NOW - 10,),
         )
         report = memecoin_desk.cut_report()
         self.assertEqual(report["measured_events"], 1)
         self.assertEqual([row["mint"] for row in db.query("SELECT mint FROM memecoin_cuts")], [second])
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log")[0]["n"], 2)
-        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts")[0]["n"], 0)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts")[0]["n"], 1)
         self.assertEqual(report["known_gaps"], 0)
         self.assertEqual(report["cut_write_failures"], 0)
         self.assertTrue(report["window_intact"])
@@ -590,14 +594,46 @@ class CutLogTests(unittest.TestCase):
         self.assertTrue(report["diagnostic_ok"])
         self.assertFalse(report["complete"])
         self.assertFalse(report["capture_proven"])
-        newest = db.query("SELECT cut_id FROM memecoin_cuts ORDER BY observed_at DESC, id DESC LIMIT 1")[0]
-        db.execute("DELETE FROM memecoin_cuts WHERE cut_id = ?", (newest["cut_id"],))
-        holed = memecoin_desk.cut_report()
-        self.assertEqual(holed["measured_events"], 1)
-        self.assertEqual(holed["known_gaps"], 1)
-        self.assertEqual(holed["cut_write_failures"], 1)
-        self.assertFalse(holed["diagnostic_ok"])
-        self.assertFalse(holed["complete"])
+
+    def test_a_cap_keeps_a_never_written_attempt(self):
+        previous = memecoin_desk.CUT_MEASURED_CAP
+        memecoin_desk.CUT_MEASURED_CAP = 2
+        self.addCleanup(lambda: setattr(memecoin_desk, "CUT_MEASURED_CAP", previous))
+
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        self._kill_measured(_mint(143), NOW)
+        self._kill_measured(_mint(144), NOW + 1)
+        memecoin_desk._CUT_WRITER = explode
+        missed = _mint(140)
+        self._kill_measured(missed, NOW + 2, "market_cap")
+        memecoin_desk._CUT_WRITER = None
+        self._kill_measured(_mint(141), NOW + 3)
+        self._kill_measured(_mint(142), NOW + 4)
+        report = memecoin_desk.cut_report()
+        oldest = db.query("SELECT MIN(observed_at) AS n FROM memecoin_cuts")[0]["n"]
+        started = db.query("SELECT started_at FROM memecoin_cut_attempts")[0]["started_at"]
+        self.assertLess(started, oldest)
+        self.assertEqual(report["measured_events"], 2)
+        self.assertEqual(report["known_gaps"], 1)
+        self.assertEqual(report["cut_write_failures"], 1)
+        self.assertTrue(report["truncated"])
+        self.assertFalse(report["diagnostic_ok"])
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["capture_proven"])
+        db.execute(
+            """
+            INSERT INTO memecoin_cut_attempts (attempt_id, started_at, mint, rule, state, measured)
+            VALUES ('reinserted-gap', ?, ?, 'market_cap', 'open', 1)
+            """,
+            (NOW + 2, missed),
+        )
+        again = memecoin_desk.cut_report()
+        self.assertEqual(again["known_gaps"], 2)
+        self.assertEqual(again["cut_write_failures"], 2)
+        self.assertFalse(again["diagnostic_ok"])
+        self.assertFalse(again["complete"])
 
     def test_historical_logs_outside_the_horizon_are_not_gaps(self):
         memecoin_desk._ensure()
@@ -636,8 +672,12 @@ class CutLogTests(unittest.TestCase):
         kept = _mint(64)
         lost = _mint(65)
         self._kill_measured(kept, NOW, "age")
-        lost_cut = self._kill_measured(lost, NOW + 10, "market_cap")
-        db.execute("DELETE FROM memecoin_cuts WHERE cut_id = ?", (lost_cut["cut_id"],))
+
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        memecoin_desk._CUT_WRITER = explode
+        self._kill_measured(lost, NOW + 10, "market_cap")
         report = memecoin_desk.cut_report()
         self.assertEqual(report["measured_events"], 1)
         self.assertEqual([row["mint"] for row in db.query("SELECT mint FROM memecoin_cuts")], [kept])
@@ -659,10 +699,7 @@ class CutLogTests(unittest.TestCase):
         cut = self._cut(mint, NOW, True, "market_cap")
         memecoin_desk._kill(None, mint, "scout", "market_cap", "dexscreener", cut)
         self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 0)
-        self.assertEqual(
-            db.query("SELECT cut_id FROM memecoin_cut_expected")[0]["cut_id"],
-            cut["cut_id"],
-        )
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (mint,))[0]["n"], 1)
         self.assertEqual(
             db.query("SELECT attempt_id FROM memecoin_cut_attempts")[0]["attempt_id"],
             cut["cut_id"],
@@ -673,3 +710,149 @@ class CutLogTests(unittest.TestCase):
         self.assertFalse(report["diagnostic_ok"])
         self.assertFalse(report["complete"])
         self.assertFalse(report["capture_proven"])
+
+    def _abort_telemetry(self, table: str, event: str):
+        memecoin_desk._ensure()
+        if table == "memecoin_cut_expected":
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS memecoin_cut_expected (cut_id TEXT PRIMARY KEY, observed_at REAL NOT NULL)"
+            )
+        name = "cut_abort_%s_%s" % (event.lower(), table)
+        db.execute("DROP TRIGGER IF EXISTS " + name)
+        db.execute(
+            "CREATE TRIGGER %s BEFORE %s ON %s BEGIN SELECT RAISE(ABORT, 'telemetry'); END" % (name, event, table)
+        )
+        drop = lambda name=name: db.execute("DROP TRIGGER IF EXISTS " + name)
+        self.addCleanup(drop)
+        return drop
+
+    def _discovery(self, left: str, right: str):
+        def discovery(request):
+            url = str(request.get("url") or "")
+            if url.endswith("/token-boosts/latest/v1"):
+                return {"status": 200, "body": [
+                    {"chainId": "solana", "tokenAddress": left},
+                    {"chainId": "solana", "tokenAddress": right},
+                ]}
+            mint = url.rsplit("/", 1)[-1]
+            return {"status": 200, "body": [{
+                "chainId": "solana", "pairAddress": "pool-" + mint[:8],
+                "baseToken": {"address": mint}, "quoteToken": {"address": solana_tx.NATIVE_MINT},
+                "liquidity": {"usd": 10}, "priceUsd": "1", "priceChange": {"h1": 1},
+                "pairCreatedAt": int((NOW - 3600) * 1000),
+            }]}
+
+        return discovery
+
+    def test_telemetry_inserts_cannot_roll_back_a_decision_or_halt_discovery(self):
+        for table in (
+            "memecoin_cut_expected",
+            "memecoin_cut_attempts",
+            "memecoin_cuts",
+            "memecoin_cut_repeats",
+            "memecoin_cut_health",
+        ):
+            self._abort_telemetry(table, "INSERT")
+        opened = memecoin_desk.scout(_pair(_mint(120)), now=NOW)
+        self.assertTrue(opened["ok"], opened)
+        refused = memecoin_desk.filter_case(opened["case_id"], {"source": "dexscreener"}, now=NOW)
+        self.assertEqual(refused["reason"], "onchain_source")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+        self.assertGreaterEqual(
+            db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE case_id = ?", (opened["case_id"],))[0]["n"],
+            1,
+        )
+        floor = _mint(121)
+        cross_source.note_dex(floor, liquidityUsd="1000")
+        killed = memecoin_desk.scout(_pair(floor, market_cap_usd="299999"), now=NOW)
+        self.assertEqual(killed["reason"], "market_cap")
+        self.assertIsNone(memecoin_desk.view(floor))
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (floor,))[0]["n"], 1)
+        left, right = _mint(122), _mint(123)
+        found = desk_loop.run_discovery(self._discovery(left, right), NOW)
+        self.assertEqual(
+            {item.get("mint"): item.get("reason") for item in found["kills"] if item.get("mint")},
+            {left: "market_cap_missing", right: "market_cap_missing"},
+        )
+        supervised = desk_loop.run_supervised(self._discovery(left, right), NOW, rounds=1)
+        self.assertTrue(supervised["ok"], supervised)
+        self.assertEqual(supervised["faults"], 0)
+        self.assertNotEqual(supervised.get("reason"), "discovery_fault")
+        self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")
+        self.assertFalse(memecoin_desk.cut_report()["complete"])
+        self.assertFalse(memecoin_desk.cut_report()["capture_proven"])
+
+    def test_each_telemetry_write_fails_without_changing_the_decision(self):
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        drop = self._abort_telemetry("memecoin_cut_attempts", "INSERT")
+        opened = memecoin_desk.scout(_pair(_mint(150)), now=NOW)
+        refused = memecoin_desk.filter_case(opened["case_id"], {"source": "dexscreener"}, now=NOW)
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+        self.assertEqual(refused["reason"], "onchain_source")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts")[0]["n"], 0)
+        self.assertTrue(memecoin_desk.cut_report()["coverage_uncertain"])
+        drop()
+
+        drop = self._abort_telemetry("memecoin_cuts", "INSERT")
+        self._kill_measured(_mint(151), NOW, "age")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (_mint(151),))[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 0)
+        self.assertEqual(memecoin_desk.cut_report()["known_gaps"], 1)
+        drop()
+
+        drop = self._abort_telemetry("memecoin_cut_repeats", "INSERT")
+        self.assertFalse(memecoin_desk.persist_cut(self._cut(_mint(152), NOW, False, "reeval_cooldown")))
+        db.execute("UPDATE memecoin_cases SET updated_at = ? WHERE id = ?", (NOW, opened["case_id"]))
+        cooled = desk_loop.run_once(_mint(150), lambda _request: (_ for _ in ()).throw(AssertionError("refetch")), NOW + 10)
+        self.assertEqual(cooled["reason"], "reeval_cooldown")
+        self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
+        self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")
+        drop()
+
+        previous = memecoin_desk.CUT_MEASURED_CAP
+        memecoin_desk.CUT_MEASURED_CAP = 1
+        self.addCleanup(lambda: setattr(memecoin_desk, "CUT_MEASURED_CAP", previous))
+        self._kill_measured(_mint(153), NOW, "age")
+        drop = self._abort_telemetry("memecoin_cut_health", "INSERT")
+        self._kill_measured(_mint(154), NOW + 1, "market_cap")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (_mint(154),))[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts")[0]["n"], 1)
+        self.assertGreaterEqual(memecoin_desk.cut_report()["known_gaps"], 1)
+        drop()
+        memecoin_desk.CUT_MEASURED_CAP = previous
+
+        memecoin_desk._CUT_WRITER = explode
+        drop = self._abort_telemetry("memecoin_cut_attempts", "UPDATE")
+        self._kill_measured(_mint(155), NOW + 2, "market_cap")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (_mint(155),))[0]["n"], 1)
+        self.assertEqual(
+            db.query("SELECT state FROM memecoin_cut_attempts WHERE mint = ?", (_mint(155),))[0]["state"],
+            "open",
+        )
+        drop()
+        memecoin_desk._CUT_WRITER = None
+
+        drop = self._abort_telemetry("memecoin_cut_attempts", "DELETE")
+        self._kill_measured(_mint(156), NOW + 3, "age")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (_mint(156),))[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts WHERE mint = ?", (_mint(156),))[0]["n"], 0)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_attempts WHERE mint = ?", (_mint(156),))[0]["n"], 1)
+        drop()
+
+        self._kill_measured(_mint(157), NOW, "age")
+        drop = self._abort_telemetry("memecoin_cuts", "DELETE")
+        self._kill_measured(_mint(158), NOW + memecoin_desk.CUT_HORIZON_S + 5, "age")
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_log WHERE mint = ?", (_mint(158),))[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts WHERE mint = ?", (_mint(157),))[0]["n"], 1)
+        self.assertEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cuts WHERE mint = ?", (_mint(158),))[0]["n"], 0)
+        drop()
+
+        self.assertTrue(memecoin_desk.persist_cut(self._cut(_mint(159), NOW, False, "reeval_cooldown")))
+        drop = self._abort_telemetry("memecoin_cut_repeats", "DELETE")
+        self.assertFalse(memecoin_desk.persist_cut(self._cut(_mint(159), NOW + memecoin_desk.CUT_HORIZON_S + 5, False, "reeval_cooldown")))
+        self.assertGreaterEqual(db.query("SELECT COUNT(*) AS n FROM memecoin_cut_repeats")[0]["n"], 1)
+        drop()
+        self.assertFalse(memecoin_desk.cut_report()["complete"])
+        self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")
