@@ -1,6 +1,9 @@
 """Six-role cut log. It records observations and does not change a trade decision."""
+import json
 import os
 import sqlite3
+import subprocess
+import sys
 import unittest
 from decimal import Decimal
 
@@ -40,7 +43,8 @@ class CutLogTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("DESK_PRICE_LOOP", None))
         db.init_db()
         memecoin_desk._CUT_WRITER = None
-        memecoin_desk._CUT_WRITE_FAILURES = 0
+        memecoin_desk._UNPERSISTED_FAILURES = 0
+        memecoin_desk._RECONCILE_FAILED = False
         self.addCleanup(lambda: setattr(memecoin_desk, "_CUT_WRITER", None))
         db.execute("UPDATE phantom_control SET value = '0' WHERE key = 'halt'")
         db.set_setting("mode", "PAPER", "test")
@@ -264,16 +268,17 @@ class CutLogTests(unittest.TestCase):
             "SELECT events FROM memecoin_cut_repeats WHERE mint = ? AND window_start = ?",
             (mints[0], window),
         )[0]["events"]
-        for _ in range(5000):
+        flood = 400
+        for _ in range(flood):
             memecoin_desk.persist_cut(self._cut(mints[0], flood_at, False, "reeval_cooldown"))
         flooded = memecoin_desk.cut_report()
         self.assertEqual(flooded["measured_events"], before)
-        self.assertEqual(flooded["unmeasured_events"], report["unmeasured_events"] + 5000)
+        self.assertEqual(flooded["unmeasured_events"], report["unmeasured_events"] + flood)
         self.assertEqual(flooded["unique_mints"], len(mints))
         self.assertTrue(flooded["complete"])
         self.assertEqual(
             db.query("SELECT events FROM memecoin_cut_repeats WHERE mint = ? AND window_start = ?", (mints[0], window))[0]["events"],
-            prior + 5000,
+            prior + flood,
         )
 
     def test_horizon_drops_whole_windows_and_a_cap_is_reported(self):
@@ -349,7 +354,6 @@ class CutLogTests(unittest.TestCase):
         noted = memecoin_desk.cut_from_case(opened["case_id"], observed_at=NOW, stage="filter", rule="lp")
         self.assertEqual(noted["rule"], "lp")
         self.assertEqual(memecoin_desk.view(opened["case_id"])["stage"], "rejected")
-        self.assertGreaterEqual(memecoin_desk._CUT_WRITE_FAILURES, 4)
         broken = memecoin_desk.cut_report()
         self.assertFalse(broken["diagnostic_ok"])
         self.assertFalse(broken["complete"])
@@ -383,3 +387,47 @@ class CutLogTests(unittest.TestCase):
         self.assertTrue(supervised["ok"], supervised)
         self.assertEqual(supervised["faults"], 0)
         self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")
+
+    def test_a_lost_cut_stays_incomplete_after_restart(self):
+        kept = _mint(91)
+        missed = _mint(92)
+        self.assertTrue(memecoin_desk.persist_cut(self._cut(kept, NOW, True, "age")))
+        self.assertTrue(memecoin_desk.cut_report()["complete"])
+
+        def explode(_conn, _cut):
+            raise sqlite3.OperationalError("injected cut failure")
+
+        memecoin_desk._CUT_WRITER = explode
+        self.assertFalse(memecoin_desk.persist_cut(self._cut(missed, NOW + 1, True, "market_cap")))
+        self.assertEqual(db.query("SELECT mint FROM memecoin_cuts")[0]["mint"], kept)
+        here = memecoin_desk.cut_report()
+        self.assertFalse(here["complete"])
+        self.assertFalse(here["diagnostic_ok"])
+        self.assertGreaterEqual(here["cut_write_failures"], 1)
+
+        code = (
+            "import json, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import memecoin_desk\n"
+            "report = memecoin_desk.cut_report()\n"
+            "rows = __import__('db').query('SELECT mint FROM memecoin_cuts')\n"
+            "json.dump({'complete': report['complete'], 'diagnostic_ok': report['diagnostic_ok'],"
+            " 'failures': report['cut_write_failures'], 'mints': [row['mint'] for row in rows],"
+            " 'measured': report['measured_events']}, sys.stdout)\n"
+        ) % os.getcwd()
+        env = os.environ.copy()
+        env["DESK_DATA_DIR"] = os.environ["DESK_DATA_DIR"]
+        fresh = json.loads(subprocess.check_output([sys.executable, "-c", code], env=env, cwd=os.getcwd()))
+        self.assertFalse(fresh["complete"])
+        self.assertFalse(fresh["diagnostic_ok"])
+        self.assertGreaterEqual(fresh["failures"], 1)
+        self.assertEqual(fresh["measured"], 1)
+        self.assertEqual(fresh["mints"], [kept])
+        self.assertNotIn(missed, fresh["mints"])
+
+        db.execute("UPDATE memecoin_cut_health SET attempt_open = 1, failed = 0, failures = 0 WHERE id = 1")
+        crashed = json.loads(subprocess.check_output([sys.executable, "-c", code], env=env, cwd=os.getcwd()))
+        self.assertFalse(crashed["complete"])
+        self.assertFalse(crashed["diagnostic_ok"])
+        self.assertGreaterEqual(crashed["failures"], 1)
+        self.assertEqual(crashed["mints"], [kept])

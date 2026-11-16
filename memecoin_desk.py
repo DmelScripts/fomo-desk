@@ -1854,8 +1854,9 @@ def confirm_deposit_refund(case_id: str, signature: str, now: float | None = Non
 
 
 def _refund_duplicate(signature: str) -> dict | None:
-    _ensure()
+    reconcile_cut_coverage()
     try:
+        _ensure()
         rows = db.query("SELECT case_id, network_fee_lamports, fee_usd, released FROM memecoin_refunds WHERE signature = ?", (signature,))
     except Exception:
         return None
@@ -2467,20 +2468,121 @@ def make_cut(
     }
 
 
-_CUT_WRITE_FAILURES = 0
-# Tests set this to a callable(conn, cut) that runs inside the cut transaction.
+# In-process only. A durable loss is memecoin_cut_health.failures.
+# _UNPERSISTED_FAILURES counts a loss whose marker itself could not be saved.
 _CUT_WRITER = None
+_UNPERSISTED_FAILURES = 0
+_RECONCILE_FAILED = False
+
+
+def _mark_unpersisted() -> None:
+    global _UNPERSISTED_FAILURES
+    _UNPERSISTED_FAILURES += 1
 
 
 def note_cut_failure() -> None:
-    """A cut write failed. The trading decision is already committed."""
-    global _CUT_WRITE_FAILURES
-    _CUT_WRITE_FAILURES += 1
+    """A cut write failed outside record_cut_safely. The decision is already committed."""
+    if not _seal_cut_failure():
+        _mark_unpersisted()
 
 
 def _cut_window_start(observed_at: float) -> int:
     window = REEVAL_COOLDOWN_S
     return int(float(observed_at) // window) * window
+
+
+def _ensure_cut_health(conn) -> None:
+    conn.execute(
+        """
+        INSERT INTO memecoin_cut_health (
+            id, measured_truncated, repeat_truncated, truncation_reason, attempt_open, failed, failures
+        ) VALUES (1, 0, 0, NULL, 0, 0, 0)
+        ON CONFLICT(id) DO NOTHING
+        """
+    )
+
+
+def _seal_cut_failure() -> bool:
+    """Remember a lost cut. This transaction is not the rejection."""
+    try:
+        def work(conn):
+            _ensure_conn(conn)
+            _ensure_cut_health(conn)
+            conn.execute(
+                """
+                UPDATE memecoin_cut_health
+                SET failed = 1, failures = failures + 1, attempt_open = 0
+                WHERE id = 1
+                """
+            )
+
+        db.exclusive(work)
+        return True
+    except Exception:
+        return False
+
+
+def reconcile_cut_coverage() -> bool:
+    """An open attempt means the last process stopped before the cut was sealed.
+
+    That includes a crash after the attempt row committed and before the cut did.
+    A crash before the attempt row exists cannot be seen later; this process will
+    not call the sample complete when that marker write itself fails.
+    """
+    global _RECONCILE_FAILED
+    try:
+        def work(conn):
+            _ensure_conn(conn)
+            _ensure_cut_health(conn)
+            row = conn.execute("SELECT attempt_open FROM memecoin_cut_health WHERE id = 1").fetchone()
+            if row is not None and row["attempt_open"] == 1:
+                conn.execute(
+                    """
+                    UPDATE memecoin_cut_health
+                    SET failed = 1, failures = failures + 1, attempt_open = 0,
+                        truncation_reason = CASE
+                            WHEN truncation_reason IS NULL OR truncation_reason = '' THEN 'abandoned_attempt'
+                            WHEN instr(truncation_reason, 'abandoned_attempt') > 0 THEN truncation_reason
+                            ELSE truncation_reason || ',abandoned_attempt'
+                        END
+                    WHERE id = 1 AND attempt_open = 1
+                    """
+                )
+
+        db.exclusive(work)
+        _RECONCILE_FAILED = False
+        return True
+    except Exception:
+        _RECONCILE_FAILED = True
+        return False
+
+
+def _open_cut_attempt() -> bool:
+    try:
+        def work(conn):
+            _ensure_conn(conn)
+            _ensure_cut_health(conn)
+            conn.execute("UPDATE memecoin_cut_health SET attempt_open = 1 WHERE id = 1")
+
+        db.exclusive(work)
+        return True
+    except Exception:
+        if not _seal_cut_failure():
+            _mark_unpersisted()
+        return False
+
+
+def _close_cut_attempt() -> bool:
+    try:
+        def work(conn):
+            _ensure_conn(conn)
+            conn.execute("UPDATE memecoin_cut_health SET attempt_open = 0 WHERE id = 1")
+
+        db.exclusive(work)
+        return True
+    except Exception:
+        _mark_unpersisted()
+        return False
 
 
 def _mark_cut_truncation(conn, reason: str) -> None:
@@ -2563,9 +2665,16 @@ def _insert_cut(conn, cut: dict) -> None:
 
 
 def record_cut_safely(cut: dict) -> bool:
-    """Store a cut after the decision has committed. A write failure does not escape."""
-    global _CUT_WRITE_FAILURES
+    """Store a cut after the decision has committed. A write failure does not escape.
+
+    The attempt flag is committed before the insert. A failed insert seals
+    failures on the health row. If that seal cannot be written, the open
+    attempt remains for the next process, and this process stays uncertain.
+    """
     if not isinstance(cut, dict) or cut.get("observed_at") is None or cut.get("pipeline") != CUT_PIPELINE:
+        return False
+    reconcile_cut_coverage()
+    if not _open_cut_attempt():
         return False
     try:
         def work(conn):
@@ -2574,11 +2683,13 @@ def record_cut_safely(cut: dict) -> bool:
             if callable(writer):
                 writer(conn, cut)
             _insert_cut(conn, cut)
+            conn.execute("UPDATE memecoin_cut_health SET attempt_open = 0 WHERE id = 1")
 
         db.exclusive(work)
         return True
     except Exception:
-        _CUT_WRITE_FAILURES += 1
+        if not _seal_cut_failure():
+            _mark_unpersisted()
         return False
 
 
@@ -2666,16 +2777,18 @@ def cut_report(limit: int = 50) -> dict:
         "limit": limit,
         "covers_from": None,
         "covers_through": None,
-        "complete": _CUT_WRITE_FAILURES == 0,
+        "complete": False,
         "truncated": False,
         "truncation_reason": None,
-        "diagnostic_ok": _CUT_WRITE_FAILURES == 0,
-        "cut_write_failures": _CUT_WRITE_FAILURES,
+        "diagnostic_ok": False,
+        "cut_write_failures": _UNPERSISTED_FAILURES,
+        "coverage_uncertain": _UNPERSISTED_FAILURES > 0 or _RECONCILE_FAILED,
         "read_failed": False,
         "send": False,
         "sign": False,
         "live_ready": False,
     }
+    reconcile_cut_coverage()
     try:
         _ensure()
         measured = db.query(
@@ -2768,7 +2881,10 @@ def cut_report(limit: int = 50) -> dict:
             (CUT_PIPELINE, limit),
         )
         health_rows = db.query(
-            "SELECT measured_truncated, repeat_truncated, truncation_reason FROM memecoin_cut_health WHERE id = 1"
+            """
+            SELECT measured_truncated, repeat_truncated, truncation_reason, attempt_open, failed, failures
+            FROM memecoin_cut_health WHERE id = 1
+            """
         )
     except Exception:
         return base | {"complete": False, "diagnostic_ok": False, "read_failed": True}
@@ -2777,7 +2893,14 @@ def cut_report(limit: int = 50) -> dict:
     health = health_rows[0] if health_rows else None
     truncated = health is not None and (health["measured_truncated"] == 1 or health["repeat_truncated"] == 1)
     reason = None if health is None else health["truncation_reason"]
-    failures = _CUT_WRITE_FAILURES
+    db_failures = int(health["failures"] or 0) if health is not None else 0
+    coverage_failed = health is not None and (health["failed"] == 1 or health["attempt_open"] == 1)
+    if health is None and (measured_events or unmeasured_events):
+        coverage_failed = True
+    uncertain = _UNPERSISTED_FAILURES > 0 or _RECONCILE_FAILED or coverage_failed
+    failures = db_failures + _UNPERSISTED_FAILURES
+    if uncertain and failures == 0:
+        failures = 1
     covers = [item for item in (measured["oldest"], repeats["oldest"]) if item is not None]
     through = [item for item in (measured["newest"], None if repeats["newest"] is None else repeats["newest"] + window) if item is not None]
     rules = {}
@@ -2847,11 +2970,12 @@ def cut_report(limit: int = 50) -> dict:
         "rows": rows,
         "covers_from": None if not covers else min(covers),
         "covers_through": None if not through else max(through),
-        "complete": (not truncated) and failures == 0,
+        "complete": (not truncated) and not uncertain,
         "truncated": truncated,
         "truncation_reason": reason,
-        "diagnostic_ok": failures == 0,
+        "diagnostic_ok": not uncertain,
         "cut_write_failures": failures,
+        "coverage_uncertain": uncertain,
         "rows_limited": measured_events > len(rows),
     }
 
@@ -3899,10 +4023,22 @@ def _ensure_conn(conn) -> None:
             id INTEGER PRIMARY KEY CHECK (id = 1),
             measured_truncated INTEGER NOT NULL,
             repeat_truncated INTEGER NOT NULL,
-            truncation_reason TEXT
+            truncation_reason TEXT,
+            attempt_open INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0,
+            failures INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    for statement in (
+        "ALTER TABLE memecoin_cut_health ADD COLUMN attempt_open INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE memecoin_cut_health ADD COLUMN failed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE memecoin_cut_health ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(statement)
+        except Exception:
+            pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memecoin_reservations (
