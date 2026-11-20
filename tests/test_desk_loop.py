@@ -104,7 +104,9 @@ class DeskLoopTests(unittest.TestCase):
         cross_source.arm_test_fetcher()
         self.addCleanup(cross_source.clear_fetcher)
 
-    def test_a_missing_stalkchain_key_stops_the_handoff(self):
+    def test_a_scout_passed_mint_reaches_filter_without_stalkchain(self):
+        self.assertNotIn("STALKCHAIN_API_KEY", os.environ)
+
         def transport(request):
             if request["kind"] == "http":
                 return rugcheck_or_pair(request, _pair())
@@ -115,22 +117,18 @@ class DeskLoopTests(unittest.TestCase):
             return {"status": 200, "body": {"result": {"value": {"owner": solana_tx.TOKEN_PROGRAM, "data": [base64.b64encode(bytes(raw)).decode("ascii"), "base64"]}}}}
 
         result = desk_loop.run_once(MINT, transport, NOW)
-        self.assertEqual(result["reason"], "stalkchain_credentials_missing")
-        self.assertEqual(result["stage"], "scout_passed")
-        self.assertEqual(result["capability"]["transport"], "unconfigured")
-        self.assertEqual(result["capability"]["lp"], "unproven")
-        self.assertEqual(result["capability"]["score"], "unapproved")
-        self.assertEqual(result["capability"]["analyst_formula"], "approved")
-        self.assertFalse(result["stalkchain"]["called"])
-        self.assertIn("dev_rugs", result["stalkchain"]["unproven"])
-        self.assertIn("holder_growth", result["stalkchain"]["unproven"])
-        self.assertIn("lp_lock_expiry", result["stalkchain"]["unproven"])
+        self.assertEqual(result["reason"], "dev_rug_history_unverified")
+        self.assertNotEqual(result["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(result["stage"], "rejected")
+        self.assertNotIn("stalkchain", result)
+        self.assertEqual(memecoin_desk.view(result["case_id"])["stage"], "rejected")
+        logged = memecoin_desk.log_for(result["case_id"])
+        self.assertIn(("filter", "dev_rug_history_unverified"), [(item["stage"], item["reason"]) for item in logged])
         self.assertFalse(result["score_measured"])
         self.assertFalse(result["armed"])
         self.assertFalse(result["live_ready"])
         self.assertFalse(result["usd_live"])
         self.assertEqual(usdc_valuation.keyless_catalog_is_not_a_price()["reason"], "metadata_not_a_price")
-        self.assertTrue(memecoin_desk.log_for(result["case_id"]))
 
     def test_bundle_percent_missing_buys_has_no_inclusive_percent(self):
         import json
@@ -353,8 +351,8 @@ class DeskLoopTests(unittest.TestCase):
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(found["candidates"], 1)
         self.assertEqual(found["kills"][0]["mint"], MINT)
-        self.assertEqual(found["kills"][0]["reason"], "stalkchain_credentials_missing")
-        self.assertEqual(found["kills"][0]["capability"]["transport"], "unconfigured")
+        self.assertEqual(found["kills"][0]["reason"], "dev_rug_history_unverified")
+        self.assertNotEqual(found["kills"][0]["reason"], "stalkchain_credentials_missing")
         self.assertEqual(found["kills"][0]["source"], "dexscreener")
         self.assertFalse(found["caller_named_mint"])
         self.assertFalse(found["armed"])
@@ -365,6 +363,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(refused["reason"], "holder_count_source_unpublished")
         self.assertEqual(desk_loop.holder_growth(MINT)["reason"], "holder_growth_unproven")
         bare = [{key: value for key, value in _pair()[0].items() if key != "marketCap"}]
+        db.execute("UPDATE memecoin_cases SET updated_at = ? WHERE mint = ?", (NOW, MINT))
         cooling = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW)
         self.assertEqual(cooling["reason"], "reeval_cooldown")
         missing = desk_loop.run_once(MINT, lambda request: {"status": 200, "body": bare}, NOW + memecoin_desk.REEVAL_COOLDOWN_S)
@@ -397,30 +396,16 @@ class DeskLoopTests(unittest.TestCase):
             return rugcheck_or_pair(request, _pair())
 
         found = desk_loop.run_discovery(transport, NOW)
-        self.assertEqual(len(calls), 4)
-        self.assertEqual({item[1]["token"] for item in calls}, {MINT})
-        self.assertTrue(all(item[0].startswith("https://data.stalkchain.com/api/v1/tools/") for item in calls))
+        self.assertEqual(calls, [])
         kill = next(item for item in found["kills"] if item.get("mint") == MINT)
-        self.assertEqual(kill["reason"], "response_fields_unpublished")
-        self.assertEqual(kill["stage"], "scout_passed")
-        self.assertEqual(kill["capability"]["transport"], "ready")
-        self.assertEqual(kill["capability"]["request_schema"], "documented")
-        self.assertFalse(kill["capability"]["response_verified"])
-        self.assertEqual(kill["capability"]["freshness"], "unobserved")
-        self.assertEqual(kill["capability"]["lp"], "unproven")
-        self.assertEqual(kill["capability"]["rugs"], "unproven")
-        self.assertEqual(kill["capability"]["growth"], "unproven")
-        self.assertEqual(kill["capability"]["score"], "unapproved")
+        self.assertEqual(kill["reason"], "dev_rug_history_unverified")
+        self.assertEqual(kill["stage"], "rejected")
+        self.assertNotEqual(kill["reason"], "response_fields_unpublished")
+        self.assertIsNone(kill.get("stalkchain"))
         self.assertFalse(kill["score_measured"])
         self.assertFalse(kill["fixture_is_mainnet_proof"])
         self.assertFalse(found["armed"])
         self.assertFalse(found["score_measured"])
-        fields = {item["field"]: item for item in kill["source_fields"]}
-        for name in ("lp_burned_or_locked", "dev_rugs", "bundled_launch_pct", "holder_growth", "analyst_score"):
-            self.assertFalse(fields[name]["proven"], name)
-            self.assertIsNone(fields[name]["json_path"], name)
-            self.assertEqual(fields[name]["status"], "observation_required")
-            self.assertIn("nov8-observed-mcp-field-mapping.json", fields[name]["observation_files"])
         self.assertNotIn("sc_fixture_not_a_real_key", __import__("json").dumps(found))
         formula = memecoin_desk.analyst_decision()
         self.assertTrue(formula["owner_approved"])
@@ -512,8 +497,9 @@ class DeskLoopTests(unittest.TestCase):
             desk_loop.public_reader({"method": "POST", "url": stalkchain_adapter.URL + "stalkchain_token_onchain", "json": {"token": MINT}})
         quiet = desk_loop.run_discovery(desk_loop.public_reader, NOW)
         self.assertEqual(posts, [])
-        self.assertEqual(quiet["kills"][0]["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(quiet["kills"][0]["reason"], "dev_rug_history_unverified")
         self.assertNotEqual(quiet["kills"][0]["reason"], "lp")
+        self.assertNotEqual(quiet["kills"][0]["reason"], "stalkchain_credentials_missing")
         os.environ["STALKCHAIN_API_KEY"] = "sc_dummy_not_real"
         other = solana_tx.b58encode(b"\x47" * 32)
         global_pair = _pair()
@@ -539,19 +525,13 @@ class DeskLoopTests(unittest.TestCase):
             raise AssertionError(url.split("/")[2].split("?")[0])
         urllib.request.urlopen = urlopen
         found = desk_loop.run_discovery(desk_loop.public_reader, NOW)
-        self.assertEqual(len(posts), 4)
-        self.assertEqual([item.full_url for item in posts], [stalkchain_adapter.URL + name for name in stalkchain_adapter.TOOLS])
-        self.assertTrue(all(item.get_method() == "POST" for item in posts))
-        self.assertTrue(all(json.loads(item.data.decode()) == {"token": other} for item in posts))
-        self.assertTrue(all(item.get_header("Authorization") == "Bearer sc_dummy_not_real" for item in posts))
+        self.assertEqual(posts, [])
         self.assertNotIn("sc_dummy_not_real", json.dumps(found))
         kill = found["kills"][0]
-        self.assertEqual(kill["reason"], "response_fields_unpublished")
+        self.assertEqual(kill["reason"], "dev_rug_history_unverified")
         self.assertNotEqual(kill["reason"], "lp")
-        self.assertFalse(kill["capability"]["response_verified"])
-        self.assertEqual(kill["capability"]["analyst_formula"], "approved")
-        self.assertIn("lpBurnedPercent", kill["stalkchain"]["unmapped_keys"])
-        self.assertFalse(kill["stalkchain"]["fdv_used_as_market_cap"])
+        self.assertNotEqual(kill["reason"], "response_fields_unpublished")
+        self.assertIsNone(kill.get("stalkchain"))
         posts.clear()
         credit["block"] = True
         limited = stalkchain_adapter.read_mint(other, desk_loop.public_reader)
@@ -734,9 +714,9 @@ class DeskLoopTests(unittest.TestCase):
 
         found = desk_loop.run_discovery(transport, NOW)
         kill = next(item for item in found["kills"] if item.get("mint") == mint)
-        self.assertEqual(kill["reason"], "stalkchain_credentials_missing")
-        self.assertEqual(kill["stage"], "scout_passed")
-        self.assertEqual(kill["capability"]["transport"], "unconfigured")
+        self.assertEqual(kill["reason"], "dev_rug_history_unverified")
+        self.assertEqual(kill["stage"], "rejected")
+        self.assertNotEqual(kill["reason"], "stalkchain_credentials_missing")
         self.assertFalse(kill["score_measured"])
         self.assertFalse(kill["fixture_is_mainnet_proof"])
         self.assertFalse(found["armed"])
@@ -774,7 +754,7 @@ class DeskLoopTests(unittest.TestCase):
 
         found = desk_loop.run_discovery(transport, NOW)
         self.assertEqual(found["candidates"], 2)
-        self.assertEqual({item.get("reason") for item in found["kills"] if item.get("mint")}, {"stalkchain_credentials_missing"})
+        self.assertEqual({item.get("reason") for item in found["kills"] if item.get("mint")}, {"dev_rug_history_unverified"})
         self.assertIn("not_solana", {item.get("reason") for item in found["kills"]})
         status = desk_loop.scheduler_status()
         self.assertFalse(status["authorized"])
@@ -1023,7 +1003,7 @@ class DeskLoopTests(unittest.TestCase):
         self.assertEqual(memecoin_desk.view(swap_mint)["stage"], "rejected")
         found = found["discovery"]
         unknown = next(item for item in found["kills"] if item.get("mint") == other)
-        self.assertEqual(unknown["reason"], "stalkchain_credentials_missing")
+        self.assertEqual(unknown["reason"], "dev_rug_history_unverified")
         self.assertFalse(unknown["jupiter_called"])
         self.assertFalse(unknown["quote"]["score_measured"])
         self.assertNotEqual(db.get_setting("memecoin_entry_halt", ""), "1")

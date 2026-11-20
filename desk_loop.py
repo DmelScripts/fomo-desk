@@ -738,19 +738,11 @@ def run_once(mint: str, transport, now: float) -> dict:
         value = (rpc["body"].get("result") or {}).get("value") if isinstance(rpc["body"].get("result"), dict) else None
         if isinstance(value, dict):
             account = solana_mint_read.parse_account(value, mint)
-    coverage = stalkchain_adapter.read_mint(mint, transport)
     observed = _read_observed(transport, mint)
     onchain = {"source": solana_mint_read.SOURCE, "fetched_at": now}
     if account.get("ok") is True:
         onchain["mint_authority_revoked"] = account["mint_authority_revoked"]
         onchain["freeze_authority_revoked"] = account["freeze_authority_revoked"]
-    source_reason = coverage.get("reason")
-    source_blocks_lp = source_reason in {
-        "stalkchain_credentials_missing", "stalkchain_transport_missing", "stalkchain_transport",
-        "host_refused", "method_refused", "tool_refused", "body_refused", "redirect_refused",
-        "stalkchain_unauthorized", "stalkchain_credit_limit", "stalkchain_status",
-        "envelope", "mint_mismatch", "response_fields_unpublished",
-    }
     authorities_clear = account.get("ok") is True and account.get("mint_authority_revoked") is True and account.get("freeze_authority_revoked") is True
     if authorities_clear:
         locked = _fetch_lp_locked_pct(transport, mint)
@@ -764,27 +756,19 @@ def run_once(mint: str, transport, now: float) -> dict:
                 "cut": cut,
             }
         onchain["lpLockedPct"] = 100
-    if authorities_clear and source_blocks_lp:
-        reported = source_reason
-        stage = opened.get("stage")
+    filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
+    reported = filtered.get("reason") or "features_unpublished"
+    stage = filtered.get("stage")
+    cut = filtered.get("cut") if isinstance(filtered.get("cut"), dict) else None
+    if filtered.get("ok") is not True and filtered.get("stage") != "rejected":
         memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
-        cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage=stage if isinstance(stage, str) else "filter", rule=reported if isinstance(reported, str) else "filter")
-    else:
-        filtered = memecoin_desk.filter_case(opened["case_id"], onchain, now=now)
-        reported = filtered.get("reason") or "features_unpublished"
-        stage = filtered.get("stage")
-        cut = filtered.get("cut") if isinstance(filtered.get("cut"), dict) else None
-        if filtered.get("ok") is not True and filtered.get("stage") != "rejected":
-            memecoin_desk.close_terminal(opened["case_id"], reported if isinstance(reported, str) else "filter", "filter", now)
-            if cut is None:
-                cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage="filter", rule=reported if isinstance(reported, str) else "filter")
+        if cut is None:
+            cut = memecoin_desk.cut_from_case(opened["case_id"], observed_at=now, stage="filter", rule=reported if isinstance(reported, str) else "filter")
     blocked = {"attempted": False, "jupiter_called": False, "score_measured": False, "reason": reported, "send": False, "live_ready": False, "sources_are_live_mcp": False}
     return stopped | {
         "reason": reported,
-        "capability": coverage.get("capability"),
         "stage": stage,
         "case_id": opened["case_id"],
-        "stalkchain": coverage,
         "mint_account_ok": account.get("ok") is True,
         "quote": blocked,
         "jupiter_called": False,
@@ -795,7 +779,6 @@ def run_once(mint: str, transport, now: float) -> dict:
         "usd_live": False,
         "holder_growth": holder_growth(mint),
         "caller_named_mint": True,
-        "source_fields": coverage.get("fields"),
         "observed": observed,
         "fixture_is_mainnet_proof": False,
         "analyst": memecoin_desk.analyst_decision(),
